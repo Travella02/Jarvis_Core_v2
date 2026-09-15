@@ -1,0 +1,39 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / desktop build output
+node_modules/
+dist/
+build/
+coverage/
+
+# Patch workflow artifacts
+.patch_backups/
+patch_files/
+apply_*_patch.py
+*_patch.zip
+
+# Runtime/generated data
+*.log
+*.db
+*.sqlite
+*.sqlite3
+runtime/
+data/
+provider_cache/
+model_weights/
+browser_profiles/
+
+#notes
+commands.txt

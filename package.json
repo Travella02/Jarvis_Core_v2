@@ -1,0 +1,7 @@
+{
+  "name": "jarvis-core-v2",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Jarvis Core v2 desktop workspace. No Node runtime is implemented in 0.0.1.",
+  "scripts": {}
+}
