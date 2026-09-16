@@ -1,5 +1,14 @@
 """Provider-independent intelligence boundary."""
 
+from .benchmark import (
+    BenchmarkCase,
+    BenchmarkExpectation,
+    BenchmarkResult,
+    BenchmarkRun,
+    load_cases,
+    run_benchmark,
+    run_case,
+)
 from .contracts import (
     ContextLimits,
     IntelligenceContext,
@@ -14,6 +23,10 @@ from .contracts import (
 )
 
 __all__ = [
+    "BenchmarkCase",
+    "BenchmarkExpectation",
+    "BenchmarkResult",
+    "BenchmarkRun",
     "ContextLimits",
     "IntelligenceContext",
     "IntelligenceEvent",
@@ -24,4 +37,7 @@ __all__ = [
     "ProviderHealthState",
     "ProviderMetadata",
     "ReasoningPolicy",
+    "load_cases",
+    "run_benchmark",
+    "run_case",
 ]

@@ -1,0 +1,54 @@
+{
+  "version": "0.0.2",
+  "purpose": "Seed provider benchmark using a streaming smoke case plus a real V1 natural-phrasing regression. Context/referent/security scoring expands in later milestones.",
+  "cases": [
+    {
+      "id": "exact_text_stream",
+      "prompt": "Reply with exactly JARVIS_PROVIDER_OK and nothing else.",
+      "reasoning_level": "quick",
+      "expect": {"exact_text": "JARVIS_PROVIDER_OK"}
+    },
+    {
+      "id": "v1_natural_open_new_tab_phrase",
+      "prompt": "Can you open a new tab, please?",
+      "reasoning_level": "quick",
+      "tools": [
+        {
+          "name": "browser_open_new_tab",
+          "description": "Request opening a new browser tab. This benchmark only emits intent and never executes the action.",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "expect": {
+        "tool_name": "browser_open_new_tab",
+        "tool_arguments": {}
+      }
+    },
+    {
+      "id": "provider_tool_request",
+      "prompt": "Call jarvis_benchmark_probe exactly once with value='benchmark-tool-ok'. Do not claim it executed.",
+      "reasoning_level": "quick",
+      "tools": [
+        {
+          "name": "jarvis_benchmark_probe",
+          "description": "Development benchmark probe. Request it only when explicitly instructed.",
+          "input_schema": {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "expect": {
+        "tool_name": "jarvis_benchmark_probe",
+        "tool_arguments": {"value": "benchmark-tool-ok"}
+      }
+    }
+  ]
+}

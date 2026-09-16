@@ -16,6 +16,7 @@ from core.tools import ToolDefinition, ToolRequest
 
 class ProviderHealthState(str, Enum):
     HEALTHY = "healthy"
+    CONFIGURED = "configured"
     DEGRADED = "degraded"
     UNAVAILABLE = "unavailable"
     NOT_CONFIGURED = "not-configured"
@@ -81,6 +82,7 @@ class IntelligenceEventType(str, Enum):
     TEXT_DELTA = "text_delta"
     TOOL_REQUEST = "tool_request"
     COMPLETED = "completed"
+    CANCELLED = "cancelled"
     DEGRADED = "degraded"
     ERROR = "error"
 
@@ -91,6 +93,11 @@ class IntelligenceEvent:
     text_delta: str | None = None
     tool_request: ToolRequest | None = None
     detail: str | None = None
+    provider_response_id: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
 class IntelligenceProvider(ABC):

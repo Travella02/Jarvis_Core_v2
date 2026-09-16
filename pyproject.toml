@@ -1,9 +1,11 @@
 [project]
 name = "jarvis-core-v2"
-version = "0.0.1"
-description = "Jarvis Core v2 foundation contracts and diagnostics"
+version = "0.0.2"
+description = "Jarvis Core v2 provider-independent intelligence foundation"
 requires-python = ">=3.11,<4"
-dependencies = []
+dependencies = [
+    "openai==3.13.0",
+]
 
 [tool.jarvis]
-release_title = "Foundation"
+release_title = "Intelligence Provider"

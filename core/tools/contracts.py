@@ -55,6 +55,7 @@ class ToolRequest:
     tool_name: str
     operation: str
     arguments: Mapping[str, Any] = field(default_factory=dict)
+    provider_call_id: str | None = None
     idempotency_key: str | None = None
 
     def __post_init__(self) -> None:
@@ -74,6 +75,7 @@ class ToolResult:
     operation: str
     status: ToolResultStatus
     output: Mapping[str, Any] = field(default_factory=dict)
+    provider_call_id: str | None = None
     error_code: str | None = None
     error_message: str | None = None
 

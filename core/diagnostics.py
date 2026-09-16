@@ -1,7 +1,8 @@
-"""Local-only 0.0.1 diagnostic path.
+"""Local-only Jarvis Core v2 diagnostics.
 
 This module intentionally performs no network requests, provider calls, audio
-capture, subprocess execution, filesystem mutation, or tool execution.
+capture, subprocess execution, filesystem mutation, or tool execution. Live
+provider verification belongs to apps.intelligence_lab.
 """
 
 from __future__ import annotations
@@ -43,11 +44,12 @@ def collect_diagnostics() -> dict[str, Any]:
             ],
         },
         "providers": {
-            "intelligence": "not-configured",
+            "intelligence": "provider-layer-ready",
             "stt": "not-configured",
             "tts": "not-configured",
         },
-        "external_actions": "disabled-in-0.0.1-diagnostics",
+        "network_probe": "not-run",
+        "external_actions": "disabled-in-core-diagnostics",
         "status": "ok",
     }
 
@@ -56,7 +58,7 @@ def _format_text(data: dict[str, Any]) -> str:
     providers = data["providers"]
     return "\n".join(
         [
-            f"{data['project']} {data['version']} - Foundation diagnostics",
+            f"{data['project']} {data['version']} - Intelligence Provider diagnostics",
             f"Python: {data['python']}",
             "Contracts: intelligence=ready, tools=ready, voice=ready",
             (
@@ -64,6 +66,7 @@ def _format_text(data: dict[str, Any]) -> str:
                 f"intelligence={providers['intelligence']}, "
                 f"stt={providers['stt']}, tts={providers['tts']}"
             ),
+            f"Network probe: {data['network_probe']}",
             f"External actions: {data['external_actions']}",
             f"Status: {data['status']}",
         ]

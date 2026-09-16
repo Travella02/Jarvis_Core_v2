@@ -47,16 +47,23 @@ class FoundationStructureTests(unittest.TestCase):
             "pyproject.toml",
             ".env.example",
             ".gitignore",
+            "requirements.txt",
         ]
         missing = [item for item in required if not (ROOT / item).exists()]
         self.assertEqual(missing, [])
 
     def test_release_manifest_matches_candidate(self) -> None:
         manifest = json.loads((ROOT / "RELEASE_MANIFEST.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.0.1")
-        self.assertEqual(manifest["title"], "Foundation")
+        self.assertEqual(manifest["version"], "0.0.2")
+        self.assertEqual(manifest["title"], "Intelligence Provider")
         self.assertEqual(manifest["status"], "live_acceptance_candidate")
-        self.assertIsNone(manifest["required_previous_version"])
+        self.assertEqual(manifest["required_previous_version"], "0.0.1")
+
+    def test_openai_sdk_dependency_is_pinned_for_candidate(self) -> None:
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn("openai==3.13.0", requirements)
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('"openai==3.13.0"', pyproject)
 
 
 if __name__ == "__main__":
