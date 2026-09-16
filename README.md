@@ -4,46 +4,47 @@ Jarvis Core v2 is a clean rebuild of Jarvis with provider-independent intelligen
 
 ## Current milestone
 
-**0.0.2 - Intelligence Provider**
+**0.0.3 - Conversation Core**
 
-This milestone connects the first real cloud intelligence implementation: `OpenAIProvider` behind the provider-neutral `IntelligenceProvider` contract, with GPT-5.6 Luna as the development default. It adds streaming text, function/tool-request translation, cooperative cancellation, provider-local configuration, and a provider-neutral benchmark harness.
+This milestone introduces the first authoritative `ConversationContext`, deterministic referent resolution, a Core state machine/event bus, per-turn correlation + cancellation IDs, context snapshot/restore contracts, and a typed conversation path that routes through `IntelligenceProvider` while preserving shared transcript state across turns.
 
-It intentionally does **not** add the Conversation Core, voice runtime, permission engine, real tool execution, memory, UI, or stronger-model routing. Those remain later milestones.
+The V1 regression where **"resume it"** could resume YouTube instead of the currently discussed task is now represented as a deterministic behavioral benchmark: explicit wording wins first, then conversational focus; material ambiguity returns a clarification requirement instead of guessing.
+
+It intentionally does **not** add microphone/audio capture, VAD, STT/TTS runtime, tool execution, permissions, durable memory persistence, autonomous tasks, or desktop UI. Those remain later milestones.
 
 ## Requirements
 
 - Python 3.11+
 - Project-local `.venv` recommended
-- OpenAI Python SDK 3.13.0 (declared in `pyproject.toml`)
-- A development `OPENAI_API_KEY` for live provider tests only
-
-## Install/update dependencies
-
-```powershell
-python -m pip install -r requirements.txt
-```
+- OpenAI Python SDK 3.13.0
+- A local `OPENAI_API_KEY` only for live cloud conversation tests
 
 ## Local verification
 
 ```powershell
 python -m unittest discover -s tests -v
 python -m core.diagnostics
-python -m apps.intelligence_lab --status
+python -m apps.conversation_benchmark
+python -m apps.conversation_lab --context-demo
 ```
 
-`--status` performs no network request and never prints the API key.
+The benchmark/context demo use no network and perform no external actions.
 
-## Live provider probes
+## Live typed conversation
 
-After creating a local `.env` from `.env.example` and setting `OPENAI_API_KEY`:
+With the existing local `.env` configured:
 
 ```powershell
-python -m apps.intelligence_lab --prompt "Reply with exactly: Luna online."
-python -m apps.intelligence_lab --tool-probe
-python -m apps.intelligence_benchmark
+python -m apps.conversation_lab --turn "For this conversation, remember the test word bluejay." --turn "What test word did I ask you to remember? Reply with only the word." --reasoning quick
 ```
 
-The tool probe **does not execute a tool**. It verifies that a model/provider can emit a typed `ToolRequest` while authority remains outside the model.
+Or start the interactive development shell:
+
+```powershell
+python -m apps.conversation_lab
+```
+
+The typed lab shares one authoritative context across turns. It does not execute tools or OS/account actions.
 
 ## Canonical direction
 

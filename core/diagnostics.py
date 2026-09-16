@@ -2,7 +2,7 @@
 
 This module intentionally performs no network requests, provider calls, audio
 capture, subprocess execution, filesystem mutation, or tool execution. Live
-provider verification belongs to apps.intelligence_lab.
+provider/conversation verification belongs to development lab apps.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import platform
 from pathlib import Path
 from typing import Any
 
+from core.conversation import ConversationContext, ConversationCore, CoreStateMachine, EventBus, ReferentResolver
 from core.intelligence import IntelligenceProvider
 from core.tools import ToolDefinition, ToolRequest, ToolResult
 from core.voice import SpeechToTextProvider, TextToSpeechProvider, VoiceProfile
@@ -32,16 +33,20 @@ def collect_diagnostics() -> dict[str, Any]:
         "python": platform.python_version(),
         "foundation": {
             "intelligence_contract": IntelligenceProvider.__name__,
-            "tool_contracts": [
-                ToolDefinition.__name__,
-                ToolRequest.__name__,
-                ToolResult.__name__,
-            ],
+            "tool_contracts": [ToolDefinition.__name__, ToolRequest.__name__, ToolResult.__name__],
             "voice_contracts": [
                 SpeechToTextProvider.__name__,
                 TextToSpeechProvider.__name__,
                 VoiceProfile.__name__,
             ],
+        },
+        "conversation": {
+            "context": "ready" if ConversationContext else "missing",
+            "referent_resolver": "ready" if ReferentResolver else "missing",
+            "event_bus": "ready" if EventBus else "missing",
+            "state_machine": "ready" if CoreStateMachine else "missing",
+            "typed_path": "ready" if ConversationCore else "missing",
+            "persistence": "snapshot-contract-only",
         },
         "providers": {
             "intelligence": "provider-layer-ready",
@@ -56,11 +61,18 @@ def collect_diagnostics() -> dict[str, Any]:
 
 def _format_text(data: dict[str, Any]) -> str:
     providers = data["providers"]
+    conversation = data["conversation"]
     return "\n".join(
         [
-            f"{data['project']} {data['version']} - Intelligence Provider diagnostics",
+            f"{data['project']} {data['version']} - Conversation Core diagnostics",
             f"Python: {data['python']}",
             "Contracts: intelligence=ready, tools=ready, voice=ready",
+            (
+                "Conversation: "
+                f"context={conversation['context']}, referents={conversation['referent_resolver']}, "
+                f"events={conversation['event_bus']}, state={conversation['state_machine']}, "
+                f"typed={conversation['typed_path']}"
+            ),
             (
                 "Providers: "
                 f"intelligence={providers['intelligence']}, "

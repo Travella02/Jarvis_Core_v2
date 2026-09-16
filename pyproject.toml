@@ -1,11 +1,11 @@
 [project]
 name = "jarvis-core-v2"
-version = "0.0.2"
-description = "Jarvis Core v2 provider-independent intelligence foundation"
+version = "0.0.3"
+description = "Jarvis Core v2 authoritative conversation/context core"
 requires-python = ">=3.11,<4"
 dependencies = [
     "openai==3.13.0",
 ]
 
 [tool.jarvis]
-release_title = "Intelligence Provider"
+release_title = "Conversation Core"

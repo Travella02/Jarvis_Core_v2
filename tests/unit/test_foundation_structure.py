@@ -54,10 +54,10 @@ class FoundationStructureTests(unittest.TestCase):
 
     def test_release_manifest_matches_candidate(self) -> None:
         manifest = json.loads((ROOT / "RELEASE_MANIFEST.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.0.2")
-        self.assertEqual(manifest["title"], "Intelligence Provider")
+        self.assertEqual(manifest["version"], "0.0.3")
+        self.assertEqual(manifest["title"], "Conversation Core")
         self.assertEqual(manifest["status"], "live_acceptance_candidate")
-        self.assertEqual(manifest["required_previous_version"], "0.0.1")
+        self.assertEqual(manifest["required_previous_version"], "0.0.2")
 
     def test_openai_sdk_dependency_is_pinned_for_candidate(self) -> None:
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()

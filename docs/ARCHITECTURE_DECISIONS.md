@@ -71,3 +71,31 @@ The 0.0.2 candidate pins the OpenAI Python SDK to `3.13.0` in project dependency
 **Why:** the provider abstraction needs cancellation now, while the realtime voice milestone will require measured barge-in latency/cost behavior and may justify a different transport. Faking stronger semantics now would be worse than recording the boundary explicitly.
 
 **Consequence:** 0.0.4 must include a live cancellation/interrupt benchmark before choosing the long-term cloud transport for voice-driven turns.
+
+## ADR-015 - ConversationContext is authoritative; providers receive snapshots
+
+0.0.3 introduces one `ConversationContext` owned by Core. Typed input, future voice input, media/task/tool/UI subsystems, and provider switching must update/read this context rather than keeping competing conversational truth. `IntelligenceProvider` receives a provider-neutral snapshot containing recent transcript and context metadata; it never owns or mutates authoritative state.
+
+The context has explicit slots for current focus, last discussed entity, recent referents, active media/task/job, last tool action, pending approval, visible UI focus, temporal context, working-memory summary, recent transcript, and response-exposure state. The snapshot contract is serializable so later persistence/UI restart work does not require replacing the model.
+
+## ADR-016 - Referent resolution is deterministic and clarification-safe
+
+Resolution priority is: **explicit wording -> current conversational focus -> last discussed entity -> a single compatible context candidate**. If multiple materially plausible candidates remain, Core returns `AMBIGUOUS` and the caller must ask a short clarification instead of letting media/tasks/browser race.
+
+This directly captures the V1 regression where `resume it` resumed YouTube even though the conversation was about a task. A focused task wins over stale media state; an explicit `resume the YouTube video` still wins over task focus.
+
+## ADR-017 - Core owns state/event identity
+
+0.0.3 defines the canonical states from the master handoff and an in-process event bus. Events carry event IDs, UTC timestamps, origin, correlation/request/turn/cancellation trace IDs, conversation/user/device/task identifiers where available, optional parent-event links, and structured payloads.
+
+The bus is intentionally in-process and bounded in 0.0.3. Durable event transport is not implied. State meaning is centralized now so later voice/UI/tools subscribe to the same semantics.
+
+## ADR-018 - Every foreground turn has a targetable cancellation ID
+
+Conversation Core creates correlation, request, turn, and cancellation IDs before provider routing. `CancellationRegistry` maps the cancellation ID to the same provider-neutral token passed into `IntelligenceProvider`. Explicit cancellation can therefore target exactly one active turn and also call the provider's cancellation boundary.
+
+Cancelled turns may preserve partial response text that was already exposed, but pending provider tool requests do not become active referents or executed actions. Durable/background task cancellation remains a later subsystem.
+
+## ADR-019 - 0.0.3 typed lab is the first shared-context end-to-end path
+
+`apps.conversation_lab` is a development shell, not the final desktop UI. Multiple typed turns flow through one `ConversationCore` and one `ConversationContext`, then through the existing provider abstraction. This proves provider switching/context ownership boundaries before realtime voice is introduced in 0.0.4.
