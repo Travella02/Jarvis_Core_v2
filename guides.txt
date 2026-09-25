@@ -1,0 +1,23 @@
+Save a recording into jarvis: 
+
+python -m apps.voice_lab --save-voice-profile "" `
+  --tts-provider qwen3 `
+  --voice-ref "C:\Users\tanne\Desktop\" `
+  --voice-ref-text "" `
+  --voice-language English
+
+
+
+Save a recording into an existing voice
+
+python -m apps.voice_lab --save-voice-profile "" `
+  --voice-profile-id tanner-test `
+  --tts-provider qwen3 `
+  --voice-ref "C:\" `
+  --voice-ref-text "" `
+  --voice-language English
+
+
+
+
+git archive --format=zip --output=Jarvis_0.0.0_clean_checkpoint.zip HEAD

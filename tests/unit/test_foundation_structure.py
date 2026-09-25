@@ -54,16 +54,19 @@ class FoundationStructureTests(unittest.TestCase):
 
     def test_release_manifest_matches_candidate(self) -> None:
         manifest = json.loads((ROOT / "RELEASE_MANIFEST.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.0.3")
-        self.assertEqual(manifest["title"], "Conversation Core")
+        self.assertEqual(manifest["version"], "0.0.4")
+        self.assertEqual(manifest["title"], "Voice Lab")
         self.assertEqual(manifest["status"], "live_acceptance_candidate")
-        self.assertEqual(manifest["required_previous_version"], "0.0.2")
+        self.assertEqual(manifest["required_previous_version"], "0.0.4")
+        self.assertEqual(manifest["repair"], "repair20")
 
     def test_openai_sdk_dependency_is_pinned_for_candidate(self) -> None:
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
-        self.assertIn("openai==3.13.0", requirements)
+        self.assertIn("openai[realtime]==3.13.0", requirements)
+        self.assertIn("sounddevice==0.5.6", requirements)
+        self.assertIn("webrtcvad-wheels==2.0.14", requirements)
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('"openai==3.13.0"', pyproject)
+        self.assertIn('"openai[realtime]==3.13.0"', pyproject)
 
 
 if __name__ == "__main__":

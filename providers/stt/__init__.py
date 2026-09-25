@@ -1,1 +1,1 @@
-"""Jarvis Core v2 package."""
+"""Replaceable speech-to-text provider adapters."""

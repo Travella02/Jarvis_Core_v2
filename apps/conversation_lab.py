@@ -161,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--turn", action="append", help="send repeated turns through one shared context")
     parser.add_argument(
         "--reasoning",
-        default="standard",
+        default="none",
         choices=["none", "quick", "standard", "high", "extreme"],
     )
     args = parser.parse_args(argv)

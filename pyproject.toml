@@ -1,11 +1,13 @@
 [project]
 name = "jarvis-core-v2"
-version = "0.0.3"
-description = "Jarvis Core v2 authoritative conversation/context core"
+version = "0.0.4"
+description = "Jarvis Core v2 local realtime Voice Lab"
 requires-python = ">=3.11,<4"
 dependencies = [
-    "openai==3.13.0",
+    "openai[realtime]==3.13.0",
+    "sounddevice==0.5.6",
+    "webrtcvad-wheels==2.0.14",
 ]
 
 [tool.jarvis]
-release_title = "Conversation Core"
+release_title = "Voice Lab"

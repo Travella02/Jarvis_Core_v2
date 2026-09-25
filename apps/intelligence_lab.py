@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt", help="send one live prompt through IntelligenceProvider")
     parser.add_argument(
         "--reasoning",
-        default="standard",
+        default="none",
         choices=["none", "quick", "standard", "high", "extreme"],
         help="provider-neutral reasoning level for this probe",
     )

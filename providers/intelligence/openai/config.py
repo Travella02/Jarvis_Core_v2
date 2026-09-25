@@ -9,9 +9,12 @@ from typing import Mapping
 
 
 DEFAULT_MODEL = "gpt-5.6-luna"
-DEFAULT_REASONING_EFFORT = "medium"
+DEFAULT_REASONING_EFFORT = "none"
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
+DEFAULT_VOICE_MAX_OUTPUT_TOKENS = 256
 DEFAULT_TIMEOUT_SECONDS = 60.0
+DEFAULT_SERVICE_TIER = "auto"
+DEFAULT_VOICE_TRANSPORT = "http"
 
 
 def load_env_file(path: str | Path) -> dict[str, str]:
@@ -55,7 +58,10 @@ class OpenAIProviderConfig:
     model: str = DEFAULT_MODEL
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    voice_max_output_tokens: int = DEFAULT_VOICE_MAX_OUTPUT_TOKENS
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    service_tier: str = DEFAULT_SERVICE_TIER
+    voice_transport: str = DEFAULT_VOICE_TRANSPORT
     base_url: str | None = None
     organization: str | None = None
     project: str | None = None
@@ -79,6 +85,15 @@ class OpenAIProviderConfig:
         max_output = int(source.get("JARVIS_OPENAI_MAX_OUTPUT_TOKENS", str(DEFAULT_MAX_OUTPUT_TOKENS)))
         if max_output <= 0:
             raise ValueError("JARVIS_OPENAI_MAX_OUTPUT_TOKENS must be positive")
+        voice_max_output = int(source.get("JARVIS_OPENAI_VOICE_MAX_OUTPUT_TOKENS", str(DEFAULT_VOICE_MAX_OUTPUT_TOKENS)))
+        if voice_max_output <= 0:
+            raise ValueError("JARVIS_OPENAI_VOICE_MAX_OUTPUT_TOKENS must be positive")
+        service_tier = source.get("JARVIS_OPENAI_SERVICE_TIER", DEFAULT_SERVICE_TIER).strip().lower() or DEFAULT_SERVICE_TIER
+        if service_tier not in {"auto", "default", "fast", "priority"}:
+            raise ValueError(f"Unsupported JARVIS_OPENAI_SERVICE_TIER={service_tier!r}")
+        voice_transport = source.get("JARVIS_OPENAI_VOICE_TRANSPORT", DEFAULT_VOICE_TRANSPORT).strip().lower() or DEFAULT_VOICE_TRANSPORT
+        if voice_transport not in {"http", "websocket"}:
+            raise ValueError(f"Unsupported JARVIS_OPENAI_VOICE_TRANSPORT={voice_transport!r}")
         timeout = float(source.get("JARVIS_OPENAI_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)))
         if timeout <= 0:
             raise ValueError("JARVIS_OPENAI_TIMEOUT_SECONDS must be positive")
@@ -87,7 +102,10 @@ class OpenAIProviderConfig:
             model=model,
             reasoning_effort=reasoning,
             max_output_tokens=max_output,
+            voice_max_output_tokens=voice_max_output,
             timeout_seconds=timeout,
+            service_tier=service_tier,
+            voice_transport=voice_transport,
             base_url=source.get("OPENAI_BASE_URL") or None,
             organization=source.get("OPENAI_ORG_ID") or None,
             project=source.get("OPENAI_PROJECT_ID") or None,

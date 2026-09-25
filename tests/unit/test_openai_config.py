@@ -14,8 +14,11 @@ class OpenAIConfigTests(unittest.TestCase):
         config = OpenAIProviderConfig.from_env({"OPENAI_API_KEY": "test-key"})
         self.assertEqual(config.model, DEFAULT_MODEL)
         self.assertEqual(config.model, "gpt-5.6-luna")
-        self.assertEqual(config.reasoning_effort, "medium")
+        self.assertEqual(config.reasoning_effort, "none")
         self.assertEqual(config.max_output_tokens, 4096)
+        self.assertEqual(config.voice_max_output_tokens, 256)
+        self.assertEqual(config.service_tier, "auto")
+        self.assertEqual(config.voice_transport, "http")
         self.assertFalse(config.store_responses)
 
     def test_environment_overrides_provider_owned_values(self) -> None:
@@ -25,6 +28,9 @@ class OpenAIConfigTests(unittest.TestCase):
                 "JARVIS_OPENAI_MODEL": "future-model",
                 "JARVIS_OPENAI_REASONING_EFFORT": "high",
                 "JARVIS_OPENAI_MAX_OUTPUT_TOKENS": "2048",
+                "JARVIS_OPENAI_VOICE_MAX_OUTPUT_TOKENS": "192",
+                "JARVIS_OPENAI_SERVICE_TIER": "fast",
+                "JARVIS_OPENAI_VOICE_TRANSPORT": "websocket",
                 "JARVIS_OPENAI_TIMEOUT_SECONDS": "12.5",
                 "OPENAI_BASE_URL": "https://example.invalid/v1",
             }
@@ -32,6 +38,9 @@ class OpenAIConfigTests(unittest.TestCase):
         self.assertEqual(config.model, "future-model")
         self.assertEqual(config.reasoning_effort, "high")
         self.assertEqual(config.max_output_tokens, 2048)
+        self.assertEqual(config.voice_max_output_tokens, 192)
+        self.assertEqual(config.service_tier, "fast")
+        self.assertEqual(config.voice_transport, "websocket")
         self.assertEqual(config.timeout_seconds, 12.5)
         self.assertEqual(config.base_url, "https://example.invalid/v1")
 
@@ -52,6 +61,24 @@ class OpenAIConfigTests(unittest.TestCase):
                 {
                     "OPENAI_API_KEY": "test-key",
                     "JARVIS_OPENAI_REASONING_EFFORT": "turbo-magic",
+                }
+            )
+
+    def test_invalid_voice_transport_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            OpenAIProviderConfig.from_env(
+                {
+                    "OPENAI_API_KEY": "test-key",
+                    "JARVIS_OPENAI_VOICE_TRANSPORT": "telepathy",
+                }
+            )
+
+    def test_invalid_service_tier_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            OpenAIProviderConfig.from_env(
+                {
+                    "OPENAI_API_KEY": "test-key",
+                    "JARVIS_OPENAI_SERVICE_TIER": "teleport",
                 }
             )
 

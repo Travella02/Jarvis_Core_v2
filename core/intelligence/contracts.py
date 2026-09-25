@@ -52,8 +52,8 @@ class ProviderHealth:
 class ReasoningPolicy:
     """Provider-neutral policy hint; routing semantics arrive in milestone 0.0.6."""
 
-    level: str = "auto"
-    allow_escalation: bool = True
+    level: str = "none"
+    allow_escalation: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

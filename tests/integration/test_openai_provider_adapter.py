@@ -51,6 +51,71 @@ class FakeClient:
         self.responses = FakeResponses(self.stream)
 
 
+
+
+class FakeWSResponseResource:
+    def __init__(self, connection):
+        self.connection = connection
+
+    async def create(self, **kwargs):
+        self.connection.calls.append(kwargs)
+        self.connection.batch_index += 1
+        self.connection.event_index = 0
+
+
+class FakeWSConnection:
+    def __init__(self, batches):
+        self.batches = [list(batch) for batch in batches]
+        self.batch_index = -1
+        self.event_index = 0
+        self.calls = []
+        self.closed = False
+        self.response = FakeWSResponseResource(self)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.closed or self.batch_index < 0 or self.batch_index >= len(self.batches):
+            raise StopAsyncIteration
+        batch = self.batches[self.batch_index]
+        if self.event_index >= len(batch):
+            raise StopAsyncIteration
+        item = batch[self.event_index]
+        self.event_index += 1
+        await asyncio.sleep(0)
+        return item
+
+    async def close(self):
+        self.closed = True
+
+
+class FakeWSManager:
+    def __init__(self, connection):
+        self.connection = connection
+
+    async def enter(self):
+        return self.connection
+
+
+class FakeWebSocketResponses(FakeResponses):
+    def __init__(self, http_stream, ws_connection):
+        super().__init__(http_stream)
+        self.ws_connection = ws_connection
+        self.connect_calls = 0
+
+    def connect(self, **kwargs):
+        self.connect_calls += 1
+        return FakeWSManager(self.ws_connection)
+
+
+class FakeWebSocketClient:
+    def __init__(self, batches):
+        self.stream = FakeStream([])
+        self.ws_connection = FakeWSConnection(batches)
+        self.responses = FakeWebSocketResponses(self.stream, self.ws_connection)
+
+
 def event(event_type, **kwargs):
     return SimpleNamespace(type=event_type, **kwargs)
 
@@ -60,10 +125,11 @@ def response(response_id="resp_test", **kwargs):
 
 
 class OpenAIProviderAdapterTests(unittest.IsolatedAsyncioTestCase):
-    def context(self, request_id="req-1"):
+    def context(self, request_id="req-1", *, metadata=None, messages=None):
         return IntelligenceContext(
             trace=CorrelationContext("corr-1", request_id, "turn-1"),
-            messages=({"role": "user", "content": "hello"},),
+            messages=messages or ({"role": "user", "content": "hello"},),
+            metadata=metadata or {},
         )
 
     async def collect(self, provider, *, tools=(), token=None, policy=None, request_id="req-1"):
@@ -119,6 +185,39 @@ class OpenAIProviderAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(call["store"])
         self.assertEqual(call["reasoning"], {"effort": "medium"})
         self.assertEqual(call["max_output_tokens"], 4096)
+
+    async def test_voice_context_requests_low_text_verbosity(self) -> None:
+        client = FakeClient([event("response.completed", response=response("resp_voice", usage=None))])
+        provider = OpenAIProvider(OpenAIProviderConfig(api_key="test"), client=client)
+        context = self.context("req-voice", metadata={"input_channel": "voice"})
+        events = [
+            item
+            async for item in provider.stream_response(
+                context, (), ReasoningPolicy(level="none"), CancellationToken()
+            )
+        ]
+        self.assertEqual(events[-1].event_type, IntelligenceEventType.COMPLETED)
+        self.assertEqual(client.responses.calls[0]["reasoning"], {"effort": "none"})
+        call = client.responses.calls[0]
+        self.assertEqual(call["text"], {"verbosity": "low"})
+        self.assertEqual(call["max_output_tokens"], 256)
+        self.assertEqual(call["prompt_cache_options"], {"mode": "implicit", "ttl": "30m"})
+
+    async def test_optional_fast_service_tier_is_provider_owned(self) -> None:
+        client = FakeClient([event("response.completed", response=response("resp_fast", usage=None))])
+        provider = OpenAIProvider(
+            OpenAIProviderConfig(api_key="test", service_tier="fast"),
+            client=client,
+        )
+        context = self.context("req-fast", metadata={"input_channel": "voice"})
+        events = [
+            item
+            async for item in provider.stream_response(
+                context, (), ReasoningPolicy(level="none"), CancellationToken()
+            )
+        ]
+        self.assertEqual(events[-1].event_type, IntelligenceEventType.COMPLETED)
+        self.assertEqual(client.responses.calls[0]["service_tier"], "fast")
 
     async def test_tool_call_becomes_non_executable_tool_request(self) -> None:
         tool_item = SimpleNamespace(
@@ -217,6 +316,104 @@ class OpenAIProviderAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.stream.closed)
         with self.assertRaises(StopAsyncIteration):
             await anext(generator)
+
+    async def test_voice_websocket_reuses_connection_and_continues_only_exact_core_chain(self) -> None:
+        client = FakeWebSocketClient(
+            [
+                [
+                    event("response.created", response=response("resp_ws_1")),
+                    event("response.output_text.delta", delta="Hello there."),
+                    event("response.completed", response=response("resp_ws_1", usage=None)),
+                ],
+                [
+                    event("response.created", response=response("resp_ws_2")),
+                    event("response.output_text.delta", delta="Second answer."),
+                    event("response.completed", response=response("resp_ws_2", usage=None)),
+                ],
+            ]
+        )
+        provider = OpenAIProvider(
+            OpenAIProviderConfig(api_key="test", voice_transport="websocket"),
+            client=client,
+        )
+        metadata = {"input_channel": "voice", "conversation_id": "conversation-test"}
+        first_context = self.context(
+            "req-ws-1",
+            metadata=metadata,
+            messages=(
+                {"role": "developer", "content": "Speak briefly."},
+                {"role": "user", "content": "Hello"},
+            ),
+        )
+        first = [
+            item
+            async for item in provider.stream_response(
+                first_context, (), ReasoningPolicy(level="none"), CancellationToken()
+            )
+        ]
+        self.assertEqual(first[-1].event_type, IntelligenceEventType.COMPLETED)
+
+        second_context = self.context(
+            "req-ws-2",
+            metadata=metadata,
+            messages=(
+                {"role": "developer", "content": "Speak briefly."},
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hello there."},
+                {"role": "user", "content": "Continue"},
+            ),
+        )
+        second = [
+            item
+            async for item in provider.stream_response(
+                second_context, (), ReasoningPolicy(level="none"), CancellationToken()
+            )
+        ]
+        self.assertEqual(second[-1].event_type, IntelligenceEventType.COMPLETED)
+        self.assertEqual(client.responses.connect_calls, 1)
+        first_call, second_call = client.ws_connection.calls
+        self.assertNotIn("previous_response_id", first_call)
+        self.assertEqual(len(first_call["input"]), 2)
+        self.assertEqual(second_call["previous_response_id"], "resp_ws_1")
+        self.assertEqual(second_call["input"], [{"role": "user", "content": "Continue"}])
+        self.assertEqual(first_call["stream_id"], second_call["stream_id"])
+        self.assertNotIn("stream", first_call)
+        await provider.close()
+
+    async def test_voice_websocket_resets_to_full_context_when_core_snapshot_diverges(self) -> None:
+        client = FakeWebSocketClient(
+            [
+                [
+                    event("response.created", response=response("resp_a")),
+                    event("response.output_text.delta", delta="Answer A"),
+                    event("response.completed", response=response("resp_a", usage=None)),
+                ],
+                [
+                    event("response.created", response=response("resp_b")),
+                    event("response.output_text.delta", delta="Answer B"),
+                    event("response.completed", response=response("resp_b", usage=None)),
+                ],
+            ]
+        )
+        provider = OpenAIProvider(
+            OpenAIProviderConfig(api_key="test", voice_transport="websocket"), client=client
+        )
+        metadata = {"input_channel": "voice", "conversation_id": "conversation-reset"}
+        for request_id, messages in (
+            ("req-a", ({"role": "user", "content": "A"},)),
+            ("req-b", ({"role": "system", "content": "Context changed"}, {"role": "user", "content": "B"})),
+        ):
+            context = self.context(request_id, metadata=metadata, messages=messages)
+            _ = [
+                item
+                async for item in provider.stream_response(
+                    context, (), ReasoningPolicy(level="none"), CancellationToken()
+                )
+            ]
+        second_call = client.ws_connection.calls[1]
+        self.assertNotIn("previous_response_id", second_call)
+        self.assertEqual(len(second_call["input"]), 2)
+        await provider.close()
 
     async def test_health_distinguishes_configuration_and_success(self) -> None:
         missing = OpenAIProvider(OpenAIProviderConfig(api_key=None))

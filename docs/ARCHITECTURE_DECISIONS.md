@@ -99,3 +99,101 @@ Cancelled turns may preserve partial response text that was already exposed, but
 ## ADR-019 - 0.0.3 typed lab is the first shared-context end-to-end path
 
 `apps.conversation_lab` is a development shell, not the final desktop UI. Multiple typed turns flow through one `ConversationCore` and one `ConversationContext`, then through the existing provider abstraction. This proves provider switching/context ownership boundaries before realtime voice is introduced in 0.0.4.
+
+## ADR-020 — 0.0.4 starts local-first voice with replaceable candidate adapters
+
+The first Voice Lab candidates are **whisper.cpp + `large-v3-turbo-q5_0`** for STT and **Chatterbox Turbo** for TTS. These are candidates, not permanent architectural dependencies. `ConversationCore` and `core/voice/` do not import either implementation. Swapping STT or TTS is a `VoiceProviderRegistry` change behind `SpeechToTextProvider` / `TextToSpeechProvider`.
+
+The default product direction is local STT + cloud intelligence + local TTS so ordinary speech does not incur recurring STT/TTS API charges. Optional hosted speech providers can be added later without becoming launch dependencies.
+
+## ADR-021 — ORVEX owns the voice loop, not the speech models
+
+ORVEX owns audio capture/output, audio frame format, VAD, endpointing, text chunking, playback accounting, interruption/cancellation semantics, and latency telemetry. Speech adapters only transcribe audio or synthesize speech. This boundary is intended to survive provider/model replacement years later.
+
+0.0.4 is a Voice Lab milestone, not the final full-duplex engine. It endpoints one user utterance and then plays the streamed/chunked response. The interruption API and provider cancellation plumbing are established now; simultaneous mic + speaker operation, AEC/noise handling, reliable barge-in, and precise heard/unheard text alignment remain 0.0.5.
+
+## ADR-022 — Heavy local speech runtimes stay out of Jarvis Core's Python environment
+
+Whisper native binaries/model files and Chatterbox/PyTorch/model weights live under ignored `.runtime/voice/` directories. Chatterbox runs as an isolated JSON-line sidecar with its own virtual environment. This prevents PyTorch/provider dependency pins from contaminating Core and makes replacement/uninstallation bounded to one adapter runtime.
+
+The current Chatterbox 0.1.7 package pins PyTorch 2.6 on Python 3.11, while RTX 50-series support requires newer CUDA-capable PyTorch. The supplied setup script therefore offers an isolated `modern-cuda` compatibility profile instead of changing Jarvis Core dependencies.
+
+## ADR-023 — Product voice quality will be a downloadable package choice, not a separate Jarvis app
+
+Future installers may recommend High Accuracy / Lightweight voice packages based on hardware, but users retain the choice. Jarvis remains one application. Model assets can be downloaded/replaced independently. Hardware detection is advisory, not an irreversible automatic quality decision.
+
+
+## ADR-023 — Everyday Luna uses the fastest reasoning path
+
+The current Jarvis default is provider-neutral `ReasoningPolicy(level="none", allow_escalation=False)`. OpenAIProvider maps that to Luna's lowest reasoning effort. Explicit higher reasoning levels remain test/development capabilities, but are not the ordinary product path. Future complex-task escalation should route through the provider/model policy layer (for example to Sol) rather than silently making everyday Luna turns slower. Tool authority remains unchanged regardless of model strength.
+
+## ADR-024 — Voice response generation is a pipelined Core concern
+
+Voice response streaming is split into independent model-delta, speech-chunk, TTS synthesis, and audio-playback stages. The opening speech chunk is deliberately smaller than later chunks to reduce time-to-first-audio. TTS synthesis can run ahead while already-synthesized audio is playing, and the physical output stream remains continuous for the response. Concrete TTS implementations remain behind `TextToSpeechProvider`.
+
+## ADR-025 — Spoken text is normalized separately from display text
+
+Conversation Core retains the authoritative provider response verbatim for transcript/display semantics. Before synthesis, the ORVEX Voice Engine applies deterministic provider-neutral speech normalization (for example stripping markdown emphasis/link syntax). Rich semantic verbalization of URLs, money, dates, code, and symbols can evolve behind the same boundary without coupling Conversation Core to a TTS vendor.
+
+## 0.0.4-repair9 — Prosody beats artificial micro-chunking
+
+Core must not split ordinary TTS text in the middle of a semantic clause merely to shave first-chunk latency. Providers such as Chatterbox treat each synthesis call as an utterance, so artificial chunk boundaries can reset prosody and introduce silence. Jarvis prefers complete sentence boundaries, asks the intelligence layer for a short complete opening sentence, and retains only a hard emergency cap for malformed/run-on output.
+
+Voice latency must be evaluated in a warm multi-turn process as well as cold start. Provider/model processes and HTTP clients are intended to remain resident in the real application.
+
+## ADR-026 — Desktop TTS winner does not dictate the mobile runtime
+
+0.0.4-repair11 adds Qwen3-TTS 0.6B Base as a second local `TextToSpeechProvider`
+for A/B testing against Chatterbox. It does not replace Chatterbox and it does
+not make Qwen a Core dependency.
+
+Desktop and mobile may select different concrete TTS runtimes while sharing the
+same ORVEX voice contracts and `VoiceProfile` semantics. The full official
+Qwen3-TTS Python model is appropriate for the current RTX development test, but
+mobile deployment must be proven separately with a native/quantized runtime or
+a lighter provider. Jarvis must not force a multi-gigabyte desktop PyTorch stack
+onto phones simply to keep provider names identical.
+
+The product preference remains local TTS when hardware permits. If a future
+mobile Qwen runtime meets latency, thermal, storage, cloning, and quality goals,
+it can satisfy the same provider contract. Otherwise mobile can use a smaller
+local TTS or an optional paired/cloud provider without changing Conversation
+Core.
+
+## Voice reference persistence (0.0.4-repair12)
+
+Named voice references are provider-neutral runtime user data. They live under ignored `.runtime/voice/references/` and resolve to Core `VoiceProfile` objects. Provider adapters may consume the selected reference but may not define the persistence format. One profile may contain multiple reference clips so voice enrollment can improve later without breaking profile identity.
+
+
+## ADR-027 — The official Jarvis voice is a provider-independent ORVEX brand identity
+
+Jarvis must have one canonical default voice that is recognizable as Jarvis across desktop, mobile, and future runtimes. The voice identity sits above the concrete TTS engine. Qwen, Chatterbox, a native mobile runtime, or a future provider may render that identity, but none of those provider names define the brand voice.
+
+The canonical Jarvis voice will be an ORVEX-owned/versioned system voice asset with explicit commercial synthetic-voice rights. User-selected alternatives and personal/custom clones remain optional `VoiceProfile` choices and must not overwrite the official system identity. A runtime may ship as the default Jarvis renderer only after ORVEX listening/similarity acceptance against the canonical voice.
+
+## ADR-028 — Qwen clone failures must be isolated with an upstream-equivalent diagnostic
+
+When Qwen Base cloning fails, Voice Lab must separate four possible causes: reference-audio quality, reference transcript/ICL conditioning, the official Qwen generation path, and Jarvis's cached/optimized adapter path. `--qwen-clone-diagnostic` validates the saved clip and runs direct full-reference and x-vector-only `generate_voice_clone` calls without Jarvis chunking, prompt caching, or speaker playback.
+
+This diagnostic is intentionally not a production synthesis path. It exists to prevent repeated playback/audio fixes from masking a model/runtime/reference failure.
+
+## ADR-029 — Qwen live synthesis defaults to x-vector cloning until full-reference conditioning is separately accepted
+
+Live 0.0.4-repair16 A/B diagnostics proved the Qwen3-TTS 0.6B Base runtime, saved reference WAV, CUDA path, waveform serialization, and speaker path are capable of producing clean speech in x-vector-only mode. The same reference produced a runaway transcript-conditioned full clone (~163.8 seconds of garbage for a short diagnostic sentence) while x-vector-only produced a normal ~4.08-second sentence.
+
+Normal Jarvis Qwen synthesis therefore defaults to x-vector cloning even when a VoiceProfile stores an exact transcript. Transcript metadata remains valuable for enrollment, diagnostics, future provider adaptations, and a later full-reference re-evaluation, but it does not automatically enable the unstable Qwen ICL/full-reference path. Full-reference conditioning is diagnostic/experimental until it passes an explicit ORVEX quality and bounded-duration acceptance test.
+
+This decision is provider-specific. `VoiceProfile` and the canonical Jarvis voice identity remain provider-neutral. If Qwen becomes the default renderer, the canonical ORVEX Jarvis voice can use the stable x-vector path while other runtimes implement the same voice identity through their own accepted mechanism.
+
+## 0.0.4-repair18: latency is measured per boundary, not guessed
+
+- GPT-5.6 Luna remains the normal everyday intelligence provider at `reasoning=none`.
+- Voice-specific output limits are provider-owned latency controls; they do not change the provider-neutral IntelligenceProvider contract.
+- Conversation Core remains authoritative. Prompt caching and connection warmups are optimization hints only and must never become conversation truth.
+- OpenAI Fast mode is an optional provider setting for A/B latency testing, not the default, because it can carry a pricing premium.
+- Local TTS model health is not considered fully warm. Voice Lab may run and discard one tiny synthesis before listening so model/CUDA/prompt-cache cold-start work occurs outside the user's turn.
+- Qwen remains provider-swappable. Repair18 does not introduce a third-party streaming fork into the product runtime; true incremental Qwen audio should only be adopted after its dependency/runtime is explicitly accepted.
+
+## 2026-09-25 — Voice transport continuation remains subordinate to Conversation Core
+
+Voice may use a persistent provider transport such as OpenAI Responses WebSocket mode, but provider-side continuation is only a latency cache. Conversation Core remains authoritative. A provider may send incremental input with a prior response ID only when the current Core snapshot exactly extends the previously completed provider turn; otherwise it must reset and send full context. Transport state can always be discarded without losing Jarvis conversation truth.

@@ -1,0 +1,17 @@
+Remove-Item apply_*.py -Force
+Remove-Item patch_files -Recurse -Force
+
+
+
+Get-ChildItem . -File -Filter "apply_*_patch.py" | Remove-Item -Force
+Remove-Item .\patch_files -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item .\.patch_backups -Recurse -Force -ErrorAction SilentlyContinue
+
+
+#Starting Jarvis
+.\.venv\Scripts\python.exe -m apps.core
+
+npm run desktop
+
+
+git archive --format=zip --output=Jarvis_0.0.0_clean_checkpoint.zip HEAD

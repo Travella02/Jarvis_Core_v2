@@ -50,7 +50,7 @@ class OpenAISerializationTests(unittest.TestCase):
         self.assertNotIn("executor", tools[0])
 
     def test_reasoning_policy_maps_provider_neutral_levels(self) -> None:
-        self.assertEqual(reasoning_effort(ReasoningPolicy(level="auto"), self.config), "medium")
+        self.assertEqual(reasoning_effort(ReasoningPolicy(level="auto"), self.config), "none")
         self.assertEqual(reasoning_effort(ReasoningPolicy(level="quick"), self.config), "low")
         self.assertEqual(reasoning_effort(ReasoningPolicy(level="standard"), self.config), "medium")
         self.assertEqual(reasoning_effort(ReasoningPolicy(level="high"), self.config), "high")

@@ -78,6 +78,17 @@ class ConversationCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.heard_response_state, HeardResponseState.COMPLETE)
         self.assertEqual(core.cancellations.active_ids(), ())
 
+    async def test_voice_turn_uses_same_authoritative_context_with_voice_channel(self) -> None:
+        provider = FakeProvider([text_turn("voice response")])
+        context = ConversationContext("conv", "user")
+        core = ConversationCore(context=context, provider=provider)
+        result = await core.submit_voice("hello from microphone")
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(context.recent_transcript[0].channel.value, "voice")
+        self.assertEqual(context.recent_transcript[1].channel.value, "voice")
+        received = [e for e in core.event_bus.history if e.event_type == "user.text.received"]
+        self.assertEqual(received[-1].payload["channel"], "voice")
+
     async def test_provider_tool_request_stays_intent_only(self) -> None:
         request = ToolRequest(
             trace=CorrelationContext.create(),

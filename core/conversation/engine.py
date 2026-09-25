@@ -1,4 +1,4 @@
-"""Provider-independent typed Conversation Core orchestration."""
+"""Provider-independent Conversation Core orchestration for typed and voice turns."""
 
 from __future__ import annotations
 
@@ -17,11 +17,21 @@ from core.conversation.models import (
 )
 from core.conversation.state_machine import CoreState, CoreStateMachine
 from core.intelligence import (
+    IntelligenceContext,
     IntelligenceEventType,
     IntelligenceProvider,
     ReasoningPolicy,
 )
 from core.tools import ToolDefinition, ToolRequest
+
+
+VOICE_RESPONSE_INSTRUCTION = (
+    "This is a spoken Jarvis turn. Respond naturally and concisely, usually in one to three "
+    "short sentences unless the user asks for detail. Make the first sentence short, complete, "
+    "and easy to speak, ideally about four to eight words; never open with a fragment that needs "
+    "the next phrase to make sense. Prefer plain spoken language and natural punctuation, and avoid "
+    "markdown formatting, headings, bullets, tables, or code fences unless they are essential."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,10 +45,11 @@ class TurnResult:
 
 
 class ConversationCore:
-    """Own one ConversationContext and route typed turns through a provider.
+    """Own one ConversationContext and route user turns through a provider.
 
     The provider sees a snapshot; Core owns transcript, state, referents, event
-    correlation, and cancellation. Tool requests remain intent-only in 0.0.3.
+    correlation, and cancellation. Voice text enters through the same path as
+    typed text after STT so speech never creates a second conversation truth.
     """
 
     def __init__(
@@ -71,13 +82,42 @@ class ConversationCore:
         tools: Sequence[ToolDefinition] = (),
         reasoning_policy: ReasoningPolicy | None = None,
     ) -> TurnResult:
+        return await self._submit_text(
+            text,
+            channel=InputChannel.TYPED,
+            tools=tools,
+            reasoning_policy=reasoning_policy,
+        )
+
+    async def submit_voice(
+        self,
+        text: str,
+        *,
+        tools: Sequence[ToolDefinition] = (),
+        reasoning_policy: ReasoningPolicy | None = None,
+    ) -> TurnResult:
+        return await self._submit_text(
+            text,
+            channel=InputChannel.VOICE,
+            tools=tools,
+            reasoning_policy=reasoning_policy,
+        )
+
+    async def _submit_text(
+        self,
+        text: str,
+        *,
+        channel: InputChannel,
+        tools: Sequence[ToolDefinition] = (),
+        reasoning_policy: ReasoningPolicy | None = None,
+    ) -> TurnResult:
         prompt = text.strip()
         if not prompt:
-            raise ValueError("typed input cannot be empty")
+            raise ValueError(f"{channel.value} input cannot be empty")
         if self._active_trace is not None:
             raise RuntimeError("a foreground turn is already active")
         if self.state.state is not CoreState.LISTENING:
-            raise RuntimeError(f"cannot accept typed input while core state={self.state.state.value}")
+            raise RuntimeError(f"cannot accept {channel.value} input while core state={self.state.state.value}")
 
         trace = CorrelationContext.create()
         handle = self.cancellations.register(trace)
@@ -92,18 +132,18 @@ class ConversationCore:
         user_entry = TranscriptEntry.create(
             role=TranscriptRole.USER,
             content=prompt,
-            channel=InputChannel.TYPED,
+            channel=channel,
             turn_id=trace.turn_id,
         )
         self.context.append_transcript(user_entry)
         input_event = self.event_bus.emit(
             "user.text.received",
-            origin="typed",
+            origin=channel.value,
             trace=trace,
             conversation_id=self.context.conversation_id,
             user_id=self.context.user_id,
             device_id=self.context.device_id,
-            payload={"entry_id": user_entry.entry_id, "channel": "typed"},
+            payload={"entry_id": user_entry.entry_id, "channel": channel.value},
         )
         self.event_bus.emit(
             "turn.endpointed",
@@ -113,9 +153,9 @@ class ConversationCore:
             user_id=self.context.user_id,
             device_id=self.context.device_id,
             parent_event_id=input_event.event_id,
-            payload={"channel": "typed"},
+            payload={"channel": channel.value},
         )
-        self.state.transition(CoreState.THINKING, trace=trace, reason="typed turn accepted")
+        self.state.transition(CoreState.THINKING, trace=trace, reason=f"{channel.value} turn accepted")
         self.event_bus.emit(
             "intelligence.routed",
             origin="conversation-core",
@@ -131,10 +171,19 @@ class ConversationCore:
 
         try:
             snapshot = self.context.to_intelligence_context(trace)
+            if channel is InputChannel.VOICE:
+                snapshot = IntelligenceContext(
+                    trace=snapshot.trace,
+                    messages=(
+                        {"role": "developer", "content": VOICE_RESPONSE_INSTRUCTION},
+                        *snapshot.messages,
+                    ),
+                    metadata={**dict(snapshot.metadata), "input_channel": "voice"},
+                )
             async for event in self.provider.stream_response(
                 context=snapshot,
                 tools=tools,
-                reasoning_policy=reasoning_policy or ReasoningPolicy(level="standard"),
+                reasoning_policy=reasoning_policy or ReasoningPolicy(),
                 cancellation_token=handle.token,
             ):
                 if event.provider_response_id:
@@ -206,7 +255,7 @@ class ConversationCore:
                     TranscriptEntry.create(
                         role=TranscriptRole.ASSISTANT,
                         content=response_text,
-                        channel=InputChannel.TYPED,
+                        channel=channel,
                         turn_id=trace.turn_id,
                         interrupted=interrupted,
                     )
@@ -223,7 +272,7 @@ class ConversationCore:
                     user_id=self.context.user_id,
                     device_id=self.context.device_id,
                     payload={
-                        "channel": "typed",
+                        "channel": channel.value,
                         "provider_response_id": provider_response_id,
                         "tool_request_count": len(tool_requests),
                     },

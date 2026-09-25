@@ -25,6 +25,7 @@ apply_*_patch.py
 *_patch.zip
 
 # Runtime/generated data
+.runtime/
 *.log
 *.db
 *.sqlite
@@ -34,6 +35,3 @@ data/
 provider_cache/
 model_weights/
 browser_profiles/
-
-#notes
-commands.txt
