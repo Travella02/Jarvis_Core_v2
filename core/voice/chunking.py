@@ -33,16 +33,22 @@ class SpeechTextChunker:
         self,
         *,
         min_chars: int = 14,
+        first_min_chars: int | None = None,
         soft_max_chars: int = 120,
         first_soft_max_chars: int | None = None,
         hard_max_chars: int = 220,
         clause_min_chars: int = 64,
-        first_comma_min_chars: int = 24,
-        first_comma_max_chars: int = 72,
-        first_comma_min_words: int = 4,
+        first_comma_min_chars: int = 18,
+        first_comma_max_chars: int = 64,
+        first_comma_min_words: int = 3,
     ) -> None:
         if min_chars <= 0:
             raise ValueError("min_chars must be positive")
+        resolved_first_min = min(10, min_chars) if first_min_chars is None else first_min_chars
+        if resolved_first_min <= 0:
+            raise ValueError("first_min_chars must be positive")
+        if resolved_first_min > min_chars:
+            raise ValueError("first_min_chars must be <= min_chars")
         if soft_max_chars < min_chars:
             raise ValueError("soft_max_chars must be >= min_chars")
         resolved_first = min(96, soft_max_chars) if first_soft_max_chars is None else first_soft_max_chars
@@ -59,6 +65,7 @@ class SpeechTextChunker:
         if first_comma_min_words < 2:
             raise ValueError("first_comma_min_words must be >= 2")
         self.min_chars = min_chars
+        self.first_min_chars = resolved_first_min
         self.soft_max_chars = soft_max_chars
         self.first_soft_max_chars = resolved_first
         self.hard_max_chars = hard_max_chars
@@ -94,10 +101,14 @@ class SpeechTextChunker:
         return text or None
 
     def _best_cut(self) -> tuple[int, bool] | None:
-        if len(self._buffer.strip()) < self.min_chars:
+        active_min = self.first_min_chars if self._emitted == 0 else self.min_chars
+        if len(self._buffer.strip()) < active_min:
             return None
 
-        for index in range(self.min_chars - 1, len(self._buffer)):
+        # First response unit only: release a genuinely complete short sentence
+        # as soon as it exists. Later chunks retain the original conservative
+        # minimum for prosody and continuity.
+        for index in range(active_min - 1, len(self._buffer)):
             if self._buffer[index] in self.SENTENCE_ENDERS:
                 return index + 1, False
 
@@ -120,6 +131,6 @@ class SpeechTextChunker:
                     return index + 1, False
 
         if len(self._buffer) >= self.hard_max_chars:
-            space = self._buffer.rfind(" ", self.min_chars, self.hard_max_chars + 1)
-            return (space + 1 if space >= self.min_chars else self.hard_max_chars), False
+            space = self._buffer.rfind(" ", active_min, self.hard_max_chars + 1)
+            return (space + 1 if space >= active_min else self.hard_max_chars), False
         return None

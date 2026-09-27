@@ -28,9 +28,12 @@ from core.tools import ToolDefinition, ToolRequest
 VOICE_RESPONSE_INSTRUCTION = (
     "This is a spoken Jarvis turn. Respond naturally and concisely, usually in one to three "
     "short sentences unless the user asks for detail. Make the first sentence short, complete, "
-    "and easy to speak, ideally about four to eight words; never open with a fragment that needs "
-    "the next phrase to make sense. Prefer plain spoken language and natural punctuation, and avoid "
-    "markdown formatting, headings, bullets, tables, or code fences unless they are essential."
+    "direct, and easy to speak: target three to six spoken words and put its sentence-ending "
+    "punctuation immediately after it. The first sentence should answer the user's intent, not be "
+    "filler such as 'Sure', 'Of course', or another setup phrase, and never be a fragment that "
+    "needs the next phrase to make sense. Then elaborate naturally if useful. Prefer plain spoken "
+    "language and natural punctuation, and avoid markdown formatting, headings, bullets, tables, "
+    "or code fences unless they are essential."
 )
 
 
