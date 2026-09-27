@@ -39,6 +39,15 @@ class Qwen3StreamingConfig:
     startup_buffer_ms: int = 250
     emit_every_frames: int = 4
     decode_window_frames: int = 80
+    # Repair31 A/B only. None preserves Repair27's original stochastic behavior.
+    # When set, the resident sidecar resets the same RNG seed immediately before
+    # each separate synthesis request so sentence 1/2/3 begin from the same
+    # sampling state without changing Qwen's generation parameters.
+    fixed_seed: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.fixed_seed is not None and not 0 <= self.fixed_seed <= 0xFFFFFFFF:
+            raise ValueError("fixed_seed must be between 0 and 4294967295")
 
 
 class Qwen3StreamingProvider(TextToSpeechProvider):
@@ -70,6 +79,8 @@ class Qwen3StreamingProvider(TextToSpeechProvider):
                 "native_streaming": True,
                 "startup_buffer_ms": self.config.startup_buffer_ms,
                 "startup_buffer_strategy": "single-frame-fast-start",
+                "fixed_seed": self.config.fixed_seed,
+                "seed_strategy": "per-request-reset" if self.config.fixed_seed is not None else "upstream-random",
                 "license": "Apache-2.0",
                 "experimental": True,
             },
@@ -218,12 +229,17 @@ class Qwen3StreamingProvider(TextToSpeechProvider):
             creationflags = 0
             if os.name == "nt":
                 creationflags = getattr(__import__("subprocess"), "CREATE_NO_WINDOW", 0)
-            self._process = await asyncio.create_subprocess_exec(
+            sidecar_args = [
                 str(self.config.python_executable),
                 str(self.config.sidecar),
                 "--model-dir", str(self.config.model_dir),
                 "--emit-every-frames", str(self.config.emit_every_frames),
                 "--decode-window-frames", str(self.config.decode_window_frames),
+            ]
+            if self.config.fixed_seed is not None:
+                sidecar_args.extend(["--fixed-seed", str(self.config.fixed_seed)])
+            self._process = await asyncio.create_subprocess_exec(
+                *sidecar_args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=self._stderr_handle,

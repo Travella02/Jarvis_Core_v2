@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from contextlib import redirect_stdout
 import json
+import random
 import sys
 import time
 from pathlib import Path
@@ -20,12 +21,29 @@ def emit(payload: dict) -> None:
     PROTO.flush()
 
 
+def _reset_rng(seed: int | None, np, torch) -> None:
+    """Reset common RNGs before one synthesis request.
+
+    None intentionally does nothing so Repair27 remains the control behavior.
+    """
+    if seed is None:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--model-dir", required=True)
     p.add_argument("--emit-every-frames", type=int, default=4)
     p.add_argument("--decode-window-frames", type=int, default=80)
+    p.add_argument("--fixed-seed", type=int, default=None)
     args = p.parse_args()
+    if args.fixed_seed is not None and not 0 <= args.fixed_seed <= 0xFFFFFFFF:
+        p.error("--fixed-seed must be between 0 and 4294967295")
 
     try:
         with redirect_stdout(sys.stderr):
@@ -53,7 +71,13 @@ def main() -> int:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             load_s = time.perf_counter() - load_started
-        emit({"event": "ready", "ok": True, "load_s": round(load_s, 4)})
+        emit({
+            "event": "ready",
+            "ok": True,
+            "load_s": round(load_s, 4),
+            "fixed_seed": args.fixed_seed,
+            "seed_strategy": "per-request-reset" if args.fixed_seed is not None else "upstream-random",
+        })
     except Exception as exc:
         emit({"event": "startup_error", "ok": False, "error": f"{type(exc).__name__}: {exc}"})
         return 1
@@ -137,6 +161,7 @@ def main() -> int:
                     raise ValueError("text cannot be empty")
                 started = time.perf_counter()
                 chunks = 0
+                _reset_rng(args.fixed_seed, np, torch)
                 with redirect_stdout(sys.stderr):
                     iterator = model.stream_generate_voice_clone(
                         text=text,

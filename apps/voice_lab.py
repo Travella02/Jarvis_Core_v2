@@ -37,7 +37,7 @@ from providers.intelligence.openai import OpenAIProvider, OpenAIProviderConfig
 from providers.stt.whisper_cpp import WhisperCppConfig, WhisperCppProvider
 from providers.tts.chatterbox import ChatterboxConfig, ChatterboxTurboProvider
 from providers.tts.qwen3 import Qwen3TTSConfig, Qwen3TTSProvider
-from providers.tts.qwen3_streaming_candidate import Qwen3StreamingProvider
+from providers.tts.qwen3_streaming_candidate import Qwen3StreamingConfig, Qwen3StreamingProvider
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -157,7 +157,8 @@ def _tts_provider_from_args(args: argparse.Namespace | None = None):
     if provider_name == "qwen3":
         return Qwen3TTSProvider(Qwen3TTSConfig.from_env(env_file=PROJECT_ROOT / ".env"))
     if provider_name == "qwen3-streaming":
-        return Qwen3StreamingProvider()
+        fixed_seed = getattr(args, "qwen_fixed_seed", None) if args is not None else None
+        return Qwen3StreamingProvider(Qwen3StreamingConfig(fixed_seed=fixed_seed))
     return ChatterboxTurboProvider(ChatterboxConfig.from_env(env_file=PROJECT_ROOT / ".env"))
 
 
@@ -680,6 +681,10 @@ async def _prewarm_voice(engine: VoiceLabEngine, stt, tts) -> None:
     if callable(provider_warmup):
         await provider_warmup(engine.voice)
         print(f"TTS resident warmup completed in {monotonic() - tts_started:.2f}s (output discarded).")
+        if tts.metadata.provider == "qwen3-tts-streaming-candidate":
+            seed = tts.metadata.extra.get("fixed_seed")
+            strategy = tts.metadata.extra.get("seed_strategy")
+            print(f"Qwen streaming RNG: fixed_seed={seed} | strategy={strategy}")
     else:
         warm_trace = CorrelationContext.create()
         warm_token = CancellationToken()
@@ -862,6 +867,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tts-diagnostic-text", default="Jarvis voice diagnostic. This sentence should sound clear and natural.")
     parser.add_argument("--tts-provider", default="chatterbox", choices=["chatterbox", "qwen3", "qwen3-streaming"], help="local TTS adapter to A/B test")
     parser.add_argument("--qwen-xvector-only", action="store_true", help="Qwen clone without reference transcript; faster setup, potentially lower likeness")
+    parser.add_argument(
+        "--qwen-fixed-seed",
+        type=int,
+        default=None,
+        help=(
+            "Repair31 A/B: reset the same RNG seed before each separate Qwen synthesis request. "
+            "Omit this option to preserve Repair27's original random sampling."
+        ),
+    )
     parser.add_argument("--vad", type=int, default=2, choices=[0, 1, 2, 3])
     parser.add_argument("--end-silence-ms", type=int, default=360)
     parser.add_argument("--no-prewarm", action="store_true", help="debug only: include local model startup in turn latency")
@@ -891,6 +905,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--audio-diagnostic-seconds must be positive")
     if args.turns <= 0:
         parser.error("--turns must be positive")
+    if args.qwen_fixed_seed is not None and not 0 <= args.qwen_fixed_seed <= 0xFFFFFFFF:
+        parser.error("--qwen-fixed-seed must be between 0 and 4294967295")
     if args.save_devices and args.input_device is None and args.output_device is None:
         parser.error("--save-devices requires --input-device and/or --output-device")
     if args.save_voice_profile and not args.voice_ref:
