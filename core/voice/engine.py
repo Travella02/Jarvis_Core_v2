@@ -69,6 +69,7 @@ class VoiceLabEngine:
         vad: VoiceActivityDetector,
         endpoint_config: EndpointConfig | None = None,
         voice: VoiceProfile | None = None,
+        tts_response_mode: str = "streaming",
     ) -> None:
         self.conversation = conversation
         self.providers = providers
@@ -77,6 +78,9 @@ class VoiceLabEngine:
         self.vad = vad
         self.endpoint_config = endpoint_config or EndpointConfig()
         self.voice = voice or VoiceProfile("jarvis-default", "Jarvis Default")
+        if tts_response_mode not in {"streaming", "whole"}:
+            raise ValueError("tts_response_mode must be 'streaming' or 'whole'")
+        self.tts_response_mode = tts_response_mode
         self._voice_token: CancellationToken | None = None
         self._active_trace: CorrelationContext | None = None
         self._tts_trace: CorrelationContext | None = None
@@ -221,9 +225,12 @@ class VoiceLabEngine:
         )
         latency.mark("conversation_submit")
 
-        # Three independent queues keep intelligence streaming, TTS synthesis,
-        # and physical playback overlapped. The first speech phrase is small for
-        # latency; later phrases are larger for prosody/throughput.
+        # Repair33 supports two controlled TTS scheduling modes:
+        # - streaming: committed Repair31 behavior; Luna deltas become separate
+        #   natural speech chunks and TTS overlaps intelligence generation.
+        # - whole: Luna remains fully expressive, but TTS waits for the complete
+        #   response and sends it to Qwen as one request for maximum continuity.
+        # Physical playback still streams PCM immediately once Qwen starts.
         delta_queue: asyncio.Queue[tuple[CorrelationContext, str] | None] = asyncio.Queue()
         speech_queue: asyncio.Queue[tuple[CorrelationContext, str] | None] = asyncio.Queue(maxsize=32)
         audio_queue: asyncio.Queue[AudioFrame | None] = asyncio.Queue(maxsize=1024)
@@ -238,9 +245,16 @@ class VoiceLabEngine:
         speech_metrics: dict[str, int] = {}
 
         def on_delta(event) -> None:
+            nonlocal first_delta
             text = str(event.payload.get("text_delta", ""))
-            if event.trace is not None and text:
-                delta_queue.put_nowait((event.trace, text))
+            if event.trace is None or not text:
+                return
+            if self.tts_response_mode == "whole":
+                if first_delta:
+                    latency.mark("luna_first_text")
+                    first_delta = False
+                return
+            delta_queue.put_nowait((event.trace, text))
 
         unsubscribe = self.conversation.event_bus.subscribe("response.text.delta", on_delta)
 
@@ -356,17 +370,34 @@ class VoiceLabEngine:
                 raise RuntimeError("audio output reported invalid playback bytes")
             return playback
 
-        speech_task = asyncio.create_task(speech_text_worker(), name="jarvis-voice-chunker")
+        speech_task = (
+            asyncio.create_task(speech_text_worker(), name="jarvis-voice-chunker")
+            if self.tts_response_mode == "streaming"
+            else None
+        )
         tts_task = asyncio.create_task(tts_worker(), name="jarvis-voice-tts")
         playback_task = asyncio.create_task(playback_worker(), name="jarvis-voice-playback")
-        tasks = (speech_task, tts_task, playback_task)
+        tasks = tuple(task for task in (speech_task, tts_task, playback_task) if task is not None)
         try:
             result = await self.conversation.submit_voice(
                 transcript,
                 reasoning_policy=reasoning_policy or ReasoningPolicy(),
             )
-            await delta_queue.put(None)
-            await speech_task
+            latency.mark("luna_response_complete")
+
+            if self.tts_response_mode == "whole":
+                # Do not change Jarvis's intelligence/personality policy. We wait
+                # for whatever complete response Luna naturally chose to say,
+                # normalize it once for speech, and give the whole thought to Qwen.
+                await queue_spoken_chunk(result.trace, result.text)
+                speech_metrics["whole_response_chars"] = len(normalize_speech_text(result.text))
+                speech_metrics["whole_response_words"] = len(normalize_speech_text(result.text).split())
+                await speech_queue.put(None)
+            else:
+                await delta_queue.put(None)
+                assert speech_task is not None
+                await speech_task
+
             await tts_task
             await playback_task
             latency.mark("turn_done")

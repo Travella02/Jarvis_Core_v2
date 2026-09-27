@@ -633,6 +633,7 @@ def build_engine(args: argparse.Namespace):
         vad=WebRtcVadDetector(args.vad),
         endpoint_config=EndpointConfig(end_silence_ms=args.end_silence_ms),
         voice=profile,
+        tts_response_mode=args.tts_response_mode,
     )
     return engine, stt, tts
 
@@ -728,6 +729,8 @@ def _print_timing_summary(marks: dict[str, float]) -> None:
     pairs = (
         ("endpoint -> STT final", "speech_ended", "stt_final"),
         ("STT final -> Luna first text", "stt_final", "luna_first_text"),
+        ("Luna first text -> Luna response complete", "luna_first_text", "luna_response_complete"),
+        ("Luna response complete -> TTS request", "luna_response_complete", "tts_first_request_started"),
         ("Luna first text -> first speech chunk", "luna_first_text", "speech_first_chunk_ready"),
         ("first speech chunk -> TTS request", "speech_first_chunk_ready", "tts_first_request_started"),
         ("TTS request -> first waveform", "tts_first_request_started", "tts_first_waveform_ready"),
@@ -770,6 +773,7 @@ async def run_session(args: argparse.Namespace) -> int:
     unsubscribe_rescue = engine.conversation.event_bus.subscribe("voice.speech.acoustic_rescue", on_acoustic_rescue)
     try:
         await _print_selected_audio(engine)
+        print(f"TTS response mode: {args.tts_response_mode}")
         if not args.no_prewarm:
             await _prewarm_voice(engine, stt, tts)
 
@@ -793,6 +797,12 @@ async def run_session(args: argparse.Namespace) -> int:
                     f"first={result.speech_metrics.get('first_chunk_words', 0)} words / "
                     f"{result.speech_metrics.get('first_chunk_chars', 0)} chars"
                 )
+                if "whole_response_words" in result.speech_metrics:
+                    print(
+                        "Whole-response TTS unit: "
+                        f"{result.speech_metrics.get('whole_response_words', 0)} words / "
+                        f"{result.speech_metrics.get('whole_response_chars', 0)} chars"
+                    )
             print(
                 f"Playback: queued={result.playback.queued_bytes} bytes, "
                 f"played={result.playback.played_bytes} bytes, unheard={result.playback.unheard_bytes}"
@@ -878,6 +888,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--vad", type=int, default=2, choices=[0, 1, 2, 3])
     parser.add_argument("--end-silence-ms", type=int, default=360)
+    parser.add_argument(
+        "--tts-response-mode",
+        choices=["streaming", "whole"],
+        default="streaming",
+        help=(
+            "Repair33 A/B: 'streaming' preserves Repair31 separate-chunk TTS; "
+            "'whole' waits for Luna's complete natural response and sends one Qwen request."
+        ),
+    )
     parser.add_argument("--no-prewarm", action="store_true", help="debug only: include local model startup in turn latency")
     parser.add_argument(
         "--luna-transport",
