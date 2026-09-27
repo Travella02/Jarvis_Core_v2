@@ -24,11 +24,21 @@ class AudioDeviceInfo:
 @dataclass(frozen=True, slots=True)
 class AudioPlaybackResult:
     bytes_written: int
+    # Time the first PCM write was submitted to the audio backend. Earlier
+    # repairs recorded this after blocking RawOutputStream.write() returned,
+    # making one full PCM frame look like playback-start latency.
     first_write_monotonic_ns: int | None = None
+    first_write_completed_monotonic_ns: int | None = None
+    estimated_first_audible_monotonic_ns: int | None = None
+    output_latency_ms: float | None = None
+    low_latency_requested: bool = False
+    low_latency_active: bool = False
 
     def __post_init__(self) -> None:
         if self.bytes_written < 0:
             raise ValueError("bytes_written must be non-negative")
+        if self.output_latency_ms is not None and self.output_latency_ms < 0:
+            raise ValueError("output_latency_ms must be non-negative")
 
 
 class AudioInput(ABC):

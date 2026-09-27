@@ -133,6 +133,25 @@ def _resample_output_frame_to_rate(frame: AudioFrame, target_rate_hz: int) -> tu
     payload = _resample_pcm16_mono(frame.payload, target_samples)
     return payload, AudioFormat(target_rate_hz, 1, AudioSampleFormat.PCM_S16LE)
 
+def _output_latency_seconds(stream) -> float:
+    """Return the backend-reported output latency defensively."""
+    try:
+        value = getattr(stream, "latency", 0.0)
+        if isinstance(value, (tuple, list)):
+            value = value[-1] if value else 0.0
+        return max(0.0, float(value or 0.0))
+    except Exception:
+        return 0.0
+
+
+def _open_output_stream_low_latency_first(sd, **kwargs):
+    """Prefer PortAudio's low-latency profile, with a safe fallback."""
+    try:
+        return sd.RawOutputStream(latency="low", **kwargs), True
+    except Exception:
+        return sd.RawOutputStream(**kwargs), False
+
+
 def _host_api_names(sd) -> dict[int, str]:
     try:
         rows = sd.query_hostapis()
@@ -358,6 +377,10 @@ class SoundDeviceAudioOutput(AudioOutput):
         # source consumption separate from the output buffer size.
         source_bytes_consumed = 0
         first_write_ns = None
+        first_write_completed_ns = None
+        estimated_first_audible_ns = None
+        output_latency_ms = None
+        low_latency_active = False
         output_info = await self.selected_device()
         target_rate = output_info.default_sample_rate_hz
         async with self._lock:
@@ -371,7 +394,8 @@ class SoundDeviceAudioOutput(AudioOutput):
                     if target_rate:
                         play_payload, play_format = _resample_output_frame_to_rate(frame, target_rate)
                     if stream is None:
-                        stream = sd.RawOutputStream(
+                        stream, low_latency_active = _open_output_stream_low_latency_first(
+                            sd,
                             samplerate=play_format.sample_rate_hz,
                             channels=play_format.channels,
                             dtype=_dtype(play_format),
@@ -379,16 +403,30 @@ class SoundDeviceAudioOutput(AudioOutput):
                         )
                         stream.start()
                         self._stream = stream
-                    await asyncio.to_thread(stream.write, play_payload)
+                        output_latency_ms = _output_latency_seconds(stream) * 1000.0
                     if first_write_ns is None:
                         first_write_ns = monotonic_ns()
+                        estimated_first_audible_ns = first_write_ns + int(
+                            (output_latency_ms or 0.0) * 1_000_000
+                        )
+                    await asyncio.to_thread(stream.write, play_payload)
+                    if first_write_completed_ns is None:
+                        first_write_completed_ns = monotonic_ns()
                     source_bytes_consumed += len(frame.payload)
             finally:
                 if stream is not None:
                     await asyncio.to_thread(stream.stop)
                     await asyncio.to_thread(stream.close)
                 self._stream = None
-        return AudioPlaybackResult(source_bytes_consumed, first_write_ns)
+        return AudioPlaybackResult(
+            source_bytes_consumed,
+            first_write_monotonic_ns=first_write_ns,
+            first_write_completed_monotonic_ns=first_write_completed_ns,
+            estimated_first_audible_monotonic_ns=estimated_first_audible_ns,
+            output_latency_ms=output_latency_ms,
+            low_latency_requested=True,
+            low_latency_active=low_latency_active,
+        )
 
     async def stop(self) -> None:
         stream = self._stream

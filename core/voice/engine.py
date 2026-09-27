@@ -308,17 +308,50 @@ class VoiceLabEngine:
                     await audio_queue.put(frame)
 
         async def audio_stream() -> AsyncIterator[AudioFrame]:
+            # Native streaming TTS can benefit from a tiny provider-recommended
+            # startup runway. We buffer only PCM that has already been generated;
+            # text synthesis itself starts immediately. This absorbs early GPU
+            # jitter without reintroducing Repair21's larger-text latency.
+            startup_buffer_ms = int(self.providers.tts.metadata.extra.get("startup_buffer_ms", 0) or 0)
+            buffered: list[AudioFrame] = []
+            buffered_ms = 0.0
+            released = startup_buffer_ms <= 0
             while True:
                 item = await audio_queue.get()
                 if item is None:
+                    if not released:
+                        for frame in buffered:
+                            yield frame
                     return
+                if not released:
+                    buffered.append(item)
+                    buffered_ms += item.duration_ms
+                    if buffered_ms < startup_buffer_ms:
+                        continue
+                    latency.mark("audio_startup_buffer_ready")
+                    released = True
+                    for frame in buffered:
+                        yield frame
+                    buffered.clear()
+                    continue
                 yield item
 
         async def playback_worker():
             playback = await self.audio_output.play(audio_stream(), tts_token)
             ledger.played(playback.bytes_written)
             if playback.first_write_monotonic_ns is not None:
-                latency.mark("audio_first_played", now_ns=playback.first_write_monotonic_ns)
+                latency.mark("audio_first_write_started", now_ns=playback.first_write_monotonic_ns)
+            if playback.first_write_completed_monotonic_ns is not None:
+                latency.mark(
+                    "audio_first_write_completed",
+                    now_ns=playback.first_write_completed_monotonic_ns,
+                )
+            audible_ns = (
+                playback.estimated_first_audible_monotonic_ns
+                or playback.first_write_monotonic_ns
+            )
+            if audible_ns is not None:
+                latency.mark("audio_first_played", now_ns=audible_ns)
             if playback.bytes_written < 0:
                 raise RuntimeError("audio output reported invalid playback bytes")
             return playback

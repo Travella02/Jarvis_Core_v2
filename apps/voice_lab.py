@@ -37,6 +37,7 @@ from providers.intelligence.openai import OpenAIProvider, OpenAIProviderConfig
 from providers.stt.whisper_cpp import WhisperCppConfig, WhisperCppProvider
 from providers.tts.chatterbox import ChatterboxConfig, ChatterboxTurboProvider
 from providers.tts.qwen3 import Qwen3TTSConfig, Qwen3TTSProvider
+from providers.tts.qwen3_streaming_candidate import Qwen3StreamingProvider
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -155,6 +156,8 @@ def _tts_provider_from_args(args: argparse.Namespace | None = None):
     provider_name = getattr(args, "tts_provider", "chatterbox") if args is not None else "chatterbox"
     if provider_name == "qwen3":
         return Qwen3TTSProvider(Qwen3TTSConfig.from_env(env_file=PROJECT_ROOT / ".env"))
+    if provider_name == "qwen3-streaming":
+        return Qwen3StreamingProvider()
     return ChatterboxTurboProvider(ChatterboxConfig.from_env(env_file=PROJECT_ROOT / ".env"))
 
 
@@ -668,17 +671,24 @@ async def _prewarm_voice(engine: VoiceLabEngine, stt, tts) -> None:
         print(f"STT inference warmup completed in {monotonic() - stt_started:.2f}s (output discarded).")
 
     # Health checks load TTS models, but CUDA/JIT kernels and clone-prompt caches
-    # can still be cold until the first real synthesis. Consume a tiny hidden TTS
-    # generation now so the user's first audible turn does not pay that cost.
+    # can still be cold until the first real synthesis. Native resident providers
+    # may expose a stronger warmup that prepares the voice + compiled streaming
+    # path without routing hidden PCM through Core. Other providers retain the
+    # existing tiny synthesis warmup.
     tts_started = monotonic()
-    warm_trace = CorrelationContext.create()
-    warm_token = CancellationToken()
-    warm_bytes = 0
-    async for frame in tts.stream_speech(warm_trace, "Ready.", engine.voice, warm_token):
-        warm_bytes += len(frame.payload)
-    if warm_bytes <= 0:
-        raise RuntimeError("TTS inference warmup produced no audio")
-    print(f"TTS inference warmup completed in {monotonic() - tts_started:.2f}s ({warm_bytes} bytes discarded).")
+    provider_warmup = getattr(tts, "warmup", None)
+    if callable(provider_warmup):
+        await provider_warmup(engine.voice)
+        print(f"TTS resident warmup completed in {monotonic() - tts_started:.2f}s (output discarded).")
+    else:
+        warm_trace = CorrelationContext.create()
+        warm_token = CancellationToken()
+        warm_bytes = 0
+        async for frame in tts.stream_speech(warm_trace, "Ready.", engine.voice, warm_token):
+            warm_bytes += len(frame.payload)
+        if warm_bytes <= 0:
+            raise RuntimeError("TTS inference warmup produced no audio")
+        print(f"TTS inference warmup completed in {monotonic() - tts_started:.2f}s ({warm_bytes} bytes discarded).")
 
     # Warm the intelligence provider's HTTP/TLS connection without mutating the
     # authoritative ConversationContext. This is a tiny provider-neutral request
@@ -716,7 +726,13 @@ def _print_timing_summary(marks: dict[str, float]) -> None:
         ("Luna first text -> first speech chunk", "luna_first_text", "speech_first_chunk_ready"),
         ("first speech chunk -> TTS request", "speech_first_chunk_ready", "tts_first_request_started"),
         ("TTS request -> first waveform", "tts_first_request_started", "tts_first_waveform_ready"),
-        ("first waveform -> first audible audio", "tts_first_waveform_ready", "audio_first_played"),
+        ("first waveform -> startup buffer ready", "tts_first_waveform_ready", "audio_startup_buffer_ready"),
+        ("startup buffer ready -> first PCM write", "audio_startup_buffer_ready", "audio_first_write_started"),
+        ("first PCM write -> estimated audible audio", "audio_first_write_started", "audio_first_played"),
+        ("first PCM write blocking duration", "audio_first_write_started", "audio_first_write_completed"),
+        ("first waveform -> estimated audible audio", "tts_first_waveform_ready", "audio_first_played"),
+        # Keep the legacy label for regression compatibility; Repair26 changes
+        # its timestamp source to the PortAudio latency estimate.
         ("speech end -> first audible audio", "speech_ended", "audio_first_played"),
     )
     print("Turn timing summary:")
@@ -844,7 +860,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--keep-primary-reference", action="store_true", help="when adding another clip to an existing profile, keep the previous primary reference")
     parser.add_argument("--voice-language", default="English", help="target TTS language (default: English)")
     parser.add_argument("--tts-diagnostic-text", default="Jarvis voice diagnostic. This sentence should sound clear and natural.")
-    parser.add_argument("--tts-provider", default="chatterbox", choices=["chatterbox", "qwen3"], help="local TTS adapter to A/B test")
+    parser.add_argument("--tts-provider", default="chatterbox", choices=["chatterbox", "qwen3", "qwen3-streaming"], help="local TTS adapter to A/B test")
     parser.add_argument("--qwen-xvector-only", action="store_true", help="Qwen clone without reference transcript; faster setup, potentially lower likeness")
     parser.add_argument("--vad", type=int, default=2, choices=[0, 1, 2, 3])
     parser.add_argument("--end-silence-ms", type=int, default=360)
@@ -885,7 +901,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("use either --voice-profile or --voice-ref, not both")
     if args.qwen_clone_diagnostic and not args.voice_profile and not args.voice_ref:
         parser.error("--qwen-clone-diagnostic requires --voice-profile or --voice-ref")
-    if args.tts_provider == "qwen3" and not (
+    if args.tts_provider in {"qwen3", "qwen3-streaming"} and not (
         args.doctor
         or args.devices
         or args.provider_health
@@ -896,8 +912,8 @@ def main(argv: list[str] | None = None) -> int:
         or args.save_voice_profile
     ):
         if not args.voice_ref and not args.voice_profile:
-            parser.error("--tts-provider qwen3 requires --voice-profile or --voice-ref for the 0.6B Base clone model")
-        if args.voice_ref and not args.voice_ref_text and not args.qwen_xvector_only:
+            parser.error(f"--tts-provider {args.tts_provider} requires --voice-profile or --voice-ref for the 0.6B Base clone model")
+        if args.tts_provider == "qwen3" and args.voice_ref and not args.voice_ref_text and not args.qwen_xvector_only:
             parser.error("Qwen full clone requires --voice-ref-text; use --qwen-xvector-only only for a transcript-free test")
     try:
         return asyncio.run(_main(args))

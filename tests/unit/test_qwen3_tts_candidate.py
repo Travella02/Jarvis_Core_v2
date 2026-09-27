@@ -56,7 +56,7 @@ class Qwen3TTSCandidateTests(unittest.TestCase):
     def test_voice_lab_can_swap_tts_without_changing_core(self):
         lab = (ROOT / "apps" / "voice_lab.py").read_text(encoding="utf-8")
         self.assertIn('"--tts-provider"', lab)
-        self.assertIn('choices=["chatterbox", "qwen3"]', lab)
+        self.assertIn('choices=["chatterbox", "qwen3", "qwen3-streaming"]', lab)
         self.assertIn('"--voice-ref-text"', lab)
         self.assertIn('provider_hint=args.tts_provider', lab)
         self.assertIn('_tts_provider_from_args(args)', lab)
