@@ -146,7 +146,7 @@ class OpenAIProviderAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_metadata_capabilities_and_luna_limits(self) -> None:
         provider = OpenAIProvider(OpenAIProviderConfig(api_key="test"), client=FakeClient([]))
         self.assertEqual(provider.metadata.provider, "openai")
-        self.assertEqual(provider.metadata.model, "gpt-5.6-luna")
+        self.assertEqual(provider.metadata.model, "gpt-6-luna")
         self.assertTrue(provider.supports_tools())
         self.assertTrue(provider.supports_vision())
         self.assertTrue(provider.supports_reasoning_levels())
@@ -180,7 +180,7 @@ class OpenAIProviderAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1].provider_response_id, "resp_123")
         self.assertEqual(events[-1].metadata["usage"]["input_tokens"], 12)
         call = client.responses.calls[0]
-        self.assertEqual(call["model"], "gpt-5.6-luna")
+        self.assertEqual(call["model"], "gpt-6-luna")
         self.assertTrue(call["stream"])
         self.assertFalse(call["store"])
         self.assertEqual(call["reasoning"], {"effort": "medium"})

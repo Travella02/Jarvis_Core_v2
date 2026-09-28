@@ -1,4 +1,4 @@
-"""Live GPT-5.6 Luna TTFT probe for Jarvis Voice Lab latency work."""
+"""Live Luna TTFT/model-continuation probe for Jarvis Voice Lab latency work."""
 
 from __future__ import annotations
 
@@ -69,8 +69,12 @@ async def _core_once(core: ConversationCore) -> tuple[float, float]:
 
 async def run(args: argparse.Namespace) -> int:
     config = OpenAIProviderConfig.from_env(env_file=PROJECT_ROOT / ".env")
+    updates = {"voice_transport": args.transport}
+    if args.model is not None:
+        updates["model"] = args.model
     if args.service_tier is not None:
-        config = replace(config, service_tier=args.service_tier)
+        updates["service_tier"] = args.service_tier
+    config = replace(config, **updates)
     provider = OpenAIProvider(config)
     core = ConversationCore(
         context=ConversationContext.create(
@@ -83,6 +87,7 @@ async def run(args: argparse.Namespace) -> int:
 
     print(
         f"Luna latency probe | model={config.model} | reasoning=none | "
+        f"transport={config.voice_transport} | "
         f"voice_max_output_tokens={config.voice_max_output_tokens} | service_tier={config.service_tier}"
     )
     print("This makes tiny live API requests; no microphone or TTS is used.")
@@ -94,9 +99,16 @@ async def run(args: argparse.Namespace) -> int:
         core_ttft, core_total = await _core_once(core)
         raw.append(raw_ttft)
         core_times.append(core_ttft)
+        diag = provider.latest_request_diagnostics()
+        cont = "yes" if diag.get("continuation") else "no"
+        reason = diag.get("continuation_reason") or "-"
+        committed = "yes" if diag.get("lane_committed") else "no"
+        actual_tier = diag.get("actual_service_tier") or "unknown"
         print(
             f"Round {index}: raw provider TTFT={raw_ttft:.0f} ms total={raw_total:.0f} ms | "
-            f"Conversation Core TTFT={core_ttft:.0f} ms total={core_total:.0f} ms"
+            f"Conversation Core TTFT={core_ttft:.0f} ms total={core_total:.0f} ms | "
+            f"core continuation={cont} reason={reason} lane_committed={committed} "
+            f"actual_tier={actual_tier}"
         )
 
     def warm(values: list[float]) -> list[float]:
@@ -114,6 +126,20 @@ async def run(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Repair36: exact Luna/OpenAI model ID for this probe. "
+            "Omit to use JARVIS_OPENAI_MODEL / provider default."
+        ),
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["websocket", "http"],
+        default="websocket",
+        help="match Voice Lab transport explicitly; websocket is the voice default",
+    )
     parser.add_argument(
         "--service-tier",
         choices=["auto", "default", "fast", "priority"],

@@ -613,7 +613,12 @@ async def audio_diagnostic(args: argparse.Namespace) -> int:
 
 def build_engine(args: argparse.Namespace):
     intelligence_config = OpenAIProviderConfig.from_env(env_file=PROJECT_ROOT / ".env")
-    intelligence_config = replace(intelligence_config, voice_transport=args.luna_transport)
+    config_updates = {"voice_transport": args.luna_transport}
+    if args.luna_model is not None:
+        config_updates["model"] = args.luna_model
+    if args.luna_service_tier is not None:
+        config_updates["service_tier"] = args.luna_service_tier
+    intelligence_config = replace(intelligence_config, **config_updates)
     intelligence = OpenAIProvider(intelligence_config)
     core = ConversationCore(
         context=ConversationContext.create(
@@ -745,6 +750,38 @@ async def _prewarm_voice(engine: VoiceLabEngine, stt, tts) -> None:
     print(f"Providers ready in {monotonic() - started:.2f}s. They remain resident for this session.")
 
 
+def _print_luna_path(engine: VoiceLabEngine) -> None:
+    provider = engine.conversation.provider
+    getter = getattr(provider, "latest_request_diagnostics", None)
+    if not callable(getter):
+        return
+    info = getter()
+    if not info:
+        return
+
+    def yesno(value):
+        return "yes" if bool(value) else "no"
+
+    actual = info.get("actual_service_tier") or "unknown"
+    first_text = info.get("first_text_ms")
+    create_return = info.get("create_return_ms")
+    first_text_label = f"{first_text:.0f} ms" if isinstance(first_text, (int, float)) else "-"
+    create_label = f"{create_return:.1f} ms" if isinstance(create_return, (int, float)) else "-"
+    print(
+        "Luna path: "
+        f"transport={info.get('transport', 'unknown')} | "
+        f"continuation={yesno(info.get('continuation'))} | "
+        f"reason={info.get('continuation_reason', '-')} | "
+        f"lane_committed={yesno(info.get('lane_committed'))} | "
+        f"connection_reused={yesno(info.get('connection_reused'))} | "
+        f"input_items={info.get('input_items', '-')} | "
+        f"requested_tier={info.get('requested_service_tier', 'auto')} | "
+        f"actual_tier={actual} | "
+        f"create_return={create_label} | "
+        f"provider_first_text={first_text_label}"
+    )
+
+
 def _print_timing_summary(marks: dict[str, float]) -> None:
     pairs = (
         ("endpoint -> STT final", "speech_ended", "stt_final"),
@@ -794,6 +831,15 @@ async def run_session(args: argparse.Namespace) -> int:
     try:
         await _print_selected_audio(engine)
         print(f"TTS response mode: {args.tts_response_mode}")
+        intelligence = engine.conversation.provider
+        intelligence_config = getattr(intelligence, "config", None)
+        if intelligence_config is not None:
+            print(
+                "Luna selection: "
+                f"model={intelligence_config.model} | "
+                f"service_tier={intelligence_config.service_tier} | "
+                f"transport={intelligence_config.voice_transport}"
+            )
         if not args.no_prewarm:
             await _prewarm_voice(engine, stt, tts)
 
@@ -811,6 +857,7 @@ async def run_session(args: argparse.Namespace) -> int:
             print("Latency marks (ms from first mark):")
             print(json.dumps(result.latency_ms, indent=2))
             _print_timing_summary(result.latency_ms)
+            _print_luna_path(engine)
             if result.speech_metrics:
                 print(
                     "Speech chunk: "
@@ -931,6 +978,23 @@ def main(argv: list[str] | None = None) -> int:
         choices=["websocket", "http"],
         default="websocket",
         help="voice-only Luna transport; websocket keeps one Responses connection/session warm",
+    )
+    parser.add_argument(
+        "--luna-model",
+        default=None,
+        help=(
+            "Repair36: exact OpenAI model ID for this Voice Lab run only. "
+            "Omit to use JARVIS_OPENAI_MODEL / provider default."
+        ),
+    )
+    parser.add_argument(
+        "--luna-service-tier",
+        choices=["auto", "default", "fast", "priority"],
+        default=None,
+        help=(
+            "Override OpenAI service tier for this Voice Lab run only. "
+            "Use 'default' for Standard pricing; Fast mode remains opt-in only."
+        ),
     )
     parser.add_argument(
         "--turns",

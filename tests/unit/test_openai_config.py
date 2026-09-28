@@ -13,11 +13,11 @@ class OpenAIConfigTests(unittest.TestCase):
     def test_defaults_to_luna_and_safe_limits(self) -> None:
         config = OpenAIProviderConfig.from_env({"OPENAI_API_KEY": "test-key"})
         self.assertEqual(config.model, DEFAULT_MODEL)
-        self.assertEqual(config.model, "gpt-5.6-luna")
+        self.assertEqual(config.model, "gpt-6-luna")
         self.assertEqual(config.reasoning_effort, "none")
         self.assertEqual(config.max_output_tokens, 4096)
         self.assertEqual(config.voice_max_output_tokens, 256)
-        self.assertEqual(config.service_tier, "auto")
+        self.assertEqual(config.service_tier, "default")
         self.assertEqual(config.voice_transport, "http")
         self.assertFalse(config.store_responses)
 

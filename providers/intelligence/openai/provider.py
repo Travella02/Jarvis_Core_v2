@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.util
+from time import monotonic
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -87,10 +88,26 @@ class OpenAIProvider(IntelligenceProvider):
         self._voice_connection_lock = asyncio.Lock()
         self._voice_request_lock = asyncio.Lock()
         self._voice_lanes: dict[str, _VoiceLaneState] = {}
+        # Repair35: bounded transport diagnostics for latency work only.
+        self._request_diagnostics: dict[str, dict[str, Any]] = {}
 
     @property
     def metadata(self) -> ProviderMetadata:
         return ProviderMetadata(provider="openai", model=self.config.model, model_snapshot=None)
+
+    def request_diagnostics(self, request_id: str) -> dict[str, Any]:
+        return dict(self._request_diagnostics.get(request_id, {}))
+
+    def latest_request_diagnostics(self) -> dict[str, Any]:
+        if not self._request_diagnostics:
+            return {}
+        return dict(next(reversed(self._request_diagnostics.values())))
+
+    def _set_request_diagnostics(self, request_id: str, **values: Any) -> None:
+        current = self._request_diagnostics.setdefault(request_id, {})
+        current.update(values)
+        while len(self._request_diagnostics) > 128:
+            self._request_diagnostics.pop(next(iter(self._request_diagnostics)))
 
     def supports_tools(self) -> bool:
         return True
@@ -232,13 +249,27 @@ class OpenAIProvider(IntelligenceProvider):
 
         active = _ActiveRequest(token=cancellation_token, transport="http")
         self._active[request_id] = active
+        request_started = monotonic()
+        self._set_request_diagnostics(
+            request_id,
+            transport="http",
+            continuation=False,
+            connection_reused=False,
+            input_items=len(tuple(context.messages)),
+            requested_service_tier=self.config.service_tier,
+        )
         response_id: str | None = None
         terminal_emitted = False
 
         try:
             client = self._get_client()
+            create_started = monotonic()
             stream = await client.responses.create(
                 **self._request_params(context, tools, reasoning_policy)
+            )
+            self._set_request_diagnostics(
+                request_id,
+                create_return_ms=(monotonic() - create_started) * 1000.0,
             )
             active.stream = stream
 
@@ -252,6 +283,23 @@ class OpenAIProvider(IntelligenceProvider):
                         provider_response_id=response_id,
                     )
                     break
+                event_type = getattr(event, "type", "")
+                elapsed_ms = (monotonic() - request_started) * 1000.0
+                if event_type == "response.created":
+                    self._set_request_diagnostics(request_id, response_created_ms=elapsed_ms)
+                elif event_type == "response.in_progress":
+                    self._set_request_diagnostics(request_id, response_in_progress_ms=elapsed_ms)
+                elif event_type == "response.output_text.delta":
+                    if "first_text_ms" not in self._request_diagnostics.get(request_id, {}):
+                        self._set_request_diagnostics(request_id, first_text_ms=elapsed_ms)
+                elif event_type in {"response.completed", "response.incomplete", "response.failed"}:
+                    response = getattr(event, "response", None)
+                    self._set_request_diagnostics(
+                        request_id,
+                        terminal_ms=elapsed_ms,
+                        actual_service_tier=getattr(response, "service_tier", None),
+                    )
+
                 converted, response_id, terminal = self._convert_event(
                     event, context=context, response_id=response_id
                 )
@@ -310,6 +358,8 @@ class OpenAIProvider(IntelligenceProvider):
 
         active = _ActiveRequest(token=cancellation_token, transport="websocket")
         self._active[request_id] = active
+        request_started = monotonic()
+        connection_reused = self._voice_connection is not None
         response_id: str | None = None
         terminal_emitted = False
         text_parts: list[str] = []
@@ -324,7 +374,9 @@ class OpenAIProvider(IntelligenceProvider):
                     context, tools, reasoning_policy, websocket=True
                 )
                 lane = self._voice_lanes.get(conversation_id)
-                if lane is not None and self._can_continue_lane(lane, messages):
+                continuation, continuation_reason = self._diagnose_continuation(lane, messages)
+                if continuation:
+                    assert lane is not None
                     params["input"] = [messages[-1]]
                     params["previous_response_id"] = lane.previous_response_id
                     params["stream_id"] = lane.stream_id
@@ -333,7 +385,22 @@ class OpenAIProvider(IntelligenceProvider):
                     params["input"] = list(messages)
                     params["stream_id"] = self._stream_id(conversation_id)
 
+                self._set_request_diagnostics(
+                    request_id,
+                    transport="websocket",
+                    continuation=continuation,
+                    continuation_reason=continuation_reason,
+                    connection_reused=connection_reused,
+                    input_items=len(params["input"]),
+                    requested_service_tier=self.config.service_tier,
+                    stream_id=params["stream_id"],
+                )
+                create_started = monotonic()
                 await connection.response.create(**params)
+                self._set_request_diagnostics(
+                    request_id,
+                    create_return_ms=(monotonic() - create_started) * 1000.0,
+                )
 
                 async for event in connection:
                     if cancellation_token.is_cancelled:
@@ -347,6 +414,22 @@ class OpenAIProvider(IntelligenceProvider):
                         break
 
                     event_type = getattr(event, "type", "")
+                    elapsed_ms = (monotonic() - request_started) * 1000.0
+                    if event_type == "response.created":
+                        self._set_request_diagnostics(request_id, response_created_ms=elapsed_ms)
+                    elif event_type == "response.in_progress":
+                        self._set_request_diagnostics(request_id, response_in_progress_ms=elapsed_ms)
+                    elif event_type == "response.output_text.delta":
+                        if "first_text_ms" not in self._request_diagnostics.get(request_id, {}):
+                            self._set_request_diagnostics(request_id, first_text_ms=elapsed_ms)
+                    elif event_type in {"response.completed", "response.incomplete", "response.failed"}:
+                        response = getattr(event, "response", None)
+                        self._set_request_diagnostics(
+                            request_id,
+                            terminal_ms=elapsed_ms,
+                            actual_service_tier=getattr(response, "service_tier", None),
+                        )
+
                     if event_type == "response.output_text.delta":
                         delta = getattr(event, "delta", "")
                         if delta:
@@ -355,19 +438,40 @@ class OpenAIProvider(IntelligenceProvider):
                     converted, response_id, terminal = self._convert_event(
                         event, context=context, response_id=response_id
                     )
-                    for item in converted:
-                        yield item
+
+                    # Commit continuation state before yielding the terminal
+                    # event. ConversationCore stops consuming immediately after
+                    # COMPLETED, so code after a terminal yield is not guaranteed
+                    # to run.
                     if terminal:
                         terminal_emitted = True
-                        if event_type == "response.completed" and response_id:
+                        assistant_text = "".join(text_parts).strip()
+                        if (
+                            event_type == "response.completed"
+                            and response_id
+                            and assistant_text
+                        ):
                             self._voice_lanes[conversation_id] = _VoiceLaneState(
                                 previous_response_id=response_id,
                                 input_messages=messages,
-                                assistant_text="".join(text_parts).strip(),
+                                assistant_text=assistant_text,
                                 stream_id=params["stream_id"],
+                            )
+                            self._set_request_diagnostics(
+                                request_id,
+                                lane_committed=True,
+                                lane_response_id=response_id,
                             )
                         else:
                             self._voice_lanes.pop(conversation_id, None)
+                            self._set_request_diagnostics(
+                                request_id,
+                                lane_committed=False,
+                            )
+
+                    for item in converted:
+                        yield item
+                    if terminal:
                         break
 
                 if not terminal_emitted:
@@ -404,20 +508,35 @@ class OpenAIProvider(IntelligenceProvider):
                 self._active.pop(request_id, None)
 
     @staticmethod
+    def _diagnose_continuation(
+        lane: _VoiceLaneState | None,
+        messages: tuple[dict[str, Any], ...],
+    ) -> tuple[bool, str]:
+        if lane is None:
+            return False, "no_lane"
+        if not lane.assistant_text:
+            return False, "lane_missing_assistant_text"
+        if len(messages) < 2:
+            return False, "insufficient_messages"
+
+        expected_prefix = lane.input_messages + (
+            {"role": "assistant", "content": lane.assistant_text},
+        )
+        if len(messages) != len(expected_prefix) + 1:
+            return False, "message_count_changed"
+        if messages[:-1] != expected_prefix:
+            return False, "snapshot_diverged"
+        if messages[-1].get("role") != "user":
+            return False, "last_item_not_user"
+        return True, "exact_chain"
+
+    @staticmethod
     def _can_continue_lane(
         lane: _VoiceLaneState,
         messages: tuple[dict[str, Any], ...],
     ) -> bool:
-        if not lane.assistant_text or len(messages) < 2:
-            return False
-        expected_prefix = lane.input_messages + (
-            {"role": "assistant", "content": lane.assistant_text},
-        )
-        return (
-            len(messages) == len(expected_prefix) + 1
-            and messages[:-1] == expected_prefix
-            and messages[-1].get("role") == "user"
-        )
+        can_continue, _ = OpenAIProvider._diagnose_continuation(lane, messages)
+        return can_continue
 
     @staticmethod
     def _stream_id(conversation_id: str) -> str:
@@ -588,6 +707,9 @@ class OpenAIProvider(IntelligenceProvider):
         status = getattr(response, "status", None)
         if status:
             metadata["status"] = str(status)
+        service_tier = getattr(response, "service_tier", None)
+        if service_tier:
+            metadata["service_tier"] = str(service_tier)
         usage = getattr(response, "usage", None)
         if usage is not None:
             if hasattr(usage, "model_dump"):
