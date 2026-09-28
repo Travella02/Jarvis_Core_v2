@@ -152,6 +152,19 @@ def _apply_voice_profile(args: argparse.Namespace) -> VoiceProfile | None:
     return profile
 
 
+def _whisper_config_from_args(args: argparse.Namespace | None = None) -> WhisperCppConfig:
+    """Build the Whisper config for the selected Voice Lab mode.
+
+    Repair34 originally wired the final-only flag into doctor() instead of the
+    live build_engine() path. This helper keeps the selection in one place so
+    live sessions, provider health, and diagnostics cannot drift again.
+    """
+    config = WhisperCppConfig.from_env(env_file=PROJECT_ROOT / ".env")
+    if bool(getattr(args, "stt_endpoint_final_only", False)):
+        config = replace(config, emit_partials=False)
+    return config
+
+
 def _tts_provider_from_args(args: argparse.Namespace | None = None):
     provider_name = getattr(args, "tts_provider", "chatterbox") if args is not None else "chatterbox"
     if provider_name == "qwen3":
@@ -178,7 +191,7 @@ def _qwen_doctor_payload() -> dict[str, object]:
 
 
 def doctor() -> int:
-    stt = WhisperCppProvider(WhisperCppConfig.from_env(env_file=PROJECT_ROOT / ".env"))
+    stt = WhisperCppProvider(_whisper_config_from_args())
     tts = ChatterboxTurboProvider(ChatterboxConfig.from_env(env_file=PROJECT_ROOT / ".env"))
     payload = {
         "version": (PROJECT_ROOT / "VERSION").read_text().strip(),
@@ -439,7 +452,7 @@ async def qwen_clone_diagnostic(args: argparse.Namespace) -> int:
 
 
 async def provider_health(args: argparse.Namespace) -> int:
-    stt = WhisperCppProvider(WhisperCppConfig.from_env(env_file=PROJECT_ROOT / ".env"))
+    stt = WhisperCppProvider(_whisper_config_from_args(args))
     tts = _tts_provider_from_args(args)
     stt_health = await stt.health()
     tts_health = await tts.health()
@@ -610,7 +623,7 @@ def build_engine(args: argparse.Namespace):
         ),
         provider=intelligence,
     )
-    stt = WhisperCppProvider(WhisperCppConfig.from_env(env_file=PROJECT_ROOT / ".env"))
+    stt = WhisperCppProvider(_whisper_config_from_args(args))
     tts = _tts_provider_from_args(args)
     profile = getattr(args, "resolved_voice_profile", None)
     if profile is None:
@@ -671,6 +684,13 @@ async def _prewarm_voice(engine: VoiceLabEngine, stt, tts) -> None:
         stt_started = monotonic()
         await stt_warmup()
         print(f"STT inference warmup completed in {monotonic() - stt_started:.2f}s (output discarded).")
+        if stt.metadata.provider == "whisper.cpp":
+            mode = (
+                "final-only after endpoint"
+                if stt.metadata.extra.get("endpointed_final_only")
+                else "rolling partial + final"
+            )
+            print(f"Whisper endpoint mode: {mode}")
 
     # Health checks load TTS models, but CUDA/JIT kernels and clone-prompt caches
     # can still be cold until the first real synthesis. Native resident providers
@@ -888,6 +908,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--vad", type=int, default=2, choices=[0, 1, 2, 3])
     parser.add_argument("--end-silence-ms", type=int, default=360)
+    parser.add_argument(
+        "--stt-endpoint-final-only",
+        action="store_true",
+        help=(
+            "Repair34 A/B: because Voice Core already endpoints/evidence-gates the utterance, "
+            "skip Whisper's redundant post-endpoint partial inference and run one full final inference."
+        ),
+    )
     parser.add_argument(
         "--tts-response-mode",
         choices=["streaming", "whole"],

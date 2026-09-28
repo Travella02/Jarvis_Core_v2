@@ -53,7 +53,12 @@ class WhisperCppProvider(SpeechToTextProvider):
             streaming_input=True,
             streaming_output=True,
             voice_cloning=False,
-            extra={"transport": "localhost-server", "quantization": "q5_0"},
+            extra={
+                "transport": "localhost-server",
+                "quantization": "q5_0",
+                "partials": bool(self.config.emit_partials),
+                "endpointed_final_only": not bool(self.config.emit_partials),
+            },
         )
 
     async def health(self) -> SpeechProviderHealth:
@@ -164,7 +169,8 @@ class WhisperCppProvider(SpeechToTextProvider):
                     frames.append(frame)
                     elapsed_ms += frame.duration_ms
                     due = (
-                        elapsed_ms >= self.config.min_partial_audio_ms
+                        self.config.emit_partials
+                        and elapsed_ms >= self.config.min_partial_audio_ms
                         and elapsed_ms - last_partial_started_ms >= self.config.partial_interval_ms
                     )
                     if due and (partial_task is None or partial_task.done()):

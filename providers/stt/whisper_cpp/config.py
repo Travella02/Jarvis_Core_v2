@@ -48,6 +48,10 @@ class WhisperCppConfig:
     language: str = "en"
     partial_interval_ms: int = 900
     min_partial_audio_ms: int = 900
+    # Repair34 A/B. True preserves the existing rolling-partial behavior.
+    # Voice Lab may disable it because Core already endpoints and evidence-gates
+    # the entire utterance before this adapter sees any audio.
+    emit_partials: bool = True
     threads: int = 8
     use_gpu: bool = True
     startup_timeout_s: float = 45.0
@@ -80,6 +84,8 @@ class WhisperCppConfig:
             language=source.get("JARVIS_WHISPER_LANGUAGE", "en"),
             partial_interval_ms=int(source.get("JARVIS_WHISPER_PARTIAL_MS", "900")),
             min_partial_audio_ms=int(source.get("JARVIS_WHISPER_MIN_PARTIAL_MS", "900")),
+            emit_partials=source.get("JARVIS_WHISPER_EMIT_PARTIALS", "1").strip().lower()
+            not in {"0", "false", "no"},
             threads=int(source.get("JARVIS_WHISPER_THREADS", "8")),
             use_gpu=source.get("JARVIS_WHISPER_USE_GPU", "1").strip().lower() not in {"0", "false", "no"},
         )
