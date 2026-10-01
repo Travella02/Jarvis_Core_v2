@@ -14,6 +14,7 @@ from core.conversation.models import (
     InputChannel,
     TranscriptEntry,
     TranscriptRole,
+    VoiceInterruptionContext,
 )
 from core.conversation.state_machine import CoreState, CoreStateMachine
 from core.intelligence import (
@@ -131,6 +132,16 @@ class ConversationCore:
         terminal_status: str | None = None
         terminal_detail: str | None = None
         response_started = False
+        pending_voice_interruption = (
+            self.context.pending_voice_interruption
+            if channel is InputChannel.VOICE
+            else None
+        )
+        if channel is InputChannel.VOICE:
+            # Generated model text is not the same thing as audio the user heard.
+            # VoiceEngine records COMPLETE/INTERRUPTED only after physical playback.
+            self.context.heard_response_state = HeardResponseState.NONE
+            self.context.heard_response_text = ""
 
         user_entry = TranscriptEntry.create(
             role=TranscriptRole.USER,
@@ -175,14 +186,20 @@ class ConversationCore:
         try:
             snapshot = self.context.to_intelligence_context(trace)
             if channel is InputChannel.VOICE:
+                metadata = {**dict(snapshot.metadata), "input_channel": "voice"}
+                if pending_voice_interruption is not None:
+                    metadata["voice_interruption"] = pending_voice_interruption.to_dict()
                 snapshot = IntelligenceContext(
                     trace=snapshot.trace,
                     messages=(
                         {"role": "developer", "content": VOICE_RESPONSE_INSTRUCTION},
                         *snapshot.messages,
                     ),
-                    metadata={**dict(snapshot.metadata), "input_channel": "voice"},
+                    metadata=metadata,
                 )
+                # The interruption note belongs to this next voice turn only. It
+                # remains in OpenAI's previous_response_id chain once submitted.
+                self.context.pending_voice_interruption = None
             async for event in self.provider.stream_response(
                 context=snapshot,
                 tools=tools,
@@ -201,8 +218,9 @@ class ConversationCore:
                         )
                         response_started = True
                     chunks.append(event.text_delta)
-                    self.context.heard_response_state = HeardResponseState.PARTIAL
-                    self.context.heard_response_text = "".join(chunks)
+                    if channel is InputChannel.TYPED:
+                        self.context.heard_response_state = HeardResponseState.PARTIAL
+                        self.context.heard_response_text = "".join(chunks)
                     self.event_bus.emit(
                         "response.text.delta",
                         origin="intelligence-provider",
@@ -265,8 +283,9 @@ class ConversationCore:
                 )
 
             if terminal_status == "completed":
-                self.context.heard_response_state = HeardResponseState.COMPLETE
-                self.context.heard_response_text = response_text
+                if channel is InputChannel.TYPED:
+                    self.context.heard_response_state = HeardResponseState.COMPLETE
+                    self.context.heard_response_text = response_text
                 self.event_bus.emit(
                     "response.completed",
                     origin="conversation-core",
@@ -283,8 +302,9 @@ class ConversationCore:
                 if self.state.state in {CoreState.THINKING, CoreState.SPEAKING}:
                     self.state.transition(CoreState.LISTENING, trace=trace, reason="turn complete")
             elif terminal_status == "cancelled":
-                self.context.heard_response_state = HeardResponseState.INTERRUPTED
-                self.context.heard_response_text = response_text
+                if channel is InputChannel.TYPED:
+                    self.context.heard_response_state = HeardResponseState.INTERRUPTED
+                    self.context.heard_response_text = response_text
                 self.event_bus.emit(
                     "response.interrupted",
                     origin="conversation-core",
@@ -297,8 +317,9 @@ class ConversationCore:
                 if self.state.state in {CoreState.THINKING, CoreState.SPEAKING}:
                     self.state.transition(CoreState.LISTENING, trace=trace, reason="turn cancelled")
             elif terminal_status == "degraded":
-                self.context.heard_response_state = HeardResponseState.INTERRUPTED
-                self.context.heard_response_text = response_text
+                if channel is InputChannel.TYPED:
+                    self.context.heard_response_state = HeardResponseState.INTERRUPTED
+                    self.context.heard_response_text = response_text
                 self.state.transition(CoreState.DEGRADED, trace=trace, reason=terminal_detail)
                 self.event_bus.emit(
                     "provider.degraded",
@@ -310,8 +331,9 @@ class ConversationCore:
                     payload={"detail": terminal_detail},
                 )
             else:
-                self.context.heard_response_state = HeardResponseState.INTERRUPTED
-                self.context.heard_response_text = response_text
+                if channel is InputChannel.TYPED:
+                    self.context.heard_response_state = HeardResponseState.INTERRUPTED
+                    self.context.heard_response_text = response_text
                 self.state.transition(CoreState.ERROR, trace=trace, reason=terminal_detail)
                 self.event_bus.emit(
                     "core.error",
@@ -362,6 +384,60 @@ class ConversationCore:
         finally:
             self.cancellations.complete(handle.cancellation_id)
             self._active_trace = None
+
+    def record_voice_playback(
+        self,
+        *,
+        response_turn_id: str | None,
+        generated_text: str,
+        heard_text: str,
+        interrupted: bool,
+        playback_ms: float,
+        played_bytes: int,
+        queued_bytes: int,
+        alignment_method: str,
+        interruption_phase: str = "speaking",
+    ) -> None:
+        """Commit what was physically heard, separately from generated text."""
+
+        clean_generated = generated_text.strip()
+        clean_heard = heard_text.strip()
+        if interrupted:
+            self.context.heard_response_state = HeardResponseState.INTERRUPTED
+            self.context.heard_response_text = clean_heard
+            interruption = VoiceInterruptionContext(
+                response_turn_id=response_turn_id,
+                generated_text=clean_generated,
+                heard_text=clean_heard,
+                playback_ms=max(0.0, playback_ms),
+                played_bytes=max(0, played_bytes),
+                queued_bytes=max(0, queued_bytes),
+                alignment_method=alignment_method,
+                interruption_phase=interruption_phase,
+            )
+            self.context.pending_voice_interruption = interruption
+            event_type = "voice.playback.interrupted"
+            payload = interruption.to_dict()
+        else:
+            self.context.heard_response_state = HeardResponseState.COMPLETE
+            self.context.heard_response_text = clean_generated
+            self.context.pending_voice_interruption = None
+            event_type = "voice.playback.completed"
+            payload = {
+                "response_turn_id": response_turn_id,
+                "playback_ms": max(0.0, playback_ms),
+                "played_bytes": max(0, played_bytes),
+                "queued_bytes": max(0, queued_bytes),
+            }
+
+        self.event_bus.emit(
+            event_type,
+            origin="voice-engine",
+            conversation_id=self.context.conversation_id,
+            user_id=self.context.user_id,
+            device_id=self.context.device_id,
+            payload=payload,
+        )
 
     async def cancel_active_turn(self, reason: str = "user requested cancellation") -> bool:
         trace = self._active_trace

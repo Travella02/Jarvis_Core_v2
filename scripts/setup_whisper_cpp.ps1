@@ -333,3 +333,19 @@ Write-Host "Whisper runtime ready."
 Write-Host "Backend: $Backend"
 Write-Host "Server: $(Join-Path $BinDir 'whisper-server.exe')"
 Write-Host "Model:  $ModelPath"
+
+# 0.0.5 realtime conversation control uses whisper.cpp's dedicated Silero
+# VAD API as an independent speech-presence authority. Keep the tiny model
+# setup beside the main runtime setup so fresh installs are zero-surprise.
+$VadSetup = Join-Path $PSScriptRoot "setup_whisper_vad.ps1"
+if (-not (Test-Path $VadSetup)) {
+    throw "Silero VAD setup script is missing: $VadSetup"
+}
+if ($Force) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $VadSetup -Force
+} else {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $VadSetup
+}
+if ($LASTEXITCODE -ne 0) {
+    throw "Silero VAD model setup failed with exit code $LASTEXITCODE."
+}

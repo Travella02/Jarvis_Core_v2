@@ -4,19 +4,23 @@ Jarvis Core v2 is a clean rebuild of Jarvis with provider-independent intelligen
 
 ## Current milestone
 
-**0.0.4-repair18 - Voice Lab / Luna + Qwen Latency Pass**
+**0.0.5 - Realtime Conversation Control**
 
-This milestone begins the local-first ORVEX Voice Engine on top of the accepted 0.0.3 Conversation Core.
+0.0.5 builds directly on the accepted 0.0.4 voice pipeline. The accepted path is local whisper.cpp STT -> GPT-6 Luna over persistent Responses WebSocket continuation -> whole-response local Qwen3-TTS playback.
 
-Initial candidate path:
+The new milestone adds lifecycle/conversation control without adding tools, memory, UI, or future activity modes:
 
-`microphone -> ORVEX input validation / endpointing -> whisper.cpp large-v3-turbo-q5_0 -> Conversation Core -> GPT-5.6 Luna -> swappable local TTS (Chatterbox Turbo or Qwen3-TTS 0.6B Base) -> speakers`
+- Jarvis starts sleeping by default and listens locally only.
+- A wake phrase can lead a complete command in one utterance: `Hey Jarvis, what is new in Rocket League?` wakes Jarvis and immediately routes only the command remainder.
+- Once awake, follow-up turns do not require the wake phrase.
+- Jarvis returns to sleep only on an explicit sleep phrase or 60 seconds of true inactivity after the last user/Jarvis activity.
+- The microphone resumes while local speech is playing. Endpoint-confirmed user speech triggers barge-in and stops playback without cancelling the new capture.
+- Conversation Core records generated text separately from what was physically heard. The next GPT-6 Luna turn receives an internal playback note containing the interruption offset and an approximate heard prefix while preserving `previous_response_id` continuation whenever the local transcript chain still matches.
+- Wake phrases are configuration, not hard-coded product identity. `Jarvis`/`Hey Jarvis` are defaults; future settings can choose another phrase without replacing the voice engine.
 
-Luna now defaults to its fastest `none` reasoning mode for ordinary Jarvis turns; future difficult-task escalation should switch providers rather than making the everyday Luna path slower.
+Lifecycle (`sleeping`/`awake`) is deliberately separate from future activity/status modes such as working, researching, thinking, waiting, or error.
 
-Whisper and Chatterbox are adapters, not Core dependencies. Model/provider-specific runtimes live under ignored `.runtime/voice/` folders and can be replaced without rewriting Conversation Core or the ORVEX audio/endpoint/cancellation layer.
-
-0.0.4 is intentionally a half-duplex development lab: it endpoints one utterance and then speaks the response. Full-duplex mic + speaker operation, AEC/noise handling, automatic barge-in, and precise heard/unheard response alignment remain 0.0.5.
+**Known 0.0.5 limitation:** full-duplex capture is headset-first. Production acoustic echo cancellation/noise suppression and word-perfect TTS alignment are separate future audio improvements; interruption preserves exact PCM playback time and an explicitly approximate text prefix today.
 
 ## Requirements
 

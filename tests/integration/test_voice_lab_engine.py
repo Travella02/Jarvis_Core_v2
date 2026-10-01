@@ -123,6 +123,19 @@ class FakeSTT(SpeechToTextProvider):
         yield TranscriptionEvent(frames[0].trace, TranscriptionEventType.FINAL, "hello jarvis")
 
 
+class FalseThenRealSTT(FakeSTT):
+    async def stream_transcription(self, audio, cancellation_token):
+        self.call_count += 1
+        frames = []
+        async for frame in audio:
+            frames.append(frame)
+            if self.call_count > 1 and len(frames) == 2:
+                yield TranscriptionEvent(frame.trace, TranscriptionEventType.PARTIAL, "hello")
+        self.last_frame_count = len(frames)
+        text = "" if self.call_count == 1 else "hello jarvis"
+        yield TranscriptionEvent(frames[0].trace, TranscriptionEventType.FINAL, text)
+
+
 class FakeTTS(TextToSpeechProvider):
     def __init__(self): self.texts = []
     @property
@@ -182,7 +195,7 @@ class VoiceLabEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("luna_first_text", result.latency_ms)
         self.assertIn("audio_first_played", result.latency_ms)
 
-    async def test_high_energy_speech_can_rescue_blind_vad(self):
+    async def test_high_energy_audio_cannot_bypass_neural_speech_presence(self):
         stt = FakeSTT()
         core = ConversationCore(context=ConversationContext("conv", "user"), provider=FakeIntelligence())
         engine = VoiceLabEngine(
@@ -198,12 +211,14 @@ class VoiceLabEngineTests(unittest.IsolatedAsyncioTestCase):
                 preroll_ms=60,
             ),
         )
-        transcript, _latency, _trace = await engine.listen_once()
-        self.assertEqual(transcript, "hello jarvis")
-        self.assertEqual(stt.call_count, 1)
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(engine.listen_once(), timeout=0.03)
+        # Loud PCM is telemetry only. If the independent VAD says no speech,
+        # Whisper must never be invoked and therefore cannot hallucinate a turn.
+        self.assertEqual(stt.call_count, 0)
 
-    async def test_false_speech_candidate_is_discarded_before_stt_and_listening_continues(self):
-        stt = FakeSTT()
+    async def test_false_speech_candidate_reaches_stt_then_transcriptless_turn_is_discarded(self):
+        stt = FalseThenRealSTT()
         core = ConversationCore(context=ConversationContext("conv", "user"), provider=FakeIntelligence())
         engine = VoiceLabEngine(
             conversation=core,
@@ -220,7 +235,7 @@ class VoiceLabEngineTests(unittest.IsolatedAsyncioTestCase):
         )
         transcript, _latency, _trace = await engine.listen_once()
         self.assertEqual(transcript, "hello jarvis")
-        self.assertEqual(stt.call_count, 1)
+        self.assertEqual(stt.call_count, 2)
 
     async def test_interrupt_skeleton_stops_output_without_vendor_knowledge(self):
         output = FakeOutput()

@@ -376,6 +376,7 @@ class SoundDeviceAudioOutput(AudioOutput):
         # resampling may change the number of bytes physically written, so keep
         # source consumption separate from the output buffer size.
         source_bytes_consumed = 0
+        source_duration_ms_written = 0.0
         first_write_ns = None
         first_write_completed_ns = None
         estimated_first_audible_ns = None
@@ -413,6 +414,7 @@ class SoundDeviceAudioOutput(AudioOutput):
                     if first_write_completed_ns is None:
                         first_write_completed_ns = monotonic_ns()
                     source_bytes_consumed += len(frame.payload)
+                    source_duration_ms_written += frame.duration_ms
             finally:
                 if stream is not None:
                     await asyncio.to_thread(stream.stop)
@@ -426,6 +428,7 @@ class SoundDeviceAudioOutput(AudioOutput):
             output_latency_ms=output_latency_ms,
             low_latency_requested=True,
             low_latency_active=low_latency_active,
+            source_duration_ms_written=source_duration_ms_written,
         )
 
     async def stop(self) -> None:

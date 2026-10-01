@@ -58,6 +58,8 @@ class WhisperCppProvider(SpeechToTextProvider):
                 "quantization": "q5_0",
                 "partials": bool(self.config.emit_partials),
                 "endpointed_final_only": not bool(self.config.emit_partials),
+                "suppress_non_speech": bool(self.config.suppress_non_speech),
+                "no_speech_threshold": self.config.no_speech_threshold,
             },
         )
 
@@ -338,6 +340,8 @@ class WhisperCppProvider(SpeechToTextProvider):
         field("language", self.config.language)
         field("temperature", "0.0")
         field("no_timestamps", "true")
+        field("suppress_nst", "true" if self.config.suppress_non_speech else "false")
+        field("no_speech_thold", str(self.config.no_speech_threshold))
         parts.append(f"--{boundary}--\r\n".encode())
         body = b"".join(parts)
         request = urllib.request.Request(

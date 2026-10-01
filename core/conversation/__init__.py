@@ -11,6 +11,7 @@ from .models import (
     ReferentKind,
     TranscriptEntry,
     TranscriptRole,
+    VoiceInterruptionContext,
 )
 from .referents import ReferentResolution, ReferentResolver, ResolutionStatus
 from .state_machine import CoreState, CoreStateMachine, InvalidStateTransition
@@ -34,5 +35,6 @@ __all__ = [
     "TranscriptEntry",
     "TranscriptRole",
     "TurnResult",
+    "VoiceInterruptionContext",
     "run_conversation_benchmark",
 ]

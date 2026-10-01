@@ -42,7 +42,7 @@ class SpeechEvidenceTests(unittest.TestCase):
             [False, False, False, True, True, False, False, False],
         )
         self.assertFalse(result.report.accepted)
-        self.assertIn(result.report.reason, {"speech-span-too-short", "insufficient-vad-speech", "insufficient-energy"})
+        self.assertEqual(result.report.reason, "speech-span-too-short")
 
     def test_normal_high_energy_speech_is_accepted(self):
         result = self._candidate(
@@ -74,13 +74,14 @@ class SpeechEvidenceTests(unittest.TestCase):
         self.assertEqual(result.report.vad_speech_ms, 0)
         self.assertGreater(result.report.peak_rms, 0.3)
 
-    def test_noise_floor_raises_energy_threshold(self):
+    def test_quiet_vad_speech_is_not_rejected_by_energy_or_peak(self):
         result = self._candidate(
-            [1200, 1300, 1250] + [1700] * 8 + [1200, 1200, 1200],
+            [100, 120, 110] + [650] * 8 + [100, 120, 110],
             [False, False, False] + [True] * 8 + [False, False, False],
         )
-        self.assertFalse(result.report.accepted)
-        self.assertGreater(result.report.active_rms_threshold, 0.05)
+        self.assertTrue(result.report.accepted, result.report)
+        self.assertEqual(result.report.reason, "accepted-for-stt")
+        self.assertLess(result.report.peak_rms, 0.03)
 
 
 if __name__ == "__main__":

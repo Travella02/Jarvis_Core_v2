@@ -11,3 +11,9 @@ class VoiceActivityDetector(ABC):
     @abstractmethod
     def is_speech(self, frame: AudioFrame) -> bool:
         raise NotImplementedError
+
+    def reset(self) -> None:
+        """Reset streaming detector state between utterances when supported."""
+
+    def close(self) -> None:
+        """Release provider resources when supported."""

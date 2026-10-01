@@ -53,6 +53,60 @@ class HeardResponseState(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class VoiceInterruptionContext:
+    """What the user actually heard when spoken playback was interrupted.
+
+    Text alignment is explicitly approximate in 0.0.5. The exact PCM playback
+    offset is preserved so a future forced-aligner can improve word precision
+    without changing the conversation contract.
+    """
+
+    response_turn_id: str | None
+    generated_text: str
+    heard_text: str
+    playback_ms: float
+    played_bytes: int
+    queued_bytes: int
+    alignment_method: str = "approximate"
+    interruption_phase: str = "speaking"
+
+    def __post_init__(self) -> None:
+        if self.playback_ms < 0:
+            raise ValueError("playback_ms must be non-negative")
+        if self.played_bytes < 0 or self.queued_bytes < 0:
+            raise ValueError("playback byte counts must be non-negative")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "response_turn_id": self.response_turn_id,
+            "generated_text": self.generated_text,
+            "heard_text": self.heard_text,
+            "playback_ms": self.playback_ms,
+            "played_bytes": self.played_bytes,
+            "queued_bytes": self.queued_bytes,
+            "alignment_method": self.alignment_method,
+            "interruption_phase": self.interruption_phase,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "VoiceInterruptionContext":
+        return cls(
+            response_turn_id=(
+                str(data["response_turn_id"])
+                if data.get("response_turn_id") is not None
+                else None
+            ),
+            generated_text=str(data.get("generated_text", "")),
+            heard_text=str(data.get("heard_text", "")),
+            playback_ms=float(data.get("playback_ms", 0.0)),
+            played_bytes=int(data.get("played_bytes", 0)),
+            queued_bytes=int(data.get("queued_bytes", 0)),
+            alignment_method=str(data.get("alignment_method", "approximate")),
+            interruption_phase=str(data.get("interruption_phase", "speaking")),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Referent:
     """A context object that words such as 'it' or 'that' may refer to."""
 
@@ -191,6 +245,7 @@ class ConversationContext:
     recent_transcript: list[TranscriptEntry] = field(default_factory=list)
     heard_response_state: HeardResponseState = HeardResponseState.NONE
     heard_response_text: str = ""
+    pending_voice_interruption: VoiceInterruptionContext | None = None
     max_recent_referents: int = 32
     max_recent_transcript: int = 64
 
@@ -329,6 +384,11 @@ class ConversationContext:
             "recent_transcript": [item.to_dict() for item in self.recent_transcript],
             "heard_response_state": self.heard_response_state.value,
             "heard_response_text": self.heard_response_text,
+            "pending_voice_interruption": (
+                self.pending_voice_interruption.to_dict()
+                if self.pending_voice_interruption is not None
+                else None
+            ),
             "max_recent_referents": self.max_recent_referents,
             "max_recent_transcript": self.max_recent_transcript,
         }
@@ -359,6 +419,11 @@ class ConversationContext:
             ],
             heard_response_state=HeardResponseState(str(data.get("heard_response_state", "none"))),
             heard_response_text=str(data.get("heard_response_text", "")),
+            pending_voice_interruption=(
+                VoiceInterruptionContext.from_dict(data["pending_voice_interruption"])
+                if data.get("pending_voice_interruption")
+                else None
+            ),
             max_recent_referents=int(data.get("max_recent_referents", 32)),
             max_recent_transcript=int(data.get("max_recent_transcript", 64)),
         )

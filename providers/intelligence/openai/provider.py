@@ -60,7 +60,7 @@ class _VoiceLaneState:
 
 
 class OpenAIProvider(IntelligenceProvider):
-    """GPT-5.6 Luna adapter using the OpenAI Responses API.
+    """Luna adapter using the OpenAI Responses API.
 
     HTTP remains the general provider path. Voice Lab may opt into a persistent
     Responses WebSocket connection. The WebSocket continuation cache is purely a
@@ -171,6 +171,41 @@ class OpenAIProvider(IntelligenceProvider):
         self._client = AsyncOpenAI(**kwargs)
         return self._client
 
+    @staticmethod
+    def _voice_interruption_item(context: IntelligenceContext) -> dict[str, Any] | None:
+        raw = context.metadata.get("voice_interruption")
+        if not isinstance(raw, dict):
+            return None
+        generated = str(raw.get("generated_text") or "").strip()
+        heard = str(raw.get("heard_text") or "").strip()
+        playback_ms = float(raw.get("playback_ms") or 0.0)
+        alignment = str(raw.get("alignment_method") or "approximate")
+        phase = str(raw.get("interruption_phase") or "speaking")
+        note = (
+            "Interruption context from the client: the user interrupted your previous turn "
+            f"during the {phase} phase. Do not assume they heard content that was never played. "
+            f"Playback stopped about {playback_ms:.0f} ms into speech. "
+            f"Approximate heard prefix ({alignment}): {heard or '[none]'}. "
+            f"The complete generated response remains in conversation history: {generated or '[unknown]'}. "
+            "Respond naturally to the user's new utterance with that interruption in mind; do not "
+            "restart or repeat material unless it is useful."
+        )
+        return {"role": "developer", "content": note}
+
+    @classmethod
+    def _input_with_voice_interruption(
+        cls,
+        context: IntelligenceContext,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        item = cls._voice_interruption_item(context)
+        if item is None or not messages:
+            return messages
+        # The final serialized item is the current user turn. Insert the playback
+        # note immediately before it so both full-context and continuation paths
+        # preserve the same semantics.
+        return [*messages[:-1], item, messages[-1]]
+
     def _request_params(
         self,
         context: IntelligenceContext,
@@ -179,9 +214,12 @@ class OpenAIProvider(IntelligenceProvider):
         *,
         websocket: bool = False,
     ) -> dict[str, Any]:
+        serialized_input = self._input_with_voice_interruption(
+            context, list(serialize_messages(context))
+        )
         params: dict[str, Any] = {
             "model": self.config.model,
-            "input": serialize_messages(context),
+            "input": serialized_input,
             "reasoning": {"effort": reasoning_effort(reasoning_policy, self.config)},
             "max_output_tokens": self.config.max_output_tokens,
             "store": self.config.store_responses,
@@ -377,7 +415,11 @@ class OpenAIProvider(IntelligenceProvider):
                 continuation, continuation_reason = self._diagnose_continuation(lane, messages)
                 if continuation:
                     assert lane is not None
-                    params["input"] = [messages[-1]]
+                    incremental_input = [messages[-1]]
+                    interruption_item = self._voice_interruption_item(context)
+                    if interruption_item is not None:
+                        incremental_input.insert(0, interruption_item)
+                    params["input"] = incremental_input
                     params["previous_response_id"] = lane.previous_response_id
                     params["stream_id"] = lane.stream_id
                 else:
@@ -393,6 +435,7 @@ class OpenAIProvider(IntelligenceProvider):
                     connection_reused=connection_reused,
                     input_items=len(params["input"]),
                     requested_service_tier=self.config.service_tier,
+                    interruption_context=bool(context.metadata.get("voice_interruption")),
                     stream_id=params["stream_id"],
                 )
                 create_started = monotonic()

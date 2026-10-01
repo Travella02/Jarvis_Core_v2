@@ -52,6 +52,10 @@ class WhisperCppConfig:
     # Voice Lab may disable it because Core already endpoints and evidence-gates
     # the entire utterance before this adapter sees any audio.
     emit_partials: bool = True
+    # Repair4: let Whisper's own no-speech token suppress silence hallucinations
+    # before transcript text can become a realtime user turn.
+    suppress_non_speech: bool = True
+    no_speech_threshold: float = 0.60
     threads: int = 8
     use_gpu: bool = True
     startup_timeout_s: float = 45.0
@@ -63,6 +67,8 @@ class WhisperCppConfig:
             raise ValueError("port must be 1..65535")
         if self.partial_interval_ms <= 0 or self.min_partial_audio_ms <= 0:
             raise ValueError("partial timing must be positive")
+        if not 0.0 <= self.no_speech_threshold <= 1.0:
+            raise ValueError("no_speech_threshold must be between 0 and 1")
         if self.threads <= 0:
             raise ValueError("threads must be positive")
 
@@ -86,6 +92,9 @@ class WhisperCppConfig:
             min_partial_audio_ms=int(source.get("JARVIS_WHISPER_MIN_PARTIAL_MS", "900")),
             emit_partials=source.get("JARVIS_WHISPER_EMIT_PARTIALS", "1").strip().lower()
             not in {"0", "false", "no"},
+            suppress_non_speech=source.get("JARVIS_WHISPER_SUPPRESS_NON_SPEECH", "1").strip().lower()
+            not in {"0", "false", "no"},
+            no_speech_threshold=float(source.get("JARVIS_WHISPER_NO_SPEECH_THRESHOLD", "0.60")),
             threads=int(source.get("JARVIS_WHISPER_THREADS", "8")),
             use_gpu=source.get("JARVIS_WHISPER_USE_GPU", "1").strip().lower() not in {"0", "false", "no"},
         )

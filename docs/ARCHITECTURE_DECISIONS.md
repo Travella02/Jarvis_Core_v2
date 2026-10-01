@@ -197,3 +197,20 @@ This decision is provider-specific. `VoiceProfile` and the canonical Jarvis voic
 ## 2026-09-25 — Voice transport continuation remains subordinate to Conversation Core
 
 Voice may use a persistent provider transport such as OpenAI Responses WebSocket mode, but provider-side continuation is only a latency cache. Conversation Core remains authoritative. A provider may send incremental input with a prior response ID only when the current Core snapshot exactly extends the previously completed provider turn; otherwise it must reset and send full context. Transport state can always be discarded without losing Jarvis conversation truth.
+
+
+## ADR-030 — Presence lifecycle is separate from future activity/status modes
+
+0.0.5 introduces a `VoicePresenceState` with only `sleeping` and `awake`. It is not a replacement for Conversation Core foreground activity and must not become the bucket for future modes such as working, researching, thinking, waiting, authenticating, or error. Those can later coexist with an awake Jarvis. This separation prevents wake/sleep policy from being rewritten as richer activity UX arrives.
+
+## ADR-031 — Wake phrases are configuration and may carry the command in the same utterance
+
+The default wake phrases are `hey jarvis` and `jarvis`, but wake detection is provider-neutral configuration. While sleeping, local STT may hear complete utterances, but no cloud intelligence request is made unless the utterance begins with a configured wake phrase. The matched invocation is removed and any remaining text is immediately submitted as the same user command. Future product settings may change wake phrases without replacing Conversation Core or the voice engine.
+
+## ADR-032 — Physical hearing state is distinct from generated assistant text
+
+A completed Luna response is not automatically a response the user heard. Conversation Core keeps the full generated assistant transcript for semantic continuity. Voice playback separately commits `complete` or `interrupted` hearing state. On interruption, Core stores the physical PCM playback duration/bytes and an explicitly approximate heard-text prefix. The next voice request receives a private developer playback note so the model does not assume the unplayed remainder was heard. OpenAI `previous_response_id` continuation is preserved when the authoritative transcript chain still matches.
+
+## ADR-033 — 0.0.5 barge-in is full-duplex but headset-first
+
+The microphone resumes while TTS playback is active. Endpoint-confirmed user speech stops local playback immediately, while the same microphone capture continues through endpointing/STT and becomes the next turn. This establishes correct interruption/cancellation semantics without coupling Core to a concrete TTS provider. Production AEC/noise suppression remains a later audio integration because speaker echo can otherwise resemble user speech; 0.0.5 live acceptance should use a headset.

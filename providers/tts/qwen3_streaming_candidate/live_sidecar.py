@@ -6,6 +6,7 @@ kept on stdout while third-party model logs are redirected to stderr.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from contextlib import redirect_stdout
 import json
 import random
@@ -41,6 +42,7 @@ def main() -> int:
     p.add_argument("--emit-every-frames", type=int, default=4)
     p.add_argument("--decode-window-frames", type=int, default=80)
     p.add_argument("--fixed-seed", type=int, default=None)
+    p.add_argument("--cancel-dir", required=True)
     args = p.parse_args()
     if args.fixed_seed is not None and not 0 <= args.fixed_seed <= 0xFFFFFFFF:
         p.error("--fixed-seed must be between 0 and 4294967295")
@@ -85,6 +87,12 @@ def main() -> int:
     prompt = None
     language = "English"
     voice_key = None
+    cancel_dir = Path(args.cancel_dir)
+    cancel_dir.mkdir(parents=True, exist_ok=True)
+
+    def cancel_flag(request_id: str) -> Path:
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        return cancel_dir / f"{digest}.cancel"
 
     for raw in sys.stdin:
         raw = raw.strip()
@@ -161,37 +169,56 @@ def main() -> int:
                     raise ValueError("text cannot be empty")
                 started = time.perf_counter()
                 chunks = 0
+                was_cancelled = False
+                flag = cancel_flag(request_id)
+                flag.unlink(missing_ok=True)
                 _reset_rng(args.fixed_seed, np, torch)
-                with redirect_stdout(sys.stderr):
-                    iterator = model.stream_generate_voice_clone(
-                        text=text,
-                        language=language,
-                        voice_clone_prompt=prompt,
-                        emit_every_frames=args.emit_every_frames,
-                        decode_window_frames=args.decode_window_frames,
-                        overlap_samples=0,
-                    )
-                    for chunk, sr in iterator:
-                        audio = np.asarray(chunk, dtype=np.float32).reshape(-1)
-                        if audio.size == 0:
-                            continue
-                        pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2", copy=False).tobytes()
-                        chunks += 1
-                        emit({
-                            "id": request_id,
-                            "ok": True,
-                            "event": "audio_chunk",
-                            "index": chunks,
-                            "sample_rate": int(sr),
-                            "bytes": len(pcm),
-                            "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
-                        })
-                        PROTO.write(pcm)
-                        PROTO.flush()
+                iterator = None
+                try:
+                    with redirect_stdout(sys.stderr):
+                        iterator = model.stream_generate_voice_clone(
+                            text=text,
+                            language=language,
+                            voice_clone_prompt=prompt,
+                            emit_every_frames=args.emit_every_frames,
+                            decode_window_frames=args.decode_window_frames,
+                            overlap_samples=0,
+                        )
+                        for chunk, sr in iterator:
+                            # Normal barge-in is cooperative: stop the generator
+                            # between streaming chunks but keep the loaded model,
+                            # compiled kernels, and prepared voice resident.
+                            if flag.exists():
+                                was_cancelled = True
+                                break
+                            audio = np.asarray(chunk, dtype=np.float32).reshape(-1)
+                            if audio.size == 0:
+                                continue
+                            pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2", copy=False).tobytes()
+                            chunks += 1
+                            emit({
+                                "id": request_id,
+                                "ok": True,
+                                "event": "audio_chunk",
+                                "index": chunks,
+                                "sample_rate": int(sr),
+                                "bytes": len(pcm),
+                                "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
+                            })
+                            PROTO.write(pcm)
+                            PROTO.flush()
+                            if flag.exists():
+                                was_cancelled = True
+                                break
+                finally:
+                    flag.unlink(missing_ok=True)
+                    close = getattr(iterator, "close", None)
+                    if callable(close):
+                        close()
                 emit({
                     "id": request_id,
                     "ok": True,
-                    "event": "complete",
+                    "event": "cancelled" if was_cancelled else "complete",
                     "chunks": chunks,
                     "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
                 })

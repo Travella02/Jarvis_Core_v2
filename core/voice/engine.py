@@ -1,13 +1,8 @@
-"""0.0.4 ORVEX Voice Lab orchestration.
+"""0.0.5 ORVEX realtime conversation voice orchestration.
 
-The engine owns audio flow, VAD/endpointing, provider routing, response chunking,
-playback, interruption plumbing, and latency marks. Concrete STT/TTS model names
-remain adapter details and can be replaced through VoiceProviderRegistry.
-
-0.0.4 is intentionally half-duplex at the microphone/output device boundary:
-we endpoint one user utterance, then speak the response. The interruption API and
-cancellation plumbing are real, but always-listening full-duplex/AEC arrives in
-0.0.5 as required by the master roadmap.
+The engine owns provider-neutral capture, endpointing, STT, TTS, playback,
+cancellation, heard/unheard accounting, and low-level barge-in primitives.
+Wake/sleep lifecycle and continuous-session policy live in conversation_control.py.
 """
 
 from __future__ import annotations
@@ -36,7 +31,12 @@ from core.voice.playback import PlaybackLedger
 from core.voice.registry import VoiceProviderRegistry
 from core.voice.telemetry import VoiceLatencyTrace
 from core.voice.vad import VoiceActivityDetector
-from core.voice.evidence import SpeechActivityFusion
+from core.voice.evidence import pcm16_rms
+from core.voice.lexical import (
+    TranscriptEvidenceTracker,
+    confirms_early_interruption,
+    has_lexical_speech,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +48,9 @@ class VoiceTurnResult:
     playback: PlaybackLedger
     turn_id: str | None
     speech_metrics: dict[str, int]
+    heard_text: str = ""
+    interruption_playback_ms: float | None = None
+    interruption_phase: str | None = None
 
 
 class VoiceLabEngine:
@@ -58,6 +61,11 @@ class VoiceLabEngine:
         channels=1,
         sample_format=AudioSampleFormat.PCM_S16LE,
     )
+    # Repair4 follows the proven V1 ownership rule: VAD/activity may open a
+    # candidate, but the *same* STT stream is the authority for real speech.
+    # One permissive 30 ms onset can therefore reach Whisper; loudness/span never
+    # veto a turn before words are considered.
+    TRANSCRIPT_HOLD_MS = 540
 
     def __init__(
         self,
@@ -70,6 +78,7 @@ class VoiceLabEngine:
         endpoint_config: EndpointConfig | None = None,
         voice: VoiceProfile | None = None,
         tts_response_mode: str = "streaming",
+        require_partial_confirmation: bool = False,
     ) -> None:
         self.conversation = conversation
         self.providers = providers
@@ -81,134 +90,375 @@ class VoiceLabEngine:
         if tts_response_mode not in {"streaming", "whole"}:
             raise ValueError("tts_response_mode must be 'streaming' or 'whole'")
         self.tts_response_mode = tts_response_mode
-        self._voice_token: CancellationToken | None = None
-        self._active_trace: CorrelationContext | None = None
+        self.require_partial_confirmation = bool(require_partial_confirmation)
+        self._capture_token: CancellationToken | None = None
+        self._capture_trace: CorrelationContext | None = None
+        self._tts_token: CancellationToken | None = None
         self._tts_trace: CorrelationContext | None = None
+        self._response_phase: str | None = None
+        self._interruption_phase: str | None = None
 
-    async def listen_once(self) -> tuple[str, VoiceLatencyTrace, CorrelationContext]:
-        """Capture one evidence-approved utterance and only then submit it to STT.
 
-        WebRTC VAD remains a fast signal, not final authority. Endpointed noise
-        candidates are rejected locally and listening continues without ever
-        asking the speech model to invent text for them.
+
+    async def listen_once(
+        self,
+        *,
+        lexical_interrupt_probe: bool = False,
+    ) -> tuple[str, VoiceLatencyTrace, CorrelationContext]:
+        """Capture one utterance using independent neural speech presence.
+
+        Repair5 restores the successful V1 ownership split. A trusted speech-
+        presence signal is allowed to say *someone started speaking*; Whisper is
+        then allowed to say *what they said*. Whisper text is never allowed to
+        bootstrap a user turn from silence. ``lexical_interrupt_probe`` remains
+        accepted for API compatibility/telemetry, but barge-in no longer waits
+        for or depends on transcript confirmation.
         """
 
-        from core.voice.evidence import SpeechEvidenceConfig, SpeechEvidenceGate
-
-        trace = CorrelationContext.create()
-        self._active_trace = trace
-        token = CancellationToken()
-        self._voice_token = token
-        latency = VoiceLatencyTrace()
-        endpoint = EndpointDetector(self.endpoint_config)
-        evidence = SpeechEvidenceGate(
-            frame_ms=self.endpoint_config.frame_ms,
-            preroll_frames=max(1, self.endpoint_config.preroll_ms // self.endpoint_config.frame_ms),
-            config=SpeechEvidenceConfig(),
+        preroll_frames = max(
+            1,
+            self.endpoint_config.preroll_ms // self.endpoint_config.frame_ms,
         )
-        activity = SpeechActivityFusion()
-        accepted_frames: tuple[AudioFrame, ...] | None = None
 
-        async for frame in self.audio_input.stream(
-            trace=trace,
-            audio_format=self.INPUT_FORMAT,
-            frame_ms=self.endpoint_config.frame_ms,
-            cancellation_token=token,
-        ):
-            if token.is_cancelled:
-                break
-            vad_speech = self.vad.is_speech(frame)
-            activity_decision = activity.classify(frame, vad_speech=vad_speech)
-            signal = endpoint.accept(activity_decision.active)
-            if signal is EndpointSignal.SPEECH_STARTED:
-                latency.mark("speech_started")
+        while True:
+            trace = CorrelationContext.create()
+            self._capture_trace = trace
+            token = CancellationToken()
+            self._capture_token = token
+            latency = VoiceLatencyTrace()
+            onset = EndpointDetector(self.endpoint_config)
+            self.vad.reset()
+            preroll: deque[AudioFrame] = deque(maxlen=preroll_frames)
+
+            candidate_active = False
+            candidate_silence_ms = 0
+            candidate_elapsed_ms = 0
+            transcript_hold_until = 0.0
+            transcript = TranscriptEvidenceTracker()
+            final_text = ""
+            lexical_emitted = False
+            first_partial_marked = False
+            max_rms = 0.0
+            vad_speech_ms = 0
+
+            stt_audio: asyncio.Queue[AudioFrame | None] | None = None
+            stt_events: asyncio.Queue[object | None] | None = None
+            stt_task: asyncio.Task[None] | None = None
+
+            def emit_lexical(text: str, *, source: str, audio_ms: float) -> None:
+                nonlocal lexical_emitted
+                if lexical_emitted:
+                    return
+                lexical_emitted = True
                 self.conversation.event_bus.emit(
-                    "voice.speech.started",
+                    "voice.speech.lexical_confirmed",
                     origin="voice-engine",
                     trace=trace,
                     conversation_id=self.conversation.context.conversation_id,
                     payload={
-                        "vad_speech": vad_speech,
-                        "acoustic_rescue": activity_decision.acoustic_rescue,
-                        "rms": round(activity_decision.rms, 6),
-                        "acoustic_threshold_rms": round(activity_decision.acoustic_threshold_rms, 6),
+                        "text": text,
+                        "source": source,
+                        "audio_ms": round(audio_ms),
+                        "speech_presence_authority": "neural-vad",
                     },
                 )
-                if activity_decision.acoustic_rescue:
+
+            async def start_stt(initial_frames: tuple[AudioFrame, ...]) -> None:
+                nonlocal stt_audio, stt_events, stt_task
+                stt_audio = asyncio.Queue()
+                stt_events = asyncio.Queue()
+
+                async def candidate_audio_stream() -> AsyncIterator[AudioFrame]:
+                    assert stt_audio is not None
+                    while True:
+                        item = await stt_audio.get()
+                        if item is None:
+                            return
+                        yield item
+
+                async def worker() -> None:
+                    assert stt_events is not None
+                    try:
+                        async for event in self.providers.stt.stream_transcription(
+                            candidate_audio_stream(), token
+                        ):
+                            await stt_events.put(event)
+                    finally:
+                        await stt_events.put(None)
+
+                stt_task = asyncio.create_task(worker(), name="jarvis-live-stt-turn")
+                for item in initial_frames:
+                    await stt_audio.put(item)
+
+            async def stop_stt(*, cancel: bool = False, reason: str = "") -> None:
+                """Cooperatively finish the one live STT pipeline.
+
+                Normal endpointing sends EOF and lets the provider unwind. Session
+                cancellation first sets the shared token. Hard task cancellation is
+                a bounded last resort so async generators are not destroyed while
+                still awaiting their queues.
+                """
+                nonlocal stt_task
+                if stt_task is None:
+                    return
+                if cancel:
+                    token.cancel(reason or "voice capture cancelled")
+                if stt_audio is not None and not stt_task.done():
+                    try:
+                        stt_audio.put_nowait(None)
+                    except asyncio.QueueFull:
+                        await stt_audio.put(None)
+                if stt_task.done():
+                    await asyncio.gather(stt_task, return_exceptions=True)
+                    return
+                try:
+                    await asyncio.wait_for(asyncio.shield(stt_task), timeout=1.5)
+                except TimeoutError:
+                    stt_task.cancel()
+                    await asyncio.gather(stt_task, return_exceptions=True)
+
+            async def drain_stt_events() -> None:
+                nonlocal final_text, transcript_hold_until, first_partial_marked
+                if stt_events is None:
+                    return
+                loop = asyncio.get_running_loop()
+                while not stt_events.empty():
+                    event = stt_events.get_nowait()
+                    if event is None:
+                        continue
+                    if event.event_type is TranscriptionEventType.PARTIAL:
+                        partial = event.text.strip()
+                        if partial:
+                            if not first_partial_marked:
+                                latency.mark("stt_first_partial")
+                                first_partial_marked = True
+                            self.conversation.event_bus.emit(
+                                "voice.stt.partial",
+                                origin="voice-engine",
+                                trace=trace,
+                                conversation_id=self.conversation.context.conversation_id,
+                                payload={"text": partial},
+                            )
+                            if transcript.observe_partial(partial):
+                                transcript_hold_until = max(
+                                    transcript_hold_until,
+                                    loop.time() + (self.TRANSCRIPT_HOLD_MS / 1000.0),
+                                )
+                                if (
+                                    lexical_interrupt_probe
+                                    and confirms_early_interruption(partial)
+                                    and transcript.confirms_early_partial(partial)
+                                ):
+                                    emit_lexical(
+                                        partial,
+                                        source="stt-partial-evidence",
+                                        audio_ms=candidate_elapsed_ms,
+                                    )
+                    elif event.event_type is TranscriptionEventType.FINAL:
+                        final_text = event.text.strip()
+                        latency.mark("stt_final")
+                    elif event.event_type is TranscriptionEventType.ERROR:
+                        raise RuntimeError(event.detail or "STT provider error")
+
+            async def reset_false_candidate() -> None:
+                nonlocal candidate_active, candidate_silence_ms
+                nonlocal candidate_elapsed_ms, transcript_hold_until, transcript
+                nonlocal final_text, lexical_emitted, first_partial_marked
+                nonlocal max_rms, vad_speech_ms, stt_audio, stt_events, stt_task
+                nonlocal latency
+
+                await stop_stt()
+                candidate_active = False
+                candidate_silence_ms = 0
+                candidate_elapsed_ms = 0
+                transcript_hold_until = 0.0
+                transcript = TranscriptEvidenceTracker()
+                final_text = ""
+                lexical_emitted = False
+                first_partial_marked = False
+                max_rms = 0.0
+                vad_speech_ms = 0
+                stt_audio = None
+                stt_events = None
+                stt_task = None
+                latency = VoiceLatencyTrace()
+                onset.reset()
+                self.vad.reset()
+                preroll.clear()
+
+            async def finalize_candidate(endpoint_reason: str):
+                if not candidate_active or stt_audio is None or stt_task is None:
+                    return None
+
+                await stop_stt()
+                await drain_stt_events()
+                latency.mark("speech_ended")
+
+                if token.is_cancelled:
+                    raise asyncio.CancelledError(token.reason or "voice capture cancelled")
+
+                # The neural VAD already independently proved physical speech was
+                # present. Whisper's only remaining job is lexical content. This
+                # breaks the Repair4 circularity where a Whisper hallucination
+                # could serve as its own proof that speech happened.
+                if has_lexical_speech(final_text):
+                    if not lexical_emitted:
+                        emit_lexical(
+                            final_text,
+                            source="stt-final-after-neural-speech",
+                            audio_ms=candidate_elapsed_ms,
+                        )
                     self.conversation.event_bus.emit(
-                        "voice.speech.acoustic_rescue",
+                        "voice.speech.endpointed",
                         origin="voice-engine",
                         trace=trace,
                         conversation_id=self.conversation.context.conversation_id,
                         payload={
-                            "rms": round(activity_decision.rms, 6),
-                            "threshold": round(activity_decision.acoustic_threshold_rms, 6),
-                            "noise_floor": round(activity_decision.noise_floor_rms, 6),
+                            "reason": endpoint_reason,
+                            "duration_ms": candidate_elapsed_ms,
+                            "vad_speech_ms": vad_speech_ms,
+                            "partial_count": transcript.partial_count,
+                            "peak_rms": round(max_rms, 6),
+                            "speech_presence_authority": "neural-vad",
                         },
                     )
+                    self._capture_trace = None
+                    self._capture_token = None
+                    return final_text, latency, trace
 
-            # Evidence keeps the *raw* VAD flag so telemetry remains honest even
-            # when acoustic redundancy rescued endpointing.
-            candidate = evidence.push(frame, vad_speech, signal)
-            if candidate is None:
-                continue
-
-            report = candidate.report
-            if not report.accepted:
                 self.conversation.event_bus.emit(
                     "voice.speech.rejected",
                     origin="voice-engine",
                     trace=trace,
                     conversation_id=self.conversation.context.conversation_id,
-                    payload=report.as_dict(),
+                    payload={
+                        "accepted": False,
+                        "reason": "neural-speech-without-lexical-transcript",
+                        "endpoint_reason": endpoint_reason,
+                        "duration_ms": candidate_elapsed_ms,
+                        "vad_speech_ms": vad_speech_ms,
+                        "partial_count": transcript.partial_count,
+                        "transcript": final_text,
+                        "peak_rms": round(max_rms, 6),
+                        "speech_presence_authority": "neural-vad",
+                    },
                 )
-                # A false VAD trigger is not a user turn. Reset timing/endpoint
-                # state and continue listening in the same microphone session.
-                endpoint.reset()
-                latency = VoiceLatencyTrace()
-                continue
+                await reset_false_candidate()
+                return None
 
-            accepted_frames = candidate.frames
-            latency.mark("speech_ended")
-            self.conversation.event_bus.emit(
-                "voice.speech.endpointed",
-                origin="voice-engine",
-                trace=trace,
-                conversation_id=self.conversation.context.conversation_id,
-                payload={"signal": signal.value, "evidence": report.as_dict()},
-            )
-            break
-
-        if token.is_cancelled:
-            raise asyncio.CancelledError(token.reason or "voice capture cancelled")
-        if not accepted_frames:
-            raise RuntimeError("microphone stream ended before an evidence-approved utterance")
-
-        async def accepted_audio() -> AsyncIterator[AudioFrame]:
-            for item in accepted_frames:
-                yield item
-
-        final_text = ""
-        async for event in self.providers.stt.stream_transcription(accepted_audio(), token):
-            if event.event_type is TranscriptionEventType.PARTIAL:
-                if "stt_first_partial" not in latency.as_milliseconds():
-                    latency.mark("stt_first_partial")
-                self.conversation.event_bus.emit(
-                    "voice.stt.partial",
-                    origin="voice-engine",
+            try:
+                async for frame in self.audio_input.stream(
                     trace=trace,
-                    conversation_id=self.conversation.context.conversation_id,
-                    payload={"text": event.text},
-                )
-            elif event.event_type is TranscriptionEventType.FINAL:
-                latency.mark("stt_final")
-                final_text = event.text.strip()
-            elif event.event_type is TranscriptionEventType.ERROR:
-                raise RuntimeError(event.detail or "STT provider error")
+                    audio_format=self.INPUT_FORMAT,
+                    frame_ms=self.endpoint_config.frame_ms,
+                    cancellation_token=token,
+                ):
+                    if token.is_cancelled:
+                        break
 
-        if not final_text:
-            raise RuntimeError("STT produced no final transcript")
-        return final_text, latency, trace
+                    await drain_stt_events()
+                    vad_speech = self.vad.is_speech(frame)
+                    max_rms = max(max_rms, pcm16_rms(frame.payload))
+
+                    if not candidate_active:
+                        preroll.append(frame)
+                        signal = onset.accept(vad_speech)
+                        if signal is not EndpointSignal.SPEECH_STARTED:
+                            continue
+
+                        candidate_active = True
+                        latency.mark("speech_started")
+                        initial = tuple(preroll)
+                        candidate_elapsed_ms = round(
+                            sum(item.duration_ms for item in initial)
+                        )
+                        vad_speech_ms = max(
+                            self.endpoint_config.start_trigger_ms,
+                            self.endpoint_config.frame_ms if vad_speech else 0,
+                        )
+                        preroll.clear()
+                        await start_stt(initial)
+                        payload = {
+                            "vad_speech": True,
+                            "candidate_only": False,
+                            "speech_presence_authority": "neural-vad",
+                        }
+                        probability = getattr(self.vad, "last_probability", None)
+                        if isinstance(probability, (int, float)):
+                            payload["vad_probability"] = round(float(probability), 4)
+                        self.conversation.event_bus.emit(
+                            "voice.speech.started",
+                            origin="voice-engine",
+                            trace=trace,
+                            conversation_id=self.conversation.context.conversation_id,
+                            payload=payload,
+                        )
+                        continue
+
+                    candidate_elapsed_ms += round(frame.duration_ms)
+                    if vad_speech:
+                        vad_speech_ms += round(frame.duration_ms)
+                    assert stt_audio is not None
+                    await stt_audio.put(frame)
+
+                    semantic_active = (
+                        vad_speech
+                        or asyncio.get_running_loop().time() < transcript_hold_until
+                    )
+                    if semantic_active:
+                        candidate_silence_ms = 0
+                    else:
+                        candidate_silence_ms += self.endpoint_config.frame_ms
+
+                    await drain_stt_events()
+
+                    ended = candidate_silence_ms >= self.endpoint_config.end_silence_ms
+                    maxed = candidate_elapsed_ms >= self.endpoint_config.max_utterance_ms
+                    if not ended and not maxed:
+                        continue
+
+                    endpoint_reason = "max-duration" if maxed else "neural-vad-silence"
+                    completed = await finalize_candidate(endpoint_reason)
+                    if completed is not None:
+                        return completed
+
+                if candidate_active:
+                    completed = await finalize_candidate("input-stream-ended")
+                    if completed is not None:
+                        return completed
+
+                if token.is_cancelled:
+                    await stop_stt(cancel=True, reason=token.reason or "voice capture cancelled")
+                    raise asyncio.CancelledError(token.reason or "voice capture cancelled")
+
+                self._capture_trace = None
+                self._capture_token = None
+            finally:
+                if stt_task is not None and not stt_task.done():
+                    await stop_stt(cancel=True, reason=token.reason or "voice capture closing")
+
+    @staticmethod
+    def _estimate_heard_prefix(
+        text: str,
+        ledger: PlaybackLedger,
+        *,
+        tts_generation_complete: bool,
+    ) -> tuple[str, str]:
+        words = text.split()
+        if not words or ledger.played_bytes <= 0:
+            return "", "none-heard"
+        if tts_generation_complete and ledger.queued_bytes > 0:
+            ratio = ledger.heard_fraction
+            method = "pcm-fraction"
+        else:
+            # 0.0.5 preserves exact PCM playback time but Qwen does not expose
+            # word timestamps. Fall back to an explicitly approximate speaking
+            # rate until a forced-alignment layer is added later.
+            estimated_total_ms = max(330.0, len(words) * 330.0)
+            ratio = min(1.0, ledger.played_duration_ms / estimated_total_ms)
+            method = "speech-rate-estimate"
+        count = max(1, min(len(words), round(len(words) * ratio)))
+        return " ".join(words[:count]), method
 
     async def run_once(
         self,
@@ -216,32 +466,55 @@ class VoiceLabEngine:
         reasoning_policy: ReasoningPolicy | None = None,
     ) -> VoiceTurnResult:
         transcript, latency, capture_trace = await self.listen_once()
+        return await self.respond_to_transcript(
+            transcript,
+            latency=latency,
+            capture_trace=capture_trace,
+            reasoning_policy=reasoning_policy,
+        )
+
+    async def respond_to_transcript(
+        self,
+        transcript: str,
+        *,
+        latency: VoiceLatencyTrace | None = None,
+        capture_trace: CorrelationContext | None = None,
+        reasoning_policy: ReasoningPolicy | None = None,
+    ) -> VoiceTurnResult:
+        """Route one already-captured utterance through Luna -> TTS -> playback.
+
+        This split is what lets 0.0.5 start the next microphone capture while the
+        current response is still being spoken.
+        """
+
+        clean_transcript = transcript.strip()
+        if not clean_transcript:
+            raise ValueError("voice transcript cannot be empty")
+        latency = latency or VoiceLatencyTrace()
+        capture_trace = capture_trace or CorrelationContext.create()
         self.conversation.event_bus.emit(
             "voice.transcript.committed",
             origin="voice-engine",
             trace=capture_trace,
             conversation_id=self.conversation.context.conversation_id,
-            payload={"text": transcript},
+            payload={"text": clean_transcript},
         )
         latency.mark("conversation_submit")
 
-        # Repair33 supports two controlled TTS scheduling modes:
-        # - streaming: committed Repair31 behavior; Luna deltas become separate
-        #   natural speech chunks and TTS overlaps intelligence generation.
-        # - whole: Luna remains fully expressive, but TTS waits for the complete
-        #   response and sends it to Qwen as one request for maximum continuity.
-        # Physical playback still streams PCM immediately once Qwen starts.
         delta_queue: asyncio.Queue[tuple[CorrelationContext, str] | None] = asyncio.Queue()
         speech_queue: asyncio.Queue[tuple[CorrelationContext, str] | None] = asyncio.Queue(maxsize=32)
         audio_queue: asyncio.Queue[AudioFrame | None] = asyncio.Queue(maxsize=1024)
         chunker = SpeechTextChunker()
         ledger = PlaybackLedger()
         tts_token = CancellationToken()
-        self._voice_token = tts_token
+        self._tts_token = tts_token
+        self._response_phase = "thinking"
+        self._interruption_phase = None
         first_delta = True
         first_speech_chunk = True
         first_tts_request = True
         first_tts_audio = True
+        tts_generation_complete = False
         speech_metrics: dict[str, int] = {}
 
         def on_delta(event) -> None:
@@ -290,10 +563,12 @@ class VoiceLabEngine:
                     await queue_spoken_chunk(trace, chunk)
 
         async def tts_worker() -> None:
-            nonlocal first_tts_request, first_tts_audio
+            nonlocal first_tts_request, first_tts_audio, tts_generation_complete
             while True:
                 item = await speech_queue.get()
                 if item is None:
+                    if not tts_token.is_cancelled:
+                        tts_generation_complete = True
                     await audio_queue.put(None)
                     return
                 trace, text = item
@@ -312,29 +587,43 @@ class VoiceLabEngine:
                 ):
                     if tts_token.is_cancelled:
                         break
-                    ledger.queue(len(frame.payload))
+                    ledger.queue(len(frame.payload), duration_ms=frame.duration_ms)
                     if first_tts_audio:
-                        # Chatterbox currently yields after a waveform is ready,
-                        # so this isolates real synthesis time from chunking time.
                         latency.mark("tts_first_waveform_ready")
                         latency.mark("tts_first_audio")
                         first_tts_audio = False
                     await audio_queue.put(frame)
+                if tts_token.is_cancelled:
+                    await audio_queue.put(None)
+                    return
 
         async def audio_stream() -> AsyncIterator[AudioFrame]:
-            # Native streaming TTS can benefit from a tiny provider-recommended
-            # startup runway. We buffer only PCM that has already been generated;
-            # text synthesis itself starts immediately. This absorbs early GPU
-            # jitter without reintroducing Repair21's larger-text latency.
             startup_buffer_ms = int(self.providers.tts.metadata.extra.get("startup_buffer_ms", 0) or 0)
             buffered: list[AudioFrame] = []
             buffered_ms = 0.0
             released = startup_buffer_ms <= 0
+            playback_start_emitted = False
+
+            def before_first_yield(frame: AudioFrame) -> None:
+                nonlocal playback_start_emitted
+                if playback_start_emitted:
+                    return
+                playback_start_emitted = True
+                self._response_phase = "speaking"
+                self.conversation.event_bus.emit(
+                    "voice.response.playback_starting",
+                    origin="voice-engine",
+                    trace=frame.trace,
+                    conversation_id=self.conversation.context.conversation_id,
+                    payload={"turn_id": frame.trace.turn_id},
+                )
+
             while True:
                 item = await audio_queue.get()
                 if item is None:
                     if not released:
                         for frame in buffered:
+                            before_first_yield(frame)
                             yield frame
                     return
                 if not released:
@@ -345,14 +634,19 @@ class VoiceLabEngine:
                     latency.mark("audio_startup_buffer_ready")
                     released = True
                     for frame in buffered:
+                        before_first_yield(frame)
                         yield frame
                     buffered.clear()
                     continue
+                before_first_yield(item)
                 yield item
 
         async def playback_worker():
             playback = await self.audio_output.play(audio_stream(), tts_token)
-            ledger.played(playback.bytes_written)
+            ledger.played(
+                playback.bytes_written,
+                duration_ms=playback.source_duration_ms_written,
+            )
             if playback.first_write_monotonic_ns is not None:
                 latency.mark("audio_first_write_started", now_ns=playback.first_write_monotonic_ns)
             if playback.first_write_completed_monotonic_ns is not None:
@@ -360,14 +654,9 @@ class VoiceLabEngine:
                     "audio_first_write_completed",
                     now_ns=playback.first_write_completed_monotonic_ns,
                 )
-            audible_ns = (
-                playback.estimated_first_audible_monotonic_ns
-                or playback.first_write_monotonic_ns
-            )
+            audible_ns = playback.estimated_first_audible_monotonic_ns or playback.first_write_monotonic_ns
             if audible_ns is not None:
                 latency.mark("audio_first_played", now_ns=audible_ns)
-            if playback.bytes_written < 0:
-                raise RuntimeError("audio output reported invalid playback bytes")
             return playback
 
         speech_task = (
@@ -378,37 +667,74 @@ class VoiceLabEngine:
         tts_task = asyncio.create_task(tts_worker(), name="jarvis-voice-tts")
         playback_task = asyncio.create_task(playback_worker(), name="jarvis-voice-playback")
         tasks = tuple(task for task in (speech_task, tts_task, playback_task) if task is not None)
+
+        result = None
         try:
             result = await self.conversation.submit_voice(
-                transcript,
+                clean_transcript,
                 reasoning_policy=reasoning_policy or ReasoningPolicy(),
             )
             latency.mark("luna_response_complete")
+            if self._response_phase == "thinking" and not tts_token.is_cancelled:
+                self._response_phase = "synthesizing"
 
-            if self.tts_response_mode == "whole":
-                # Do not change Jarvis's intelligence/personality policy. We wait
-                # for whatever complete response Luna naturally chose to say,
-                # normalize it once for speech, and give the whole thought to Qwen.
-                await queue_spoken_chunk(result.trace, result.text)
-                speech_metrics["whole_response_chars"] = len(normalize_speech_text(result.text))
-                speech_metrics["whole_response_words"] = len(normalize_speech_text(result.text).split())
-                await speech_queue.put(None)
+            if result.status == "completed" and not tts_token.is_cancelled:
+                if self.tts_response_mode == "whole":
+                    await queue_spoken_chunk(result.trace, result.text)
+                    spoken = normalize_speech_text(result.text)
+                    speech_metrics["whole_response_chars"] = len(spoken)
+                    speech_metrics["whole_response_words"] = len(spoken.split())
+                    await speech_queue.put(None)
+                else:
+                    await delta_queue.put(None)
+                    assert speech_task is not None
+                    await speech_task
             else:
-                await delta_queue.put(None)
-                assert speech_task is not None
-                await speech_task
+                if speech_task is not None and not speech_task.done():
+                    await delta_queue.put(None)
+                    await speech_task
+                else:
+                    await speech_queue.put(None)
 
             await tts_task
-            await playback_task
+            playback = await playback_task
+            interrupted = tts_token.is_cancelled
+            if interrupted:
+                ledger.interrupt()
             latency.mark("turn_done")
+
+            heard_text = result.text
+            alignment_method = "complete"
+            if interrupted:
+                heard_text, alignment_method = self._estimate_heard_prefix(
+                    result.text,
+                    ledger,
+                    tts_generation_complete=tts_generation_complete,
+                )
+
+            self.conversation.record_voice_playback(
+                response_turn_id=result.trace.turn_id,
+                generated_text=result.text,
+                heard_text=heard_text,
+                interrupted=interrupted,
+                playback_ms=ledger.played_duration_ms,
+                played_bytes=ledger.played_bytes,
+                queued_bytes=ledger.queued_bytes,
+                alignment_method=alignment_method,
+                interruption_phase=(self._interruption_phase or self._response_phase or "unknown"),
+            )
+
             return VoiceTurnResult(
-                transcript=transcript,
+                transcript=clean_transcript,
                 response_text=result.text,
-                status=result.status,
+                status="interrupted" if interrupted else result.status,
                 latency_ms=latency.as_milliseconds(),
                 playback=ledger,
                 turn_id=result.trace.turn_id,
                 speech_metrics=speech_metrics,
+                heard_text=heard_text,
+                interruption_playback_ms=(ledger.played_duration_ms if interrupted else None),
+                interruption_phase=(self._interruption_phase if interrupted else None),
             )
         finally:
             unsubscribe()
@@ -423,25 +749,59 @@ class VoiceLabEngine:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
-            self._active_trace = None
             self._tts_trace = None
-            self._voice_token = None
+            self._tts_token = None
+            self._response_phase = None
+            self._interruption_phase = None
 
-    async def interrupt(self, reason: str = "user interruption") -> bool:
-        """Cancellation skeleton used by 0.0.5 barge-in detection later."""
+    async def cancel_capture(self, reason: str = "capture cancelled") -> bool:
+        token = self._capture_token
+        if token is None or token.is_cancelled:
+            return False
+        token.cancel(reason)
+        trace = self._capture_trace
+        if trace is not None:
+            await self.providers.stt.cancel(trace.request_id)
+        return True
+
+    async def interrupt_response(self, reason: str = "user interruption") -> bool:
+        """Cancel the active Jarvis turn without cancelling the user's capture.
+
+        The same path applies during thinking, local synthesis, or audible playback
+        so future research/work states can reuse a single user-preemption contract.
+        """
 
         did_anything = False
-        token = self._voice_token
+        if self._response_phase is not None:
+            self._interruption_phase = self._response_phase
+        token = self._tts_token
         if token is not None and not token.is_cancelled:
             token.cancel(reason)
             did_anything = True
-        if self._active_trace is not None:
-            await self.providers.stt.cancel(self._active_trace.request_id)
-            did_anything = True
+
+        # Silence the user-facing output first. Provider cancellation can take
+        # until Qwen reaches its next streaming chunk, but barge-in should sound
+        # immediate even while the resident generator is winding down.
+        await self.audio_output.stop()
         if self._tts_trace is not None:
             await self.providers.tts.cancel(self._tts_trace.request_id)
             did_anything = True
-        await self.audio_output.stop()
+        # If Luna is still generating (possible in future streaming modes), cancel
+        # that foreground turn too. Whole-response 0.0.5 normally reaches barge-in
+        # only after Luna has completed and local speech is playing.
         if await self.conversation.cancel_active_turn(reason):
             did_anything = True
+        self.conversation.event_bus.emit(
+            "voice.response.stop.requested",
+            origin="voice-engine",
+            conversation_id=self.conversation.context.conversation_id,
+            payload={"reason": reason, "phase": self._interruption_phase or "unknown"},
+        )
         return did_anything
+
+    async def interrupt(self, reason: str = "user interruption") -> bool:
+        """Backward-compatible full voice interruption entry point."""
+        did_response = await self.interrupt_response(reason)
+        did_capture = await self.cancel_capture(reason)
+        return did_response or did_capture
+

@@ -15,12 +15,15 @@ class AudioInputValidationPolicyTests(unittest.TestCase):
         self.assertIn("2_resampled_16k.wav", text)
         self.assertIn("3_whisper_input.wav", text)
 
-    def test_engine_rejects_candidate_before_stt_submission(self):
+    def test_engine_uses_neural_presence_instead_of_energy_or_transcript_self_authority(self):
         text = ENGINE.read_text(encoding="utf-8")
-        reject = text.index("if not report.accepted")
-        stt = text.index("stream_transcription(accepted_audio()")
-        self.assertLess(reject, stt)
-        self.assertIn("voice.speech.rejected", text)
+        self.assertIn("onset.accept(vad_speech)", text)
+        self.assertIn("jarvis-live-stt-turn", text)
+        self.assertIn("speech_presence_authority", text)
+        self.assertNotIn("SpeechActivityFusion()", text)
+        self.assertNotIn("transcript.confirms_final", text)
+        self.assertNotIn('reason == "insufficient-energy"', text)
+        self.assertNotIn('reason == "peak-below-threshold"', text)
 
 
 if __name__ == "__main__":

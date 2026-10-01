@@ -33,12 +33,15 @@ class AudioPlaybackResult:
     output_latency_ms: float | None = None
     low_latency_requested: bool = False
     low_latency_active: bool = False
+    source_duration_ms_written: float = 0.0
 
     def __post_init__(self) -> None:
         if self.bytes_written < 0:
             raise ValueError("bytes_written must be non-negative")
         if self.output_latency_ms is not None and self.output_latency_ms < 0:
             raise ValueError("output_latency_ms must be non-negative")
+        if self.source_duration_ms_written < 0:
+            raise ValueError("source_duration_ms_written must be non-negative")
 
 
 class AudioInput(ABC):

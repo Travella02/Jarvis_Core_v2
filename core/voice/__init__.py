@@ -18,6 +18,16 @@ from .contracts import (
 from .endpointing import EndpointConfig, EndpointDetector, EndpointSignal, UtteranceBuffer
 from .evidence import SpeechCandidate, SpeechEvidenceConfig, SpeechActivityConfig, SpeechActivityDecision, SpeechActivityFusion, SpeechEvidenceGate, SpeechEvidenceReport, pcm16_rms
 from .engine import VoiceLabEngine, VoiceTurnResult
+from .lexical import confirms_early_interruption, has_lexical_speech, lexical_words
+from .conversation_control import (
+    ContinuousVoiceSession,
+    SleepPhraseDetector,
+    VoicePresenceState,
+    VoiceSessionResult,
+    WakeMatch,
+    WakePhraseDetector,
+    WakeSleepConfig,
+)
 from .playback import PlaybackLedger
 from .profiles import StoredVoiceProfile, StoredVoiceReference, VoiceReferenceLibrary
 from .registry import VoiceProviderRegistry
@@ -32,6 +42,13 @@ __all__ = [
     "AudioOutput",
     "AudioPlaybackResult",
     "AudioSampleFormat",
+    "ContinuousVoiceSession",
+    "SleepPhraseDetector",
+    "VoicePresenceState",
+    "VoiceSessionResult",
+    "WakeMatch",
+    "WakePhraseDetector",
+    "WakeSleepConfig",
     "EndpointConfig",
     "EndpointDetector",
     "EndpointSignal",
@@ -57,6 +74,9 @@ __all__ = [
     "UtteranceBuffer",
     "VoiceActivityDetector",
     "VoiceLabEngine",
+    "confirms_early_interruption",
+    "has_lexical_speech",
+    "lexical_words",
     "VoiceLatencyTrace",
     "VoiceTurnResult",
     "VoiceProfile",

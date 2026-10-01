@@ -8,6 +8,7 @@ requests as PCM16 chunks over a small framed stdio protocol.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -61,6 +62,7 @@ class Qwen3StreamingProvider(TextToSpeechProvider):
         self._prepared_voice_key: tuple[str, str, bool] | None = None
         self._active_request_ids: set[str] = set()
         self._runtime_dir = PROJECT_ROOT / ".runtime" / "voice" / "qwen3_tts_streaming_candidate"
+        self._cancel_dir = self._runtime_dir / "cancel"
         self._log_dir = self._runtime_dir / "logs"
         self._stderr_path = self._log_dir / "live-sidecar-stderr.log"
         self._stderr_handle: BinaryIO | None = None
@@ -131,6 +133,9 @@ class Qwen3StreamingProvider(TextToSpeechProvider):
         request_id = trace.request_id
         self._active_request_ids.add(request_id)
         sequence = 0
+        cancel_flag = self._cancel_flag_path(request_id)
+        cancel_flag.parent.mkdir(parents=True, exist_ok=True)
+        cancel_flag.unlink(missing_ok=True)
         try:
             async with self._io_lock:
                 await self._send({
@@ -139,10 +144,18 @@ class Qwen3StreamingProvider(TextToSpeechProvider):
                     "text": text,
                 })
                 while True:
-                    if cancellation_token.is_cancelled:
-                        await self._kill_process()
-                        return
-                    message = await self._read_message(timeout=self.config.command_timeout_s)
+                    # Once synthesis starts, cancellation is cooperative. The
+                    # sidecar emits a terminal `cancelled` event after it stops
+                    # its generator. We must keep draining framed PCM until that
+                    # event so the resident protocol remains synchronized.
+                    read_timeout = 5.0 if cancellation_token.is_cancelled else self.config.command_timeout_s
+                    try:
+                        message = await self._read_message(timeout=read_timeout)
+                    except (RuntimeError, TimeoutError, asyncio.IncompleteReadError):
+                        if cancellation_token.is_cancelled:
+                            await self._kill_process()
+                            return
+                        raise
                     self._check_response(message, request_id)
                     event = message.get("event")
                     if event == "audio_chunk":
@@ -152,30 +165,48 @@ class Qwen3StreamingProvider(TextToSpeechProvider):
                             raise RuntimeError(f"invalid streaming audio header: {message}")
                         process = self._process
                         if process is None or process.stdout is None:
+                            if cancellation_token.is_cancelled:
+                                return
                             raise RuntimeError("streaming sidecar disappeared while reading PCM")
-                        payload = await asyncio.wait_for(
-                            process.stdout.readexactly(byte_count),
-                            timeout=self.config.command_timeout_s,
-                        )
-                        yield AudioFrame(
-                            trace=trace,
-                            sequence=sequence,
-                            format=AudioFormat(sample_rate, 1, AudioSampleFormat.PCM_S16LE),
-                            payload=payload,
-                        )
-                        sequence += 1
+                        try:
+                            payload = await asyncio.wait_for(
+                                process.stdout.readexactly(byte_count),
+                                timeout=read_timeout,
+                            )
+                        except (asyncio.IncompleteReadError, TimeoutError):
+                            if cancellation_token.is_cancelled:
+                                await self._kill_process()
+                                return
+                            raise
+                        if not cancellation_token.is_cancelled:
+                            yield AudioFrame(
+                                trace=trace,
+                                sequence=sequence,
+                                format=AudioFormat(sample_rate, 1, AudioSampleFormat.PCM_S16LE),
+                                payload=payload,
+                            )
+                            sequence += 1
                         continue
-                    if event == "complete":
+                    if event in {"complete", "cancelled"}:
                         return
                     raise RuntimeError(f"unexpected streaming synthesis event: {message}")
         finally:
             self._active_request_ids.discard(request_id)
+            cancel_flag.unlink(missing_ok=True)
 
     async def cancel(self, request_id: str) -> None:
-        # The fork generates synchronously inside the sidecar. For 0.0.4, hard
-        # cancellation is safer than pretending an in-flight generator stopped.
-        if request_id in self._active_request_ids:
-            await self._kill_process()
+        # 0.0.5 repair1: do not destroy the resident Qwen process on normal
+        # barge-in. The sidecar checks this flag between streaming chunks, stops
+        # the active generator, emits `cancelled`, and stays hot for the next turn.
+        if request_id not in self._active_request_ids:
+            return
+        flag = self._cancel_flag_path(request_id)
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_text("cancel", encoding="utf-8")
+
+    def _cancel_flag_path(self, request_id: str) -> Path:
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        return self._cancel_dir / f"{digest}.cancel"
 
     async def close(self) -> None:
         process = self._process
@@ -229,12 +260,14 @@ class Qwen3StreamingProvider(TextToSpeechProvider):
             creationflags = 0
             if os.name == "nt":
                 creationflags = getattr(__import__("subprocess"), "CREATE_NO_WINDOW", 0)
+            self._cancel_dir.mkdir(parents=True, exist_ok=True)
             sidecar_args = [
                 str(self.config.python_executable),
                 str(self.config.sidecar),
                 "--model-dir", str(self.config.model_dir),
                 "--emit-every-frames", str(self.config.emit_every_frames),
                 "--decode-window-frames", str(self.config.decode_window_frames),
+                "--cancel-dir", str(self._cancel_dir),
             ]
             if self.config.fixed_seed is not None:
                 sidecar_args.extend(["--fixed-seed", str(self.config.fixed_seed)])
@@ -275,7 +308,9 @@ class Qwen3StreamingProvider(TextToSpeechProvider):
         if not line:
             code = await process.wait()
             self._process = None
-            raise RuntimeError(f"streaming sidecar exited unexpectedly ({code})")
+            detail = self._stderr_tail()
+            suffix = f" | stderr: {detail}" if detail else ""
+            raise RuntimeError(f"streaming sidecar exited unexpectedly ({code}){suffix}")
         try:
             return json.loads(line.decode("utf-8"))
         except json.JSONDecodeError as exc:

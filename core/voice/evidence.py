@@ -1,9 +1,9 @@
-"""Provider-neutral speech-evidence gating for the ORVEX voice engine.
+"""Provider-neutral candidate-audio evidence for the ORVEX voice engine.
 
-WebRTC VAD alone is intentionally not authoritative. A candidate utterance must
-also contain enough duration and acoustic energy above the recent noise floor
-before any audio is submitted to STT. This prevents tiny clicks / room noise
-from becoming plausible Whisper hallucinations such as "Thank you.".
+0.0.5 Repair3 deliberately stops using amplitude/energy as the authority for
+whether a user "really spoke". VAD/activity finds candidate boundaries and this
+module records acoustic diagnostics, but local STT lexical output decides whether
+the candidate contains legitimate speech words.
 """
 
 from __future__ import annotations
@@ -284,19 +284,12 @@ class SpeechEvidenceGate:
             and peak_rms >= 0.08
             and mean_rms >= 0.025
         )
-        checks = (
-            (speech_span_ms >= self.config.min_speech_span_ms, "speech-span-too-short"),
-            (energy_active_ms >= self.config.min_energy_active_ms, "insufficient-energy"),
-            (peak_rms >= max(self.config.min_peak_rms, active_threshold), "peak-below-threshold"),
-            (vad_supported or acoustic_rescue_supported, "insufficient-speech-evidence"),
-        )
-        reason = "accepted"
-        accepted = True
-        for passed, failure in checks:
-            if not passed:
-                accepted = False
-                reason = failure
-                break
+        # Repair3: energy/peak remain telemetry only. They must never reject a
+        # quiet human utterance before Whisper has a chance to hear the words.
+        # We only reject trivially short endpoint candidates here. Lexical STT
+        # validation is the semantic authority in VoiceLabEngine.listen_once().
+        accepted = speech_span_ms >= self.config.min_speech_span_ms
+        reason = "accepted-for-stt" if accepted else "speech-span-too-short"
 
         return SpeechEvidenceReport(
             accepted=accepted,

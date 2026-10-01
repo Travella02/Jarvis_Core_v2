@@ -1,4 +1,4 @@
-"""0.0.4 local Voice Lab with swappable STT/TTS provider candidates."""
+"""0.0.5 local Voice Lab with wake/sleep, continuous conversation, and barge-in."""
 
 from __future__ import annotations
 
@@ -26,7 +26,10 @@ from core.voice import (
     EndpointDetector,
     EndpointSignal,
     SpeechEvidenceGate,
+    ContinuousVoiceSession,
     VoiceLabEngine,
+    VoicePresenceState,
+    WakeSleepConfig,
     VoiceProfile,
     VoiceProviderRegistry,
     VoiceReferenceLibrary,
@@ -34,6 +37,7 @@ from core.voice import (
 )
 from integrations.audio import SoundDeviceAudioInput, SoundDeviceAudioOutput, WebRtcVadDetector
 from providers.intelligence.openai import OpenAIProvider, OpenAIProviderConfig
+from providers.vad import WhisperCppSileroVadDetector
 from providers.stt.whisper_cpp import WhisperCppConfig, WhisperCppProvider
 from providers.tts.chatterbox import ChatterboxConfig, ChatterboxTurboProvider
 from providers.tts.qwen3 import Qwen3TTSConfig, Qwen3TTSProvider
@@ -160,7 +164,18 @@ def _whisper_config_from_args(args: argparse.Namespace | None = None) -> Whisper
     live sessions, provider health, and diagnostics cannot drift again.
     """
     config = WhisperCppConfig.from_env(env_file=PROJECT_ROOT / ".env")
-    if bool(getattr(args, "stt_endpoint_final_only", False)):
+    continuous_control = bool(args is not None and hasattr(args, "legacy_half_duplex") and not args.legacy_half_duplex)
+    if continuous_control:
+        # 0.0.5 needs transcript deltas as the local speech-turn authority, just
+        # as V1 used provider transcription evidence for barge-in. Luna still
+        # receives only the completed final transcript.
+        config = replace(
+            config,
+            emit_partials=True,
+            min_partial_audio_ms=min(config.min_partial_audio_ms, 480),
+            partial_interval_ms=min(config.partial_interval_ms, 360),
+        )
+    elif bool(getattr(args, "stt_endpoint_final_only", False)):
         config = replace(config, emit_partials=False)
     return config
 
@@ -643,15 +658,24 @@ def build_engine(args: argparse.Namespace):
                 "x_vector_only": bool(args.qwen_xvector_only),
             },
         )
+    # 0.0.5 continuous control uses an independent neural speech-presence
+    # authority, matching the V1 separation between provider speech-start and
+    # transcription. Legacy 0.0.4 half-duplex keeps WebRTC VAD for A/B rollback.
+    vad = (
+        WebRtcVadDetector(args.vad)
+        if args.legacy_half_duplex
+        else WhisperCppSileroVadDetector()
+    )
     engine = VoiceLabEngine(
         conversation=core,
         providers=VoiceProviderRegistry(stt=stt, tts=tts),
         audio_input=SoundDeviceAudioInput(args.input_device),
         audio_output=SoundDeviceAudioOutput(args.output_device),
-        vad=WebRtcVadDetector(args.vad),
+        vad=vad,
         endpoint_config=EndpointConfig(end_silence_ms=args.end_silence_ms),
         voice=profile,
         tts_response_mode=args.tts_response_mode,
+        require_partial_confirmation=False,
     )
     return engine, stt, tts
 
@@ -806,7 +830,7 @@ def _print_timing_summary(marks: dict[str, float]) -> None:
             print(f"  {label}: {max(0.0, marks[end] - marks[start]):.1f} ms")
 
 
-async def run_session(args: argparse.Namespace) -> int:
+async def _run_legacy_session(args: argparse.Namespace) -> int:
     engine, stt, tts = build_engine(args)
 
     def on_rejected(event) -> None:
@@ -883,6 +907,144 @@ async def run_session(args: argparse.Namespace) -> int:
         unsubscribe_rescue()
         await stt.close()
         await tts.close()
+        engine.vad.close()
+        provider_close = getattr(engine.conversation.provider, "close", None)
+        if callable(provider_close):
+            await provider_close()
+
+
+def _print_voice_turn_result(engine: VoiceLabEngine, result) -> None:
+    print(f"Jarvis: {result.response_text}")
+    print(f"Status: {result.status} | turn={result.turn_id}")
+    print("Latency marks (ms from first mark):")
+    print(json.dumps(result.latency_ms, indent=2))
+    _print_timing_summary(result.latency_ms)
+    _print_luna_path(engine)
+    if result.speech_metrics:
+        print(
+            "Speech chunk: "
+            f"first={result.speech_metrics.get('first_chunk_words', 0)} words / "
+            f"{result.speech_metrics.get('first_chunk_chars', 0)} chars"
+        )
+        if "whole_response_words" in result.speech_metrics:
+            print(
+                "Whole-response TTS unit: "
+                f"{result.speech_metrics.get('whole_response_words', 0)} words / "
+                f"{result.speech_metrics.get('whole_response_chars', 0)} chars"
+            )
+    print(
+        f"Playback: queued={result.playback.queued_bytes} bytes, "
+        f"played={result.playback.played_bytes} bytes, unheard={result.playback.unheard_bytes}"
+    )
+    if result.status == "interrupted":
+        print(
+            "Interruption: "
+            f"playback≈{result.interruption_playback_ms or 0.0:.0f} ms | "
+            f"heard≈{result.heard_text or '[none]'}"
+        )
+
+
+def _wake_sleep_config_from_args(args: argparse.Namespace) -> WakeSleepConfig:
+    base = WakeSleepConfig.from_env(env_file=PROJECT_ROOT / ".env")
+    wake_phrases = tuple(args.wake_phrase) if args.wake_phrase else base.wake_phrases
+    sleep_phrases = tuple(args.sleep_phrase) if args.sleep_phrase else base.sleep_phrases
+    return WakeSleepConfig(
+        wake_phrases=wake_phrases,
+        sleep_phrases=sleep_phrases,
+        idle_timeout_seconds=(
+            args.idle_sleep_seconds
+            if args.idle_sleep_seconds is not None
+            else base.idle_timeout_seconds
+        ),
+        start_awake=args.start_awake,
+    )
+
+
+async def run_session(args: argparse.Namespace) -> int:
+    if args.legacy_half_duplex:
+        return await _run_legacy_session(args)
+
+    engine, stt, tts = build_engine(args)
+    wake_config = _wake_sleep_config_from_args(args)
+
+    def on_rejected(event) -> None:
+        payload = dict(event.payload)
+        print(
+            "Ignored non-speech candidate "
+            f"(reason={payload.get('reason', 'unknown')}, "
+            f"vad={payload.get('vad_speech_ms', '?')}ms, "
+            f"peak={payload.get('peak_rms', '?')}). Listening continues..."
+        )
+
+    def on_acoustic_rescue(event) -> None:
+        payload = dict(event.payload)
+        print(
+            "Acoustic speech rescue engaged "
+            f"(VAD missed onset; rms={payload.get('rms', '?')}, "
+            f"threshold={payload.get('threshold', '?')})."
+        )
+
+    unsubscribe_rejected = engine.conversation.event_bus.subscribe("voice.speech.rejected", on_rejected)
+    unsubscribe_rescue = engine.conversation.event_bus.subscribe("voice.speech.acoustic_rescue", on_acoustic_rescue)
+    try:
+        await _print_selected_audio(engine)
+        print(f"TTS response mode: {args.tts_response_mode}")
+        intelligence = engine.conversation.provider
+        intelligence_config = getattr(intelligence, "config", None)
+        if intelligence_config is not None:
+            print(
+                "Luna selection: "
+                f"model={intelligence_config.model} | "
+                f"service_tier={intelligence_config.service_tier} | "
+                f"transport={intelligence_config.voice_transport}"
+            )
+        print(
+            "Conversation control: "
+            f"wake={list(wake_config.wake_phrases)} | "
+            f"sleep={list(wake_config.sleep_phrases)} | "
+            f"idle_sleep={wake_config.idle_timeout_seconds:.0f}s | "
+            f"start={'awake' if wake_config.start_awake else 'sleeping'}"
+        )
+        vad_description = getattr(engine.vad, "description", type(engine.vad).__name__)
+        print(f"Speech presence: {vad_description}")
+        if not args.no_prewarm:
+            await _prewarm_voice(engine, stt, tts)
+        # Keep the established acceptance marker after provider warmup.
+        print("Listening...")
+
+        session = ContinuousVoiceSession(
+            engine=engine,
+            config=wake_config,
+            reasoning_policy=ReasoningPolicy(level=args.reasoning, allow_escalation=False),
+        )
+
+        def status(message: str) -> None:
+            print(message)
+
+        def transcript(text: str, presence: VoicePresenceState) -> None:
+            label = "Sleeping heard" if presence is VoicePresenceState.SLEEPING else "You"
+            print(f"{label}: {text}")
+
+        result = await session.run(
+            max_completed_turns=args.turns,
+            on_status=status,
+            on_turn=lambda turn: _print_voice_turn_result(engine, turn),
+            on_transcript=transcript,
+        )
+        print(
+            "Session summary: "
+            f"turns={result.completed_turns} | wakes={result.wake_count} | "
+            f"auto/explicit sleeps={result.sleep_count} | interruptions={result.interruption_count} | "
+            f"final={result.final_presence.value}"
+        )
+        return 0 if result.completed_turns == args.turns else 1
+    finally:
+        unsubscribe_rejected()
+        unsubscribe_rescue()
+        await engine.cancel_capture("Voice Lab shutdown")
+        await engine.interrupt_response("Voice Lab shutdown")
+        await stt.close()
+        await tts.close()
         provider_close = getattr(engine.conversation.provider, "close", None)
         if callable(provider_close):
             await provider_close()
@@ -917,7 +1079,7 @@ async def _main(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Jarvis Core v2 0.0.4 local Voice Lab")
+    parser = argparse.ArgumentParser(description="Jarvis Core v2 0.0.5 local Voice Lab")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--doctor", action="store_true", help="local configuration check; no model load/network")
     mode.add_argument("--devices", action="store_true", help="list local audio devices with host API/native rate")
@@ -959,8 +1121,9 @@ def main(argv: list[str] | None = None) -> int:
         "--stt-endpoint-final-only",
         action="store_true",
         help=(
-            "Repair34 A/B: because Voice Core already endpoints/evidence-gates the utterance, "
-            "skip Whisper's redundant post-endpoint partial inference and run one full final inference."
+            "Legacy 0.0.4 A/B only. 0.0.5 realtime conversation control always keeps local "
+            "Whisper partials internally because transcript evidence now confirms real speech/barge-in; "
+            "only the final transcript is submitted to Luna."
         ),
     )
     parser.add_argument(
@@ -997,10 +1160,39 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--wake-phrase",
+        action="append",
+        help=(
+            "custom wake phrase; repeat to allow multiple phrases. "
+            "Defaults to 'hey jarvis' and 'jarvis'."
+        ),
+    )
+    parser.add_argument(
+        "--sleep-phrase",
+        action="append",
+        help="custom exact sleep phrase; repeat to allow multiple phrases",
+    )
+    parser.add_argument(
+        "--idle-sleep-seconds",
+        type=float,
+        default=None,
+        help="seconds of true awake inactivity before Jarvis sleeps (default/env: 60)",
+    )
+    parser.add_argument(
+        "--start-awake",
+        action="store_true",
+        help="development override: begin the controlled session awake",
+    )
+    parser.add_argument(
+        "--legacy-half-duplex",
+        action="store_true",
+        help="regression-only: run the old 0.0.4 turn loop without wake/sleep/barge-in",
+    )
+    parser.add_argument(
         "--turns",
         type=int,
         default=1,
-        help="number of half-duplex voice turns to run in one warm provider/session process",
+        help="number of answered turns before the development session exits",
     )
     parser.add_argument(
         "--reasoning",
@@ -1016,6 +1208,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--audio-diagnostic-seconds must be positive")
     if args.turns <= 0:
         parser.error("--turns must be positive")
+    if args.idle_sleep_seconds is not None and args.idle_sleep_seconds <= 0:
+        parser.error("--idle-sleep-seconds must be positive")
     if args.qwen_fixed_seed is not None and not 0 <= args.qwen_fixed_seed <= 0xFFFFFFFF:
         parser.error("--qwen-fixed-seed must be between 0 and 4294967295")
     if args.save_devices and args.input_device is None and args.output_device is None:
