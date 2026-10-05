@@ -30,7 +30,7 @@ apply_*_patch.py
 *.db
 *.sqlite
 *.sqlite3
-runtime/
+/runtime/
 data/
 provider_cache/
 model_weights/
