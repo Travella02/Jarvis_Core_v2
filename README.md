@@ -4,25 +4,25 @@ Jarvis Core v2 is a clean rebuild of Jarvis with provider-independent intelligen
 
 ## Current milestone
 
-**0.0.6 - Runtime State & Event Foundation**
+**0.0.7 - Portable Runtime API & Client Reconnection**
 
-0.0.6 moves the accepted 0.0.5 wake/sleep/interruption voice path under a central Jarvis runtime host while preserving the accepted local whisper.cpp -> GPT-6 Luna -> whole-response Qwen3-TTS behavior.
+0.0.7 exposes the authoritative 0.0.6 `JarvisRuntime` through a versioned local HTTP/WebSocket protocol without giving the client ownership of Jarvis state. A client can connect, take a snapshot, disconnect, and later resume from a `runtime_id + event cursor` while the same Conversation Core continues running.
 
-The runtime now provides:
+The client contract is deliberately platform-neutral: Windows, macOS, Linux, iOS, and Android apps can consume the same JSON protocol. There is no Electron-specific IPC, Windows named-pipe contract, Python object pickling, or provider transport state in the API.
 
-- an explicit process lifecycle (`stopped`, `starting`, `running`, `stopping`);
-- one shared authoritative in-process EventBus with sequence cursors and trace replay;
-- reconnect snapshots so future UI/clients can recover without becoming a second state authority;
-- non-secret runtime settings;
-- explicit intelligence-provider routing with no silent model/tier fallback;
-- timeout-bounded provider/component health projection;
-- one runtime-owned Conversation Core instance.
+For security, 0.0.7 is **loopback-only**. This milestone does not expose an unauthenticated Core to LAN/WAN. Future mobile/cross-device access will use the same protocol through an authenticated device-pairing/TLS or cloud-relay boundary.
 
-Runtime lifecycle, provider/component health, voice presence (`sleeping`/`awake`), and Conversation Core foreground activity remain separate truths. This deliberately avoids the V1 pattern of forcing sleep/wake, conversation, execution, background work, and degraded/error into one state enum.
+New local runtime endpoints:
 
-Voice Lab now creates Conversation Core through `JarvisRuntime`, but 0.0.6 does not add tools, memory, a desktop UI, autonomous work, or a network local API yet. Event replay is memory-only and bounded; durable logging is deferred until a dedicated redacted persistence boundary exists.
+- `GET /v1/protocol`
+- `GET /v1/health`
+- `GET /v1/runtime/snapshot`
+- `GET /v1/runtime/events`
+- `WS /v1/runtime/events/ws`
 
-The accepted 0.0.5 wake/sleep/confidence behavior remains unchanged. Fuzzy wake-word correction for STT variants such as `Jervis` -> `Jarvis` remains a later polish item.
+`python -m apps.runtime_api_lab` performs a real local TCP/HTTP/WebSocket reconnect test without microphone, TTS, Luna, credentials, or public Internet access.
+
+The accepted 0.0.5 voice path and 0.0.6 runtime/state/event authority remain unchanged. Fuzzy wake-word correction for STT variants such as `Jervis` -> `Jarvis` remains deferred polish.
 
 ## Requirements
 
@@ -31,6 +31,10 @@ The accepted 0.0.5 wake/sleep/confidence behavior remains unchanged. Fuzzy wake-
 - OpenAI Python SDK 3.13.0
 - `sounddevice==0.5.6`
 - `webrtcvad-wheels==2.0.14`
+- `fastapi==0.128.2`
+- `uvicorn[standard]==0.48.0`
+- `httpx==0.28.1`
+- `websockets==16.0`
 - OpenAI API key in local `.env` for Luna
 - For GPU whisper.cpp: Git, CMake, and a current NVIDIA CUDA Toolkit
 - Chatterbox and Qwen3-TTS use separate private virtual environments created by their setup scripts

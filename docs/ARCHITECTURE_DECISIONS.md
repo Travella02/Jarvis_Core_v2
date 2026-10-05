@@ -244,3 +244,27 @@ Provider health probes are concurrent and timeout-bounded; a slow health check i
 `RuntimeSettings` centralizes non-secret runtime orchestration values such as the default provider route, event-history size, and health timeout. API keys and provider account credentials remain inside provider adapters/configuration and are never copied into `RuntimeSnapshot`.
 
 Runtime settings do not silently read project `.env`; callers explicitly opt into an env file. This keeps tests deterministic and avoids V1's environment-contamination regressions.
+
+## ADR-039 — Client protocol is platform-neutral; network exposure is a separate trust decision
+
+0.0.7 defines `jarvis-runtime` protocol version 1 as JSON over standard HTTP/WebSocket. The contract must not depend on Electron IPC, Windows named pipes, Python object serialization, or a provider-specific realtime transport.
+
+A native Windows, macOS, Linux, iOS, or Android app may consume the same protocol. A client-reported platform/device label is descriptive only and never grants authority, changes permissions, or selects a provider.
+
+0.0.7 binds the unauthenticated local API to loopback only. This is a security boundary, not a desktop-only architectural assumption. LAN/WAN/mobile-to-desktop exposure requires authenticated device/account authority plus TLS or a secure relay. The future remote transport should carry the same protocol rather than fork Jarvis Core by UI platform.
+
+## ADR-040 — Reconnect authority is the pair runtime_id + event cursor
+
+An event sequence is meaningful only inside one `JarvisRuntime` lifetime. A reconnecting client that supplies a nonzero cursor must also supply the runtime identity that issued it.
+
+If Core restarted, the cursor is ahead, bounded history has rolled over, or the replay size exceeds the safe reconnect limit, Core returns a reset reason and the current authoritative snapshot. A client must not merge an old derived state into a new runtime merely because numeric cursors happen to overlap.
+
+The event adapter subscribes before snapshot capture. The snapshot cursor becomes a watermark: replay covers missed events through that watermark, while later events are already buffered for live delivery. This prevents the snapshot/subscription race from silently losing an event.
+
+## ADR-041 — UI/client lifetime never owns Jarvis Core lifetime
+
+`apps.runtime_api.create_app(runtime)` receives an already-owned runtime. It does not start another Core, replace Conversation Core on connect, or stop Core on client disconnect.
+
+This directly applies the V1 lesson from duplicate Core startup/port conflicts and stale UI recovery. Future desktop/mobile shells may supervise or launch a Core according to deployment topology, but there must be exactly one process owner and client reconnection must not be mistaken for Core reconstruction.
+
+Slow-client backpressure is also explicit. If a live client cannot keep up with its bounded queue, it is told to resynchronize; events are never silently dropped while the connection still claims to be synchronized.

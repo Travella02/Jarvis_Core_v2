@@ -1,6 +1,6 @@
 {
   "name": "jarvis-core-v2",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "private": true,
   "description": "Jarvis Core v2 workspace. 0.0.6 adds the central runtime host, event replay, settings, provider routing, and health foundation.",
   "scripts": {}

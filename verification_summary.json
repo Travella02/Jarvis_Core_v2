@@ -1,0 +1,7 @@
+{
+  "guarded_installer": "PASS",
+  "focused_tests": "PASS (30 tests)",
+  "full_regression": "PASS (320 tests)",
+  "runtime_api_lab": "PASS",
+  "candidate_version": "0.0.7"
+}

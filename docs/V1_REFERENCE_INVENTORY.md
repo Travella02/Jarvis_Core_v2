@@ -51,3 +51,16 @@ As the corresponding v2 milestones arrive, build behavioral/regression checks fo
 - Account/billing entitlement enforcement and fraud resistance
 
 This document records reference targets only. It does not make those systems part of 0.0.1.
+
+## 0.0.7 client/API lessons reviewed
+
+Before the portable Runtime API milestone, the V1 checkpoint was re-inspected for client/server and reconnect failures. High-value references include:
+
+- `ISSUE_312_DESKTOP_START_GUIDE_COULD_DOUBLE_START_CORE_ON_PORT_8765.md` — one supervisor/Core owner; preflight fixed ports instead of entering restart loops.
+- `ISSUE_280_BROWSER_BRIDGE_COULD_REQUIRE_MANUAL_EXTENSION_RELOAD_AFTER_CORE_RESTART.md` — reconnect needs a durable recovery trigger/contract, not only an in-memory client timer.
+- `ISSUE_300_STALE_DEVELOPMENT_RUNTIME_COULD_BREAK_BROWSER_BRIDGE_WITHOUT_SELF_REPAIR.md` — HTTP success does not prove WebSocket runtime support; validate/package WebSocket dependencies explicitly.
+- `ISSUE_007_API_BOUNDARY_VALIDATION.md` — provider-independent validation belongs at the API boundary.
+- `ISSUE_033_PRIVATE_ENV_OVERRIDE_IN_SERVER_TEST.md` — API tests must not silently inherit private `.env` values.
+- `ISSUE_307_CLOUD_SYNC_NEEDED_SERVER_REVISION_AND_VERIFIED_ONLINE_ACCOUNT_AUTHORITY.md` — future cross-device authority needs authenticated server/device identity and server revisions; client clocks/claims are not sufficient.
+
+V2 0.0.7 applies these as a versioned platform-neutral protocol, runtime-ID/cursor reconnect authority, race-safe snapshot/replay, explicit WebSocket dependencies, loopback-only unauthenticated exposure, and one Core owner.

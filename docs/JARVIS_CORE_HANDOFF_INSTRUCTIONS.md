@@ -6,32 +6,32 @@ Read `Jarvis_Core_v2_Cloud_First_Master_Handoff_2026-09-15.pdf` first. It is can
 
 ## Current candidate
 
-**0.0.6 - Runtime State & Event Foundation**
+**0.0.7 - Portable Runtime API & Client Reconnection**
 
-0.0.5 Realtime Conversation Control is accepted. Its final path uses local Silero speech presence + whisper.cpp STT, GPT-6 Luna at `reasoning=none` / standard service tier over persistent Responses WebSocket continuation, and whole-response local Qwen3-TTS with multi-signal speech confidence. Wake/sleep, full-sentence wake commands, continuous conversation, interruption context, explicit sleep, and 60-second inactivity sleep passed live acceptance.
+0.0.5 Realtime Conversation Control is accepted. 0.0.6 Runtime State & Event Foundation is accepted after automated/runtime/Voice Lab regression. 0.0.7 turns the 0.0.6 snapshot/cursor contract into a real local HTTP/WebSocket client boundary without transferring state authority to the UI.
 
-0.0.6 moves that accepted conversation path under `JarvisRuntime` and adds the Core runtime spine without adding tools, memory, UI, autonomous work, or new product activity modes.
-
-Required 0.0.6 behavior:
-- Runtime lifecycle is explicit and idempotent: stopped -> starting -> running -> stopping -> stopped.
-- Runtime lifecycle, component/provider health, voice presence, and Conversation Core activity remain separate axes.
-- One shared EventBus receives monotonic sequence numbers and supports reconnect replay after a cursor.
-- A stale reconnect cursor reports a history gap instead of silently losing events.
-- Correlation IDs can replay one turn's event trace.
-- Runtime snapshots expose only non-secret orchestration settings and composed state.
-- Intelligence provider routes are explicit; no automatic cost-changing model/service-tier fallback is enabled.
-- Provider health probes are concurrent and timeout-bounded.
-- Voice Lab creates Conversation Core through JarvisRuntime while preserving accepted 0.0.5 voice behavior.
-- `python -m apps.runtime_lab` proves lifecycle, health, Conversation Core, reconnect replay, and trace replay without network/audio.
+Required 0.0.7 behavior:
+- The public protocol is versioned JSON over standard HTTP/WebSocket, with no Electron, Windows IPC, Python-pickle, or provider-transport coupling.
+- Windows, macOS, Linux, iOS, and Android clients can consume the same protocol contract. Platform metadata is informational only and never security authority.
+- `JarvisRuntime` and its existing Conversation Core remain authoritative and outlive client disconnect/restart.
+- Reconnect uses `runtime_id + event sequence`; a nonzero cursor without its runtime identity cannot silently resume.
+- Runtime restart, cursor-ahead, history-gap, replay-limit, and client-backpressure conditions explicitly require snapshot resynchronization.
+- Event streaming subscribes before snapshot capture so no event can be lost in a snapshot/subscription race.
+- Slow client queues are detected; events are never silently dropped while a connection is considered synchronized.
+- The local API is loopback-only in 0.0.7. LAN/WAN exposure remains disabled until authenticated device pairing/TLS or secure relay transport exists.
+- FastAPI, Uvicorn, HTTPX, and WebSockets are direct pinned dependencies rather than accidental/transitive runtime assumptions.
+- `python -m apps.runtime_api_lab` proves a real TCP/HTTP/WebSocket disconnect/reconnect while the same Runtime and Conversation Core continue running.
+- The accepted Voice Lab behavior remains unchanged.
 
 Reference-project lessons applied before implementation:
-- do not recreate V1's single CoreState that mixed presence, foreground activity, execution/background work, degraded health, and error;
-- do not map raw provider/client transport events directly into authoritative conversation state;
-- do not add a durable event journal before a redacted persistence boundary exists;
-- do not let slow health/status work block the realtime path;
-- do not let tests silently inherit private `.env` values.
+- V1 ISSUE-312: preserve one Core owner; a server/client adapter must not double-start Core or enter a port restart loop;
+- V1 ISSUE-280: reconnect must not depend only on one in-memory client timer;
+- V1 ISSUE-300: HTTP health does not prove WebSocket runtime dependencies are installed, so WebSocket dependencies/tests are explicit;
+- V1 ISSUE-007: validate provider-independent/API contracts at the local boundary;
+- V1 ISSUE-033: tests/settings do not silently inherit private `.env`;
+- V1 ISSUE-307: cross-device authority cannot trust client clocks/claims; runtime identity and later authenticated account/device authority are required.
 
-Known 0.0.6 limitations: reconnect is currently an in-process snapshot/event contract, not a network API; event replay does not survive process restart; automatic provider escalation/fallback is deferred; fuzzy wake-word variants such as `Jervis` -> `Jarvis` remain later polish.
+Known 0.0.7 limitations: the API is loopback-only and does not yet provide remote phone-to-desktop transport; device pairing/authentication/cloud relay are deferred; replay is memory-only and does not survive Core process restart; typed-command submission through the API is deferred; fuzzy wake-word variants such as `Jervis` -> `Jarvis` remain later polish.
 
 ## Non-negotiable direction
 
