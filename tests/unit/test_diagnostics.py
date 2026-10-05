@@ -16,7 +16,9 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(data["conversation"]["context"], "ready")
         self.assertEqual(data["conversation"]["voice_path"], "ready")
         self.assertEqual(data["voice"]["engine"], "ready")
-        self.assertEqual(data["voice"]["full_duplex"], "deferred-to-0.0.5")
+        self.assertEqual(data["runtime"]["host"], "ready")
+        self.assertEqual(data["runtime"]["event_replay"], "sequence-cursor-ready")
+        self.assertEqual(data["voice"]["full_duplex"], "ready-headset-first")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""0.0.5 local Voice Lab with wake/sleep, continuous conversation, and barge-in."""
+"""0.0.6 Voice Lab running through the Jarvis Core runtime host."""
 
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ from time import monotonic
 
 from core.common.cancellation import CancellationToken
 from core.common.ids import CorrelationContext
-from core.conversation import ConversationContext, ConversationCore
 from core.conversation.engine import VOICE_RESPONSE_INSTRUCTION
 from core.intelligence import IntelligenceContext, IntelligenceEventType, ReasoningPolicy
+from core.runtime import IntelligenceProviderRouter, JarvisRuntime, RuntimeSettings
 from core.voice import (
     AudioFormat,
     AudioSampleFormat,
@@ -636,13 +636,25 @@ def build_engine(args: argparse.Namespace):
         config_updates["service_tier"] = args.luna_service_tier
     intelligence_config = replace(intelligence_config, **config_updates)
     intelligence = OpenAIProvider(intelligence_config)
-    core = ConversationCore(
-        context=ConversationContext.create(
-            user_id="local-development-user",
-            speaker_id="voice-lab-user",
-            device_id="voice-lab",
-        ),
-        provider=intelligence,
+
+    # 0.0.6: Voice Lab now runs through the same runtime host that future typed
+    # clients/UI will reconnect to. Provider routing is explicit and never
+    # silently changes model/service tier.
+    runtime_settings = RuntimeSettings.from_env(env_file=PROJECT_ROOT / ".env")
+    router = IntelligenceProviderRouter(
+        default_route=runtime_settings.default_intelligence_route
+    )
+    router.register(
+        runtime_settings.default_intelligence_route,
+        intelligence,
+        make_default=True,
+    )
+    runtime = JarvisRuntime(settings=runtime_settings, provider_router=router)
+    runtime.start()
+    core = runtime.create_conversation(
+        user_id="local-development-user",
+        speaker_id="voice-lab-user",
+        device_id="voice-lab",
     )
     stt = WhisperCppProvider(_whisper_config_from_args(args))
     tts = _tts_provider_from_args(args)
@@ -678,6 +690,10 @@ def build_engine(args: argparse.Namespace):
         tts_response_mode=args.tts_response_mode,
         require_partial_confirmation=False,
     )
+    # Development-only attachment used for lifecycle diagnostics/cleanup. Voice,
+    # Conversation Core, and providers continue to depend on their existing
+    # provider-neutral contracts rather than importing Runtime directly.
+    engine.runtime = runtime
     return engine, stt, tts
 
 
@@ -924,9 +940,14 @@ async def _run_legacy_session(args: argparse.Namespace) -> int:
         await stt.close()
         await tts.close()
         engine.vad.close()
-        provider_close = getattr(engine.conversation.provider, "close", None)
-        if callable(provider_close):
-            await provider_close()
+        try:
+            provider_close = getattr(engine.conversation.provider, "close", None)
+            if callable(provider_close):
+                await provider_close()
+        finally:
+            runtime = getattr(engine, "runtime", None)
+            if runtime is not None:
+                runtime.close()
 
 
 def _print_voice_turn_result(engine: VoiceLabEngine, result) -> None:
@@ -1087,9 +1108,14 @@ async def run_session(args: argparse.Namespace) -> int:
         await engine.interrupt_response("Voice Lab shutdown")
         await stt.close()
         await tts.close()
-        provider_close = getattr(engine.conversation.provider, "close", None)
-        if callable(provider_close):
-            await provider_close()
+        try:
+            provider_close = getattr(engine.conversation.provider, "close", None)
+            if callable(provider_close):
+                await provider_close()
+        finally:
+            runtime = getattr(engine, "runtime", None)
+            if runtime is not None:
+                runtime.close()
 
 
 async def _main(args: argparse.Namespace) -> int:

@@ -214,3 +214,33 @@ A completed Luna response is not automatically a response the user heard. Conver
 ## ADR-033 — 0.0.5 barge-in is full-duplex but headset-first
 
 The microphone resumes while TTS playback is active. Endpoint-confirmed user speech stops local playback immediately, while the same microphone capture continues through endpointing/STT and becomes the next turn. This establishes correct interruption/cancellation semantics without coupling Core to a concrete TTS provider. Production AEC/noise suppression remains a later audio integration because speaker echo can otherwise resemble user speech; 0.0.5 live acceptance should use a headset.
+
+## ADR-034 — Runtime lifecycle, health, voice presence, and conversation activity are orthogonal
+
+0.0.6 introduces `JarvisRuntime` as the process/runtime host, but it does not recreate V1's single all-purpose state enum. Runtime lifecycle (`stopped/starting/running/stopping`), runtime/component health, voice presence (`sleeping/awake`), and Conversation Core foreground activity remain separate authorities.
+
+`JarvisRuntime.snapshot()` composes those truths for future clients without allowing one axis to overwrite another. An awake Jarvis may later research, wait for approval, or report degraded provider health without forcing those facts into one mutually exclusive state.
+
+## ADR-035 — Reconnecting clients consume snapshots plus bounded event cursors
+
+The shared `EventBus` remains authoritative and in-process. 0.0.6 adds monotonic event sequence numbers, replay after a cursor, correlation trace replay, and explicit history-gap detection.
+
+A UI/client restart must not create a second Conversation Core or reconstruct state from provider transport events. It receives a runtime snapshot, remembers the latest cursor, and then consumes newer events. If the cursor predates retained history, Core reports the gap rather than silently pretending replay is complete.
+
+A network/local API transport is deferred; the reconnect contract is established before choosing HTTP/WebSocket implementation details.
+
+## ADR-036 — Durable event persistence is deferred until its redaction boundary is explicit
+
+0.0.6 event replay is bounded memory only. V1 eventually needed persistence-boundary redaction because operational events could carry sensitive values into durable JSONL/SQLite artifacts. V2 will not introduce a durable event journal until retention, redaction, secret handling, user-data policy, and migration semantics are specified and tested together.
+
+## ADR-037 — Provider routing is explicit and cost-stable by default
+
+`IntelligenceProviderRouter` provides named routes and capability validation. It does not silently switch providers, models, reasoning strength, or service tiers. Automatic escalation/fallback remains a later policy layer and must preserve the user's cost/latency controls.
+
+Provider health probes are concurrent and timeout-bounded; a slow health check is not allowed to block runtime snapshots or realtime conversation work.
+
+## ADR-038 — Runtime settings contain orchestration policy, never provider secrets
+
+`RuntimeSettings` centralizes non-secret runtime orchestration values such as the default provider route, event-history size, and health timeout. API keys and provider account credentials remain inside provider adapters/configuration and are never copied into `RuntimeSnapshot`.
+
+Runtime settings do not silently read project `.env`; callers explicitly opt into an env file. This keeps tests deterministic and avoids V1's environment-contamination regressions.

@@ -1,7 +1,7 @@
 [project]
 name = "jarvis-core-v2"
-version = "0.0.5"
-description = "Jarvis Core v2 realtime conversation voice control"
+version = "0.0.6"
+description = "Jarvis Core v2 runtime state and event foundation"
 requires-python = ">=3.11,<4"
 dependencies = [
     "openai[realtime]==3.13.0",
@@ -10,4 +10,4 @@ dependencies = [
 ]
 
 [tool.jarvis]
-release_title = "Realtime Conversation Control"
+release_title = "Runtime State & Event Foundation"

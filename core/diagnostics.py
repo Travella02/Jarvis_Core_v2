@@ -16,6 +16,7 @@ from typing import Any
 from core.conversation import ConversationContext, ConversationCore, CoreStateMachine, EventBus, ReferentResolver
 from core.intelligence import IntelligenceProvider
 from core.tools import ToolDefinition, ToolRequest, ToolResult
+from core.runtime import JarvisRuntime, RuntimeSettings, IntelligenceProviderRouter
 from core.voice import (
     AudioInput,
     AudioOutput,
@@ -56,6 +57,13 @@ def collect_diagnostics() -> dict[str, Any]:
             "voice_path": "ready" if hasattr(ConversationCore, "submit_voice") else "missing",
             "persistence": "snapshot-contract-only",
         },
+        "runtime": {
+            "host": "ready" if JarvisRuntime else "missing",
+            "settings": "ready" if RuntimeSettings else "missing",
+            "provider_router": "ready" if IntelligenceProviderRouter else "missing",
+            "event_replay": "sequence-cursor-ready",
+            "durable_event_journal": "deferred",
+        },
         "voice": {
             "engine": "ready" if VoiceLabEngine else "missing",
             "audio_contracts": "ready" if AudioInput and AudioOutput else "missing",
@@ -63,8 +71,8 @@ def collect_diagnostics() -> dict[str, Any]:
             "tts_chunking": "ready" if SpeechTextChunker else "missing",
             "latency_telemetry": "ready" if VoiceLatencyTrace else "missing",
             "provider_registry": "ready" if VoiceProviderRegistry else "missing",
-            "mode": "0.0.4-half-duplex-lab",
-            "full_duplex": "deferred-to-0.0.5",
+            "mode": "0.0.5-continuous-runtime-hosted",
+            "full_duplex": "ready-headset-first",
         },
         "providers": {
             "intelligence": "provider-layer-ready",
@@ -83,6 +91,7 @@ def collect_diagnostics() -> dict[str, Any]:
 def _format_text(data: dict[str, Any]) -> str:
     providers = data["providers"]
     conversation = data["conversation"]
+    runtime = data["runtime"]
     voice = data["voice"]
     return "\n".join(
         [
@@ -94,6 +103,11 @@ def _format_text(data: dict[str, Any]) -> str:
                 f"context={conversation['context']}, referents={conversation['referent_resolver']}, "
                 f"events={conversation['event_bus']}, state={conversation['state_machine']}, "
                 f"typed={conversation['typed_path']}, voice={conversation['voice_path']}"
+            ),
+            (
+                "Runtime: "
+                f"host={runtime['host']}, settings={runtime['settings']}, "
+                f"router={runtime['provider_router']}, replay={runtime['event_replay']}"
             ),
             (
                 "Voice: "

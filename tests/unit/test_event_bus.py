@@ -39,3 +39,25 @@ class EventBusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class EventBusCursorTests(unittest.TestCase):
+    def test_sequences_are_monotonic_and_replayable(self) -> None:
+        bus = EventBus(history_limit=8)
+        first = bus.emit("a", origin="test")
+        second = bus.emit("b", origin="test")
+        third = bus.emit("c", origin="test")
+        self.assertEqual((first.sequence, second.sequence, third.sequence), (1, 2, 3))
+        self.assertEqual([item.event_type for item in bus.events_after(1)], ["b", "c"])
+        self.assertEqual(bus.latest_sequence, 3)
+        self.assertEqual(bus.oldest_sequence, 1)
+
+    def test_correlation_trace_can_be_replayed_without_provider_state(self) -> None:
+        bus = EventBus()
+        trace = CorrelationContext.create()
+        bus.emit("a", origin="test", trace=trace)
+        bus.emit("other", origin="test")
+        bus.emit("b", origin="test", trace=trace)
+        self.assertEqual(
+            [item.event_type for item in bus.events_for_correlation(trace.correlation_id)],
+            ["a", "b"],
+        )

@@ -4,23 +4,25 @@ Jarvis Core v2 is a clean rebuild of Jarvis with provider-independent intelligen
 
 ## Current milestone
 
-**0.0.5 - Realtime Conversation Control**
+**0.0.6 - Runtime State & Event Foundation**
 
-0.0.5 builds directly on the accepted 0.0.4 voice pipeline. The accepted path is local whisper.cpp STT -> GPT-6 Luna over persistent Responses WebSocket continuation -> whole-response local Qwen3-TTS playback.
+0.0.6 moves the accepted 0.0.5 wake/sleep/interruption voice path under a central Jarvis runtime host while preserving the accepted local whisper.cpp -> GPT-6 Luna -> whole-response Qwen3-TTS behavior.
 
-The new milestone adds lifecycle/conversation control without adding tools, memory, UI, or future activity modes:
+The runtime now provides:
 
-- Jarvis starts sleeping by default and listens locally only.
-- A wake phrase can lead a complete command in one utterance: `Hey Jarvis, what is new in Rocket League?` wakes Jarvis and immediately routes only the command remainder.
-- Once awake, follow-up turns do not require the wake phrase.
-- Jarvis returns to sleep only on an explicit sleep phrase or 60 seconds of true inactivity after the last user/Jarvis activity.
-- The microphone resumes while local speech is playing. Endpoint-confirmed user speech triggers barge-in and stops playback without cancelling the new capture.
-- Conversation Core records generated text separately from what was physically heard. The next GPT-6 Luna turn receives an internal playback note containing the interruption offset and an approximate heard prefix while preserving `previous_response_id` continuation whenever the local transcript chain still matches.
-- Wake phrases are configuration, not hard-coded product identity. `Jarvis`/`Hey Jarvis` are defaults; future settings can choose another phrase without replacing the voice engine.
+- an explicit process lifecycle (`stopped`, `starting`, `running`, `stopping`);
+- one shared authoritative in-process EventBus with sequence cursors and trace replay;
+- reconnect snapshots so future UI/clients can recover without becoming a second state authority;
+- non-secret runtime settings;
+- explicit intelligence-provider routing with no silent model/tier fallback;
+- timeout-bounded provider/component health projection;
+- one runtime-owned Conversation Core instance.
 
-Lifecycle (`sleeping`/`awake`) is deliberately separate from future activity/status modes such as working, researching, thinking, waiting, or error.
+Runtime lifecycle, provider/component health, voice presence (`sleeping`/`awake`), and Conversation Core foreground activity remain separate truths. This deliberately avoids the V1 pattern of forcing sleep/wake, conversation, execution, background work, and degraded/error into one state enum.
 
-**Known 0.0.5 limitation:** full-duplex capture is headset-first. Production acoustic echo cancellation/noise suppression and word-perfect TTS alignment are separate future audio improvements; interruption preserves exact PCM playback time and an explicitly approximate text prefix today.
+Voice Lab now creates Conversation Core through `JarvisRuntime`, but 0.0.6 does not add tools, memory, a desktop UI, autonomous work, or a network local API yet. Event replay is memory-only and bounded; durable logging is deferred until a dedicated redacted persistence boundary exists.
+
+The accepted 0.0.5 wake/sleep/confidence behavior remains unchanged. Fuzzy wake-word correction for STT variants such as `Jervis` -> `Jarvis` remains a later polish item.
 
 ## Requirements
 
