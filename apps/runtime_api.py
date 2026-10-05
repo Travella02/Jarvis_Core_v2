@@ -12,8 +12,10 @@ from contextlib import suppress
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
-from core.runtime import JarvisRuntime
+from core.runtime import ClientCommandError, JarvisRuntime, command_record_to_dict
 from core.runtime.client_stream import RuntimeEventStream
 from core.runtime.protocol import (
     API_PREFIX,
@@ -25,6 +27,40 @@ from core.runtime.protocol import (
     protocol_description,
     snapshot_to_dict,
 )
+
+
+class ClientTypedCommandBody(BaseModel):
+    runtime_id: str = Field(min_length=1, max_length=200)
+    conversation_id: str = Field(min_length=1, max_length=200)
+    client_request_id: str = Field(min_length=1, max_length=240)
+    client_id: str = Field(min_length=1, max_length=120)
+    text: str = Field(min_length=1, max_length=20_000)
+
+
+class ClientCancelCommandBody(BaseModel):
+    runtime_id: str = Field(min_length=1, max_length=200)
+    conversation_id: str = Field(min_length=1, max_length=200)
+    reason: str = Field(default="client requested cancellation", max_length=240)
+
+
+def _command_rejection(
+    runtime: JarvisRuntime,
+    error: ClientCommandError,
+    *,
+    message_type: str = "client.command.ack",
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=error.status_code,
+        content=envelope(
+            message_type,
+            data={
+                "accepted": False,
+                "runtime_id": runtime.runtime_id,
+                "reason": error.code,
+                "detail": str(error),
+            },
+        ),
+    )
 
 
 def create_app(runtime: JarvisRuntime) -> FastAPI:
@@ -98,6 +134,47 @@ def create_app(runtime: JarvisRuntime) -> FastAPI:
         if reset_reason is not None:
             data["events"] = []
         return envelope("runtime.events", data=data)
+
+    @app.post(f"{API_PREFIX}/runtime/commands/typed")
+    async def submit_typed_command(body: ClientTypedCommandBody):
+        try:
+            receipt = await runtime.client_commands.submit_typed(
+                runtime_id=body.runtime_id,
+                conversation_id=body.conversation_id,
+                client_request_id=body.client_request_id,
+                client_id=body.client_id,
+                text=body.text,
+            )
+        except ClientCommandError as exc:
+            return _command_rejection(runtime, exc)
+        return envelope(
+            "client.command.ack",
+            data={
+                "accepted": True,
+                **command_record_to_dict(receipt.record, duplicate=receipt.duplicate),
+            },
+        )
+
+    @app.post(f"{API_PREFIX}/runtime/commands/{{command_id}}/cancel")
+    async def cancel_client_command(command_id: str, body: ClientCancelCommandBody):
+        try:
+            receipt = await runtime.client_commands.cancel(
+                command_id=command_id,
+                runtime_id=body.runtime_id,
+                conversation_id=body.conversation_id,
+                reason=body.reason,
+            )
+        except ClientCommandError as exc:
+            return _command_rejection(runtime, exc, message_type="client.command.cancel.ack")
+        return envelope(
+            "client.command.cancel.ack",
+            data={
+                "accepted": receipt.accepted,
+                "duplicate": receipt.duplicate,
+                "already_terminal": receipt.already_terminal,
+                **command_record_to_dict(receipt.record),
+            },
+        )
 
     @app.websocket(f"{API_PREFIX}/runtime/events/ws")
     async def runtime_events_socket(

@@ -16,6 +16,7 @@ from time import monotonic
 from core.common.ids import new_id
 from core.conversation import ConversationContext, ConversationCore, CoreEvent, EventBus
 from core.intelligence import ProviderHealthState
+from core.runtime.commands import RuntimeCommandGateway
 from core.runtime.events import RuntimeEventType
 from core.runtime.health import ComponentHealthState, HealthRegistry
 from core.runtime.models import (
@@ -66,6 +67,7 @@ class JarvisRuntime:
         self._started_monotonic: float | None = None
         self._lock = RLock()
         self._unsubscribe = self.event_bus.subscribe("*", self._observe_event)
+        self.client_commands = RuntimeCommandGateway(self)
 
     @staticmethod
     def _read_version() -> str:

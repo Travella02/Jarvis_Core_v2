@@ -16,6 +16,12 @@ class RuntimeEventType(str, Enum):
     PROVIDER_HEALTH = "runtime.provider.health"
     SETTINGS_LOADED = "runtime.settings.loaded"
     CLIENT_SNAPSHOT = "runtime.client.snapshot"
+    CLIENT_COMMAND_ACCEPTED = "runtime.client.command.accepted"
+    CLIENT_COMMAND_STARTED = "runtime.client.command.started"
+    CLIENT_COMMAND_COMPLETED = "runtime.client.command.completed"
+    CLIENT_COMMAND_CANCEL_REQUESTED = "runtime.client.command.cancel.requested"
+    CLIENT_COMMAND_CANCELLED = "runtime.client.command.cancelled"
+    CLIENT_COMMAND_FAILED = "runtime.client.command.failed"
 
 
 __all__ = ["RuntimeEventType"]

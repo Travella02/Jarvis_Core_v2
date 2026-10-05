@@ -64,3 +64,15 @@ Before the portable Runtime API milestone, the V1 checkpoint was re-inspected fo
 - `ISSUE_307_CLOUD_SYNC_NEEDED_SERVER_REVISION_AND_VERIFIED_ONLINE_ACCOUNT_AUTHORITY.md` — future cross-device authority needs authenticated server/device identity and server revisions; client clocks/claims are not sufficient.
 
 V2 0.0.7 applies these as a versioned platform-neutral protocol, runtime-ID/cursor reconnect authority, race-safe snapshot/replay, explicit WebSocket dependencies, loopback-only unauthenticated exposure, and one Core owner.
+
+## 0.0.8 client-input/control lessons reviewed
+
+Before adding client-to-Core command submission, the V1 0.3.6 checkpoint was re-inspected for duplicate-response, cancellation, and authority failures. High-value references include:
+
+- `ISSUE_075_DUPLICATE_TRANSCRIPTS_REPEATED_VISUAL_COMMANDS.md` — transport/event deduplication and semantic UI deduplication require separate identities; one repeated transport event must not execute a command twice.
+- `ISSUE_117_SPEAKER_CONTEXT_CREATED_DUPLICATE_RESPONSE_REQUEST.md` — one completed turn needs exactly one response owner.
+- `ISSUE_205_DUPLICATE_CONNECTED_ACTION_COMPLETION_FELL_THROUGH_TO_REALTIME.md` — duplicate in-flight events must coalesce/reuse the existing transaction rather than start a competing response path.
+- `ISSUE_172_CANCEL_IT_COULD_BE_MISCLASSIFIED_AS_CONFIRMATION.md` — cancellation and positive execution/confirmation must be disjoint control paths.
+- `ISSUE_310_DESKTOP_COULD_NOT_BE_FINANCIAL_AUTHORITY_FOR_PAID_PROVIDER_WORK.md` — clients are not authority for server-owned execution state/policy; local 0.0.8 applies the same boundary to Core trace/state ownership even though billing is not in scope.
+
+V2 0.0.8 applies these lessons with runtime-scoped `client_request_id` idempotency, server-generated Core trace IDs, stale runtime/conversation rejection, one active client command at a time, cooperative Core cancellation, and authoritative result delivery through the existing event stream.

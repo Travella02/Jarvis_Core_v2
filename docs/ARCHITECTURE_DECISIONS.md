@@ -268,3 +268,23 @@ The event adapter subscribes before snapshot capture. The snapshot cursor become
 This directly applies the V1 lesson from duplicate Core startup/port conflicts and stale UI recovery. Future desktop/mobile shells may supervise or launch a Core according to deployment topology, but there must be exactly one process owner and client reconnection must not be mistaken for Core reconstruction.
 
 Slow-client backpressure is also explicit. If a live client cannot keep up with its bounded queue, it is told to resynchronize; events are never silently dropped while the connection still claims to be synchronized.
+
+## ADR-042 — Client commands are requests into Core, never a second state authority
+
+0.0.8 allows local clients to submit typed user input through the Runtime API, but the transport does not own transcript, turn state, provider routing, or cancellation truth. Every accepted command enters the existing `ConversationCore` typed-input path. The Runtime API may issue a server-owned correlation bundle so clients can correlate acknowledgements and events, but network clients never choose Jarvis `correlation_id`, `request_id`, `turn_id`, or `cancellation_id` values.
+
+A client submission must name the current `runtime_id` and `conversation_id`. A stale runtime or conversation is rejected before execution. This prevents an uncertain retry from silently landing in a restarted Core or a replacement conversation.
+
+## ADR-043 — Runtime-scoped client_request_id provides transport idempotency
+
+A reconnecting client may not know whether an HTTP acknowledgement was lost after Core accepted its command. 0.0.8 therefore binds one `client_request_id` to one normalized typed-command payload for the lifetime of one `JarvisRuntime`.
+
+Retrying the same accepted request returns the same command ID and Core trace without a second provider execution. Reusing the same request ID for different text/conversation is an explicit conflict. The idempotency record is bounded/in-memory and does not claim durability across Core restart; a new `runtime_id` is a new authority lifetime.
+
+This follows V1's duplicate-response lessons without using content similarity to collapse legitimate repeated user utterances. Transport retry identity and semantic/user-intent deduplication remain separate mechanisms.
+
+## ADR-044 — Client cancellation delegates to Conversation Core cooperative cancellation
+
+A client may cancel the active command it submitted, but it does not set Conversation Core state directly and does not terminate provider tasks by force. The Runtime command gateway delegates cancellation to `ConversationCore.cancel_active_turn`, which owns the cancellation registry/token and provider cancel request.
+
+0.0.8 intentionally does not add a generic client command queue or arbitrary state-control RPCs. If a foreground turn is already active, a second client command is rejected as busy. Future multimodal/UI scheduling may add an explicit queue policy, but it must remain Core-owned and observable rather than being hidden in a desktop/mobile client.

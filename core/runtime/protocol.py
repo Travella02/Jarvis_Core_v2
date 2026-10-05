@@ -1,8 +1,9 @@
 """Versioned, platform-neutral runtime client protocol.
 
-0.0.7 deliberately keeps the client contract independent of Electron, Windows,
-Python object layouts, and provider-specific state. Native Windows/macOS/iOS/
-Android clients can all consume the same JSON representation over HTTP/WebSocket.
+The client contract remains independent of Electron, Windows, Python object
+layouts, and provider-specific state. Native Windows/macOS/iOS/Android clients
+consume the same JSON representation over HTTP/WebSocket. 0.0.8 adds typed
+client requests without transferring state or trace authority to the client.
 """
 
 from __future__ import annotations
@@ -169,6 +170,12 @@ def protocol_description() -> dict[str, Any]:
         "cursor_authority": "runtime-id-plus-event-sequence",
         "state_authority": "runtime-snapshot",
         "remote_transport": "deferred-authenticated-transport",
+        "client_input": {
+            "typed_command": f"POST {API_PREFIX}/runtime/commands/typed",
+            "cancel_command": f"POST {API_PREFIX}/runtime/commands/{{command_id}}/cancel",
+            "result_delivery": "authoritative-event-stream",
+            "idempotency": "runtime-scoped-client-request-id",
+        },
     }
 
 

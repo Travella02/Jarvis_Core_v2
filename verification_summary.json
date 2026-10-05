@@ -1,7 +1,8 @@
 {
-  "guarded_installer": "PASS",
+  "guarded_installer": "PASS (applied to exact accepted 0.0.7 clean checkpoint)",
   "focused_tests": "PASS (30 tests)",
-  "full_regression": "PASS (320 tests)",
+  "full_regression": "PASS (335 tests, 1 skipped)",
   "runtime_api_lab": "PASS",
-  "candidate_version": "0.0.7"
+  "core_diagnostics": "PASS",
+  "candidate_version": "0.0.8"
 }

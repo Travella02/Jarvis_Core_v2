@@ -4,25 +4,27 @@ Jarvis Core v2 is a clean rebuild of Jarvis with provider-independent intelligen
 
 ## Current milestone
 
-**0.0.7 - Portable Runtime API & Client Reconnection**
+**0.0.8 - Client Input & Runtime Control**
 
-0.0.7 exposes the authoritative 0.0.6 `JarvisRuntime` through a versioned local HTTP/WebSocket protocol without giving the client ownership of Jarvis state. A client can connect, take a snapshot, disconnect, and later resume from a `runtime_id + event cursor` while the same Conversation Core continues running.
+0.0.8 completes the first two-way local client boundary on top of the accepted 0.0.7 Runtime API. A client can submit typed user input into the existing authoritative Conversation Core, receive a server-owned correlation trace, observe the resulting Core events, retry an uncertain submission without duplicate execution, and cancel the active command it submitted.
 
-The client contract is deliberately platform-neutral: Windows, macOS, Linux, iOS, and Android apps can consume the same JSON protocol. There is no Electron-specific IPC, Windows named-pipe contract, Python object pickling, or provider transport state in the API.
+Client requests never supply Jarvis request/turn/cancellation IDs and never mutate runtime state directly. `runtime_id + conversation_id` guard every submission so a stale retry cannot silently land in a restarted runtime or replacement conversation. `client_request_id` is runtime-scoped transport idempotency, not conversation truth.
 
-For security, 0.0.7 is **loopback-only**. This milestone does not expose an unauthenticated Core to LAN/WAN. Future mobile/cross-device access will use the same protocol through an authenticated device-pairing/TLS or cloud-relay boundary.
+The local API remains **loopback-only**. 0.0.8 does not add LAN/WAN exposure, device pairing, account authority, cloud relay, tools, memory, or a production desktop/mobile UI.
 
-New local runtime endpoints:
+New/continued local runtime endpoints:
 
 - `GET /v1/protocol`
 - `GET /v1/health`
 - `GET /v1/runtime/snapshot`
 - `GET /v1/runtime/events`
+- `POST /v1/runtime/commands/typed`
+- `POST /v1/runtime/commands/{command_id}/cancel`
 - `WS /v1/runtime/events/ws`
 
-`python -m apps.runtime_api_lab` performs a real local TCP/HTTP/WebSocket reconnect test without microphone, TTS, Luna, credentials, or public Internet access.
+`python -m apps.runtime_api_lab` now performs real loopback typed-command submission, duplicate-retry protection, disconnect/reconnect replay, and active-command cancellation without microphone, TTS, Luna credentials, or public Internet access.
 
-The accepted 0.0.5 voice path and 0.0.6 runtime/state/event authority remain unchanged. Fuzzy wake-word correction for STT variants such as `Jervis` -> `Jarvis` remains deferred polish.
+The accepted realtime voice path remains unchanged.
 
 ## Requirements
 
@@ -34,7 +36,7 @@ The accepted 0.0.5 voice path and 0.0.6 runtime/state/event authority remain unc
 - `fastapi==0.128.2`
 - `uvicorn[standard]==0.48.0`
 - `httpx==0.28.1`
-- `websockets==16.0`
+- `websockets==15.0.1`
 - OpenAI API key in local `.env` for Luna
 - For GPU whisper.cpp: Git, CMake, and a current NVIDIA CUDA Toolkit
 - Chatterbox and Qwen3-TTS use separate private virtual environments created by their setup scripts

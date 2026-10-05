@@ -85,12 +85,20 @@ class ConversationCore:
         *,
         tools: Sequence[ToolDefinition] = (),
         reasoning_policy: ReasoningPolicy | None = None,
+        _trace: CorrelationContext | None = None,
     ) -> TurnResult:
+        """Submit typed text through the authoritative Conversation Core.
+
+        ``_trace`` is reserved for trusted in-process adapters such as the Runtime
+        API. Network clients never supply Jarvis correlation/request/turn IDs.
+        """
+
         return await self._submit_text(
             text,
             channel=InputChannel.TYPED,
             tools=tools,
             reasoning_policy=reasoning_policy,
+            trace=_trace,
         )
 
     async def submit_voice(
@@ -114,6 +122,7 @@ class ConversationCore:
         channel: InputChannel,
         tools: Sequence[ToolDefinition] = (),
         reasoning_policy: ReasoningPolicy | None = None,
+        trace: CorrelationContext | None = None,
     ) -> TurnResult:
         prompt = text.strip()
         if not prompt:
@@ -123,7 +132,7 @@ class ConversationCore:
         if self.state.state is not CoreState.LISTENING:
             raise RuntimeError(f"cannot accept {channel.value} input while core state={self.state.state.value}")
 
-        trace = CorrelationContext.create()
+        trace = trace or CorrelationContext.create()
         handle = self.cancellations.register(trace)
         self._active_trace = trace
         chunks: list[str] = []

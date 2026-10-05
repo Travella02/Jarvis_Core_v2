@@ -6,32 +6,29 @@ Read `Jarvis_Core_v2_Cloud_First_Master_Handoff_2026-09-15.pdf` first. It is can
 
 ## Current candidate
 
-**0.0.7 - Portable Runtime API & Client Reconnection**
+**0.0.8 - Client Input & Runtime Control**
 
-0.0.5 Realtime Conversation Control is accepted. 0.0.6 Runtime State & Event Foundation is accepted after automated/runtime/Voice Lab regression. 0.0.7 turns the 0.0.6 snapshot/cursor contract into a real local HTTP/WebSocket client boundary without transferring state authority to the UI.
+0.0.5 Realtime Conversation Control, 0.0.6 Runtime State & Event Foundation, and 0.0.7 Portable Runtime API & Client Reconnection are accepted. 0.0.8 completes the first two-way client boundary without creating a second conversation owner.
 
-Required 0.0.7 behavior:
-- The public protocol is versioned JSON over standard HTTP/WebSocket, with no Electron, Windows IPC, Python-pickle, or provider-transport coupling.
-- Windows, macOS, Linux, iOS, and Android clients can consume the same protocol contract. Platform metadata is informational only and never security authority.
-- `JarvisRuntime` and its existing Conversation Core remain authoritative and outlive client disconnect/restart.
-- Reconnect uses `runtime_id + event sequence`; a nonzero cursor without its runtime identity cannot silently resume.
-- Runtime restart, cursor-ahead, history-gap, replay-limit, and client-backpressure conditions explicitly require snapshot resynchronization.
-- Event streaming subscribes before snapshot capture so no event can be lost in a snapshot/subscription race.
-- Slow client queues are detected; events are never silently dropped while a connection is considered synchronized.
-- The local API is loopback-only in 0.0.7. LAN/WAN exposure remains disabled until authenticated device pairing/TLS or secure relay transport exists.
-- FastAPI, Uvicorn, HTTPX, and WebSockets are direct pinned dependencies rather than accidental/transitive runtime assumptions.
-- `python -m apps.runtime_api_lab` proves a real TCP/HTTP/WebSocket disconnect/reconnect while the same Runtime and Conversation Core continue running.
-- The accepted Voice Lab behavior remains unchanged.
+Required 0.0.8 behavior:
+- Typed client input enters the existing `ConversationCore`; the Runtime API never creates a parallel transcript, provider session, or client-owned state machine.
+- Clients submit `runtime_id`, `conversation_id`, `client_request_id`, `client_id`, and text. Core/runtime generate correlation/request/turn/cancellation IDs; clients may observe but never choose those IDs.
+- `client_request_id` is runtime-scoped transport idempotency. Retrying the same accepted request returns the same command/trace and must not execute the provider twice. Rebinding the same request ID to different input is rejected.
+- Stale `runtime_id` or `conversation_id` is rejected before execution so an uncertain retry cannot land in a restarted runtime or replacement conversation.
+- A client may cancel the active command it submitted through Conversation Core's existing cooperative cancellation path. It may not directly mutate Core state.
+- Results remain authoritative Core/runtime events and can be replayed through the existing event cursor contract after reconnect.
+- A second client command is rejected while a foreground turn is already active; 0.0.8 does not introduce a hidden command queue.
+- The protocol remains platform-neutral and loopback-only. Remote device pairing/authentication/TLS/cloud relay remain deferred.
+- The accepted voice path remains unchanged.
 
 Reference-project lessons applied before implementation:
-- V1 ISSUE-312: preserve one Core owner; a server/client adapter must not double-start Core or enter a port restart loop;
-- V1 ISSUE-280: reconnect must not depend only on one in-memory client timer;
-- V1 ISSUE-300: HTTP health does not prove WebSocket runtime dependencies are installed, so WebSocket dependencies/tests are explicit;
-- V1 ISSUE-007: validate provider-independent/API contracts at the local boundary;
-- V1 ISSUE-033: tests/settings do not silently inherit private `.env`;
-- V1 ISSUE-307: cross-device authority cannot trust client clocks/claims; runtime identity and later authenticated account/device authority are required.
+- V1 ISSUE-075: transport idempotency and UI/domain deduplication are different concerns; one client request ID must prevent duplicate execution without collapsing genuine later utterances.
+- V1 ISSUE-117 and ISSUE-205: each completed turn needs one response owner; duplicate provider/client events must reuse the in-flight transaction rather than create a competing response path.
+- V1 ISSUE-172: cancellation is a distinct control path and must never be interpreted as positive confirmation/execution.
+- V1 ISSUE-310: clients are not authority for server-owned execution policy. 0.0.8 applies that principle locally by keeping trace/state authority in Core.
+- 0.0.7 reconnect rules remain in force: `runtime_id + event cursor` governs replay and clients never reconstruct Jarvis truth from local UI state.
 
-Known 0.0.7 limitations: the API is loopback-only and does not yet provide remote phone-to-desktop transport; device pairing/authentication/cloud relay are deferred; replay is memory-only and does not survive Core process restart; typed-command submission through the API is deferred; fuzzy wake-word variants such as `Jervis` -> `Jarvis` remain later polish.
+Known 0.0.8 limitations: the API remains loopback-only; idempotency history is in-memory and scoped to one runtime lifetime; there is no durable command queue; clients cannot remotely pair/authenticate yet; production desktop/mobile UI, tools, permissions, Memory 2.0, autonomous work, and fuzzy wake-word variants remain deferred.
 
 ## Non-negotiable direction
 

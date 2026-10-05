@@ -1,6 +1,15 @@
 """Jarvis Core v2 runtime/state/event foundation."""
 
 from .client_stream import RuntimeEventStream, RuntimeSync
+from .commands import (
+    ClientCancelReceipt,
+    ClientCommandError,
+    ClientCommandReceipt,
+    ClientCommandRecord,
+    ClientCommandStatus,
+    RuntimeCommandGateway,
+    command_record_to_dict,
+)
 from .events import RuntimeEventType
 from .health import (
     ComponentHealth,
@@ -22,6 +31,11 @@ from .settings import RuntimeSettings, RuntimeSettingsError
 
 __all__ = [
     "ComponentHealth",
+    "ClientCancelReceipt",
+    "ClientCommandError",
+    "ClientCommandReceipt",
+    "ClientCommandRecord",
+    "ClientCommandStatus",
     "PROTOCOL_NAME",
     "PROTOCOL_VERSION",
     "ComponentHealthState",
@@ -33,6 +47,7 @@ __all__ = [
     "JarvisRuntime",
     "ProviderRoute",
     "ProviderRouteError",
+    "RuntimeCommandGateway",
     "RuntimeEventStream",
     "RuntimeEventType",
     "RuntimeHealthState",
@@ -42,4 +57,5 @@ __all__ = [
     "RuntimeSettingsError",
     "RuntimeSnapshot",
     "RuntimeSync",
+    "command_record_to_dict",
 ]

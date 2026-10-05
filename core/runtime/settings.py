@@ -90,10 +90,10 @@ class RuntimeSettings:
             try:
                 address = ipaddress.ip_address(host)
             except ValueError as exc:
-                raise RuntimeSettingsError("api_host must be localhost or a loopback IP in 0.0.7") from exc
+                raise RuntimeSettingsError("api_host must be localhost or a loopback IP") from exc
             if not address.is_loopback:
                 raise RuntimeSettingsError(
-                    "0.0.7 Runtime API is loopback-only; remote/device transport requires authenticated exposure"
+                    "Runtime API is loopback-only; remote/device transport requires authenticated exposure"
                 )
         if not 1 <= self.api_port <= 65535:
             raise RuntimeSettingsError("api_port must be between 1 and 65535")
