@@ -175,9 +175,9 @@ class ContinuousVoiceSession:
 
     While awake, the next microphone capture begins as soon as the current user
     turn is submitted, so the user can preempt Jarvis during thinking, synthesis,
-    or audible playback. Raw onset is not enough to cancel: the VoiceEngine opens
-    one provisional audio candidate and the same local STT stream must produce
-    transcript evidence before barge-in becomes authoritative.
+    or audible playback. Silero onset opens only a provisional candidate. Barge-in
+    becomes authoritative only after the generic multi-signal confidence validator
+    confirms speech; no words receive hard-coded interruption semantics.
 
     This remains a headset-first full-duplex path; production acoustic echo
     cancellation remains a later audio integration concern.
@@ -247,20 +247,32 @@ class ContinuousVoiceSession:
     async def _listen_awake_with_idle(
         self,
         listen_task: asyncio.Task,
-        speech_started: asyncio.Event,
+        speech_confirmed: asyncio.Event,
     ):
+        """Wait for accepted speech or the true 60-second idle boundary.
+
+        A provisional Silero candidate does not reset the inactivity timer. If the
+        user begins speaking right on the boundary, however, give the candidate a
+        short grace window to finish confidence validation instead of cancelling
+        the microphone mid-utterance.
+        """
+
         while True:
             if listen_task.done():
                 return await listen_task
-            if speech_started.is_set():
-                # Once the user has started a real endpoint candidate, do not put
-                # Jarvis to sleep mid-utterance. STT/end-of-turn can finish.
+            if speech_confirmed.is_set():
+                self._last_activity = monotonic()
                 return await listen_task
+
             remaining = self.config.idle_timeout_seconds - (monotonic() - self._last_activity)
             if remaining <= 0:
+                if getattr(self.engine, "capture_candidate_active", False):
+                    await asyncio.sleep(0.10)
+                    continue
                 await self._cancel_listener(listen_task)
                 return None
-            event_task = asyncio.create_task(speech_started.wait())
+
+            event_task = asyncio.create_task(speech_confirmed.wait())
             done, _ = await asyncio.wait(
                 {listen_task, event_task},
                 timeout=remaining,
@@ -302,21 +314,20 @@ class ContinuousVoiceSession:
                         on_status("Awake and listening...")
 
                 if self.presence is VoicePresenceState.AWAKE:
-                    speech_started = asyncio.Event()
+                    speech_confirmed = asyncio.Event()
 
-                    def awake_started(_event) -> None:
-                        self._last_activity = monotonic()
-                        speech_started.set()
+                    def awake_confirmed(_event) -> None:
+                        speech_confirmed.set()
 
                     unsubscribe = self.engine.conversation.event_bus.subscribe(
-                        "voice.speech.started", awake_started
+                        "voice.speech.confidence_confirmed", awake_confirmed
                     )
                     listen_task = asyncio.create_task(
                         self.engine.listen_once(), name="jarvis-awake-listener"
                     )
                     try:
                         pending_capture = await self._listen_awake_with_idle(
-                            listen_task, speech_started
+                            listen_task, speech_confirmed
                         )
                     finally:
                         unsubscribe()
@@ -374,26 +385,25 @@ class ContinuousVoiceSession:
                 name="jarvis-response",
             )
 
-            # Keep listening throughout the active turn. Repair5 restores the V1
-            # contract: an independent provider-level speech-start signal is
-            # enough to barge in immediately; transcription then describes the
-            # already-confirmed utterance. voice.speech.started is now emitted
-            # only after neural Silero speech-presence confirmation.
-            speech_started = asyncio.Event()
+            # Keep listening throughout the active turn. Silero onset is only a
+            # provisional candidate; cancelling Jarvis waits for generic
+            # multi-signal speech confidence. Accepted text still goes through
+            # the normal Jarvis intelligence path with no keyword fast path.
+            speech_confirmed = asyncio.Event()
 
-            def active_speech_started(_event) -> None:
+            def active_speech_confirmed(_event) -> None:
                 self._last_activity = monotonic()
-                speech_started.set()
+                speech_confirmed.set()
 
-            unsubscribe_started = self.engine.conversation.event_bus.subscribe(
-                "voice.speech.started", active_speech_started
+            unsubscribe_confirmed = self.engine.conversation.event_bus.subscribe(
+                "voice.speech.confidence_confirmed", active_speech_confirmed
             )
             listen_task = asyncio.create_task(
                 self.engine.listen_once(lexical_interrupt_probe=True),
                 name="jarvis-full-duplex-listener",
             )
             speech_waiter = asyncio.create_task(
-                speech_started.wait(), name="jarvis-interruption-speech-start"
+                speech_confirmed.wait(), name="jarvis-interruption-confidence"
             )
 
             try:
@@ -413,9 +423,9 @@ class ContinuousVoiceSession:
                         origin="voice-session",
                         conversation_id=self.engine.conversation.context.conversation_id,
                         payload={
-                            "reason": "neural speech presence during active turn",
+                            "reason": "multi-signal speech confidence during active turn",
                             "phase": phase,
-                            "authority": "silero-neural-vad",
+                            "authority": "multi-signal-confidence",
                         },
                     )
                     await self.engine.interrupt_response(
@@ -453,12 +463,12 @@ class ContinuousVoiceSession:
                         await self._cancel_listener(listen_task)
                         break
                     pending_capture = await self._listen_awake_with_idle(
-                        listen_task, speech_started
+                        listen_task, speech_confirmed
                     )
                     if pending_capture is None:
                         self.sleep("60-second inactivity timeout")
             finally:
-                unsubscribe_started()
+                unsubscribe_confirmed()
                 if not speech_waiter.done():
                     speech_waiter.cancel()
                 await asyncio.gather(speech_waiter, return_exceptions=True)

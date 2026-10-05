@@ -166,14 +166,15 @@ def _whisper_config_from_args(args: argparse.Namespace | None = None) -> Whisper
     config = WhisperCppConfig.from_env(env_file=PROJECT_ROOT / ".env")
     continuous_control = bool(args is not None and hasattr(args, "legacy_half_duplex") and not args.legacy_half_duplex)
     if continuous_control:
-        # 0.0.5 needs transcript deltas as the local speech-turn authority, just
-        # as V1 used provider transcription evidence for barge-in. Luna still
-        # receives only the completed final transcript.
+        # Repair5e uses rolling Whisper only as generic ASR/confidence evidence.
+        # Luna still receives only the completed accepted transcript. A 360 ms
+        # first snapshot keeps barge-in responsive without giving very short
+        # noise spikes enough evidence to cancel Jarvis.
         config = replace(
             config,
             emit_partials=True,
-            min_partial_audio_ms=min(config.min_partial_audio_ms, 480),
-            partial_interval_ms=min(config.partial_interval_ms, 360),
+            min_partial_audio_ms=min(config.min_partial_audio_ms, 360),
+            partial_interval_ms=min(config.partial_interval_ms, 300),
         )
     elif bool(getattr(args, "stt_endpoint_final_only", False)):
         config = replace(config, emit_partials=False)
@@ -836,10 +837,25 @@ async def _run_legacy_session(args: argparse.Namespace) -> int:
     def on_rejected(event) -> None:
         payload = dict(event.payload)
         print(
-            "Ignored non-speech candidate "
+            "Ignored speech candidate "
             f"(reason={payload.get('reason', 'unknown')}, "
-            f"vad={payload.get('vad_speech_ms', '?')}ms, "
-            f"peak={payload.get('peak_rms', '?')}). Listening continues..."
+            f"confidence={payload.get('score', '?')}, "
+            f"vad={payload.get('vad_confidence', '?')}, "
+            f"asr={payload.get('asr_confidence', '?')}, "
+            f"stability={payload.get('stability_confidence', '?')}, "
+            f"duration={payload.get('duration_confidence', '?')}). "
+            "Listening continues..."
+        )
+
+    def on_confirmed(event) -> None:
+        payload = dict(event.payload)
+        print(
+            "Speech confirmed "
+            f"(confidence={payload.get('score', '?')} >= {payload.get('threshold', '?')} | "
+            f"vad={payload.get('vad_confidence', '?')} | "
+            f"asr={payload.get('asr_confidence', '?')} | "
+            f"stability={payload.get('stability_confidence', '?')} | "
+            f"duration={payload.get('duration_confidence', '?')})."
         )
 
     def on_acoustic_rescue(event) -> None:
@@ -970,10 +986,25 @@ async def run_session(args: argparse.Namespace) -> int:
     def on_rejected(event) -> None:
         payload = dict(event.payload)
         print(
-            "Ignored non-speech candidate "
+            "Ignored speech candidate "
             f"(reason={payload.get('reason', 'unknown')}, "
-            f"vad={payload.get('vad_speech_ms', '?')}ms, "
-            f"peak={payload.get('peak_rms', '?')}). Listening continues..."
+            f"confidence={payload.get('score', '?')}, "
+            f"vad={payload.get('vad_confidence', '?')}, "
+            f"asr={payload.get('asr_confidence', '?')}, "
+            f"stability={payload.get('stability_confidence', '?')}, "
+            f"duration={payload.get('duration_confidence', '?')}). "
+            "Listening continues..."
+        )
+
+    def on_confirmed(event) -> None:
+        payload = dict(event.payload)
+        print(
+            "Speech confirmed "
+            f"(confidence={payload.get('score', '?')} >= {payload.get('threshold', '?')} | "
+            f"vad={payload.get('vad_confidence', '?')} | "
+            f"asr={payload.get('asr_confidence', '?')} | "
+            f"stability={payload.get('stability_confidence', '?')} | "
+            f"duration={payload.get('duration_confidence', '?')})."
         )
 
     def on_acoustic_rescue(event) -> None:
@@ -985,6 +1016,9 @@ async def run_session(args: argparse.Namespace) -> int:
         )
 
     unsubscribe_rejected = engine.conversation.event_bus.subscribe("voice.speech.rejected", on_rejected)
+    unsubscribe_confirmed = engine.conversation.event_bus.subscribe(
+        "voice.speech.confidence_confirmed", on_confirmed
+    )
     unsubscribe_rescue = engine.conversation.event_bus.subscribe("voice.speech.acoustic_rescue", on_acoustic_rescue)
     try:
         await _print_selected_audio(engine)
@@ -1007,6 +1041,13 @@ async def run_session(args: argparse.Namespace) -> int:
         )
         vad_description = getattr(engine.vad, "description", type(engine.vad).__name__)
         print(f"Speech presence: {vad_description}")
+        cfg = engine.speech_confidence.config
+        print(
+            "Speech turn validation: multi-signal confidence "
+            f"(final>={cfg.final_accept_threshold:.2f}, "
+            f"interrupt>={cfg.early_accept_threshold:.2f}, "
+            "no keyword fast paths)"
+        )
         if not args.no_prewarm:
             await _prewarm_voice(engine, stt, tts)
         # Keep the established acceptance marker after provider warmup.
@@ -1040,6 +1081,7 @@ async def run_session(args: argparse.Namespace) -> int:
         return 0 if result.completed_turns == args.turns else 1
     finally:
         unsubscribe_rejected()
+        unsubscribe_confirmed()
         unsubscribe_rescue()
         await engine.cancel_capture("Voice Lab shutdown")
         await engine.interrupt_response("Voice Lab shutdown")

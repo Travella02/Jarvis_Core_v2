@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
+import math
 import os
 import subprocess
 import urllib.error
@@ -20,6 +22,7 @@ import urllib.request
 import uuid
 import wave
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from core.common.cancellation import CancellationToken
@@ -37,12 +40,22 @@ from core.voice import (
 from providers.stt.whisper_cpp.config import WhisperCppConfig
 
 
+
+
+@dataclass(frozen=True, slots=True)
+class _WhisperInference:
+    text: str
+    confidence: float | None = None
+    no_speech_probability: float | None = None
+
+
 class WhisperCppProvider(SpeechToTextProvider):
     def __init__(self, config: WhisperCppConfig | None = None) -> None:
         self.config = config or WhisperCppConfig.from_env()
         self._process: subprocess.Popen[bytes] | None = None
         self._process_lock = asyncio.Lock()
         self._active_requests: dict[str, CancellationToken] = {}
+        self._last_inference: _WhisperInference | None = None
 
     @property
     def metadata(self) -> SpeechProviderMetadata:
@@ -128,10 +141,10 @@ class WhisperCppProvider(SpeechToTextProvider):
         async def run_partial(snapshot: tuple[AudioFrame, ...]) -> None:
             nonlocal last_partial_text
             try:
-                text = await self._transcribe(snapshot)
+                inference = await self._transcribe_with_metadata(snapshot)
                 if cancellation_token.is_cancelled:
                     return
-                normalized = text.strip()
+                normalized = inference.text.strip()
                 if normalized and normalized != last_partial_text:
                     last_partial_text = normalized
                     await event_queue.put(
@@ -139,6 +152,7 @@ class WhisperCppProvider(SpeechToTextProvider):
                             trace=snapshot[0].trace,
                             event_type=TranscriptionEventType.PARTIAL,
                             text=normalized,
+                            confidence=inference.confidence,
                             audio_end_ms=round(sum(item.duration_ms for item in snapshot)),
                         )
                     )
@@ -192,12 +206,19 @@ class WhisperCppProvider(SpeechToTextProvider):
                         )
                     )
                     return
-                text = (await self._transcribe(tuple(frames))).strip()
+                inference = await self._transcribe_with_metadata(tuple(frames))
+                text = inference.text.strip()
                 await event_queue.put(
                     TranscriptionEvent(
                         trace=frames[0].trace,
                         event_type=TranscriptionEventType.FINAL,
                         text=text,
+                        confidence=inference.confidence,
+                        detail=(
+                            f"no_speech_probability={inference.no_speech_probability:.4f}"
+                            if inference.no_speech_probability is not None
+                            else None
+                        ),
                         audio_end_ms=round(sum(item.duration_ms for item in frames)),
                     )
                 )
@@ -297,8 +318,26 @@ class WhisperCppProvider(SpeechToTextProvider):
             return False
 
     async def _transcribe(self, frames: tuple[AudioFrame, ...]) -> str:
+        """Compatibility text API used by existing tests and warmup paths."""
+
         wav = self._wav_bytes(frames)
-        return await asyncio.to_thread(self._post_wav, wav)
+        inference = await asyncio.to_thread(self._post_wav_inference, wav)
+        self._last_inference = inference
+        return inference.text
+
+    async def _transcribe_with_metadata(
+        self,
+        frames: tuple[AudioFrame, ...],
+    ) -> _WhisperInference:
+        # Keep `_transcribe()` as the override point used by existing provider
+        # tests/adapters. The default implementation records metadata from the
+        # same inference, so confidence does not require a second Whisper pass.
+        self._last_inference = None
+        text = await self._transcribe(frames)
+        cached = self._last_inference
+        if cached is not None and cached.text.strip() == text.strip():
+            return cached
+        return _WhisperInference(text=text)
 
     @staticmethod
     def _wav_bytes(frames: tuple[AudioFrame, ...]) -> bytes:
@@ -313,7 +352,76 @@ class WhisperCppProvider(SpeechToTextProvider):
             handle.writeframes(b"".join(frame.payload for frame in frames))
         return buffer.getvalue()
 
-    def _post_wav(self, wav_bytes: bytes) -> str:
+    @staticmethod
+    def _confidence_from_verbose_json(payload: object) -> tuple[float | None, float | None]:
+        """Extract generic ASR confidence/no-speech evidence from whisper.cpp.
+
+        whisper.cpp verbose_json exposes token/word probabilities and, in current
+        builds, segment no-speech probabilities. The parser is deliberately
+        tolerant so older/newer compatible server builds can omit fields without
+        breaking transcription.
+        """
+
+        if not isinstance(payload, dict):
+            return None, None
+
+        word_probabilities: list[float] = []
+        token_probabilities: list[float] = []
+        no_speech: list[float] = []
+        avg_logprobs: list[float] = []
+
+        def collect_items(items: object, target: list[float]) -> None:
+            if not isinstance(items, list):
+                return
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                prob = item.get("probability")
+                if isinstance(prob, (int, float)) and 0.0 <= float(prob) <= 1.0:
+                    target.append(float(prob))
+
+        segments = payload.get("segments")
+        if isinstance(segments, list):
+            for segment in segments:
+                if not isinstance(segment, dict):
+                    continue
+                collect_items(segment.get("words"), word_probabilities)
+                collect_items(segment.get("tokens"), token_probabilities)
+                nsp = segment.get("no_speech_prob")
+                if isinstance(nsp, (int, float)) and 0.0 <= float(nsp) <= 1.0:
+                    no_speech.append(float(nsp))
+                avg_lp = segment.get("avg_logprob")
+                if isinstance(avg_lp, (int, float)):
+                    avg_logprobs.append(float(avg_lp))
+
+        # Some compatible server versions expose word/token arrays at top level.
+        collect_items(payload.get("words"), word_probabilities)
+        collect_items(payload.get("tokens"), token_probabilities)
+
+        probabilities = word_probabilities or token_probabilities
+        if probabilities:
+            lexical_confidence = sum(probabilities) / len(probabilities)
+        elif avg_logprobs:
+            # avg_logprob is natural-log token probability in Whisper-family
+            # output. Convert it into a bounded 0..1 score when token
+            # probabilities are unavailable.
+            lexical_confidence = sum(math.exp(value) for value in avg_logprobs) / len(avg_logprobs)
+        else:
+            lexical_confidence = None
+
+        no_speech_probability = max(no_speech) if no_speech else None
+        if lexical_confidence is not None and no_speech_probability is not None:
+            # Keep no-speech evidence independent but let it modestly reduce the
+            # ASR confidence from noise-like segments. Do not zero it outright:
+            # short valid one-word replies can legitimately carry some no-speech
+            # probability.
+            lexical_confidence *= 0.75 + 0.25 * (1.0 - no_speech_probability)
+
+        if lexical_confidence is not None:
+            lexical_confidence = min(1.0, max(0.0, lexical_confidence))
+        return lexical_confidence, no_speech_probability
+
+    def _post_wav_inference(self, wav_bytes: bytes) -> _WhisperInference:
         boundary = f"----jarvis-{uuid.uuid4().hex}"
         parts: list[bytes] = []
 
@@ -336,7 +444,9 @@ class WhisperCppProvider(SpeechToTextProvider):
                 b"\r\n",
             ]
         )
-        field("response_format", "text")
+        # verbose_json gives Jarvis token/word probabilities from the SAME
+        # inference. This adds response metadata, not a second model pass.
+        field("response_format", "verbose_json")
         field("language", self.config.language)
         field("temperature", "0.0")
         field("no_timestamps", "true")
@@ -352,7 +462,26 @@ class WhisperCppProvider(SpeechToTextProvider):
         )
         try:
             with urllib.request.urlopen(request, timeout=120.0) as response:
-                return response.read().decode("utf-8", errors="replace")
+                raw = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
             raise RuntimeError(f"whisper-server HTTP {exc.code}: {detail}") from exc
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            # Compatibility fallback for an older server unexpectedly returning
+            # plain text. Speech confidence will transparently redistribute the
+            # missing ASR-confidence weight over the other signals.
+            return _WhisperInference(text=raw)
+
+        if isinstance(payload, dict):
+            text = str(payload.get("text") or "")
+        else:
+            text = raw
+        confidence, no_speech_probability = self._confidence_from_verbose_json(payload)
+        return _WhisperInference(
+            text=text,
+            confidence=confidence,
+            no_speech_probability=no_speech_probability,
+        )

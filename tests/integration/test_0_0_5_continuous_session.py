@@ -52,11 +52,11 @@ class FakeEngine:
         if lexical_interrupt_probe and capture.lexical_delay is not None:
             await asyncio.sleep(capture.lexical_delay)
             self.conversation.event_bus.emit(
-                "voice.speech.lexical_confirmed",
+                "voice.speech.confidence_confirmed",
                 origin="fake",
                 trace=trace,
                 conversation_id="conv",
-                payload={"text": capture.text, "source": "fake"},
+                payload={"text": capture.text, "source": "fake", "score": 0.9},
             )
         await asyncio.sleep(capture.final_delay)
         latency = VoiceLatencyTrace()

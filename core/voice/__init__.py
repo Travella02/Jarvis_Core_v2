@@ -18,7 +18,8 @@ from .contracts import (
 from .endpointing import EndpointConfig, EndpointDetector, EndpointSignal, UtteranceBuffer
 from .evidence import SpeechCandidate, SpeechEvidenceConfig, SpeechActivityConfig, SpeechActivityDecision, SpeechActivityFusion, SpeechEvidenceGate, SpeechEvidenceReport, pcm16_rms
 from .engine import VoiceLabEngine, VoiceTurnResult
-from .lexical import confirms_early_interruption, has_lexical_speech, lexical_words
+from .lexical import has_lexical_speech, lexical_words
+from .confidence import SpeechConfidenceConfig, SpeechConfidenceDecision, SpeechConfidenceValidator
 from .conversation_control import (
     ContinuousVoiceSession,
     SleepPhraseDetector,
@@ -60,6 +61,9 @@ __all__ = [
     "SpeechEvidenceConfig",
     "SpeechEvidenceGate",
     "SpeechEvidenceReport",
+    "SpeechConfidenceConfig",
+    "SpeechConfidenceDecision",
+    "SpeechConfidenceValidator",
     "SpeechProviderHealth",
     "SpeechProviderMetadata",
     "SpeechTextChunker",
@@ -74,7 +78,6 @@ __all__ = [
     "UtteranceBuffer",
     "VoiceActivityDetector",
     "VoiceLabEngine",
-    "confirms_early_interruption",
     "has_lexical_speech",
     "lexical_words",
     "VoiceLatencyTrace",

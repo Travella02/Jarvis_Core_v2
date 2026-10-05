@@ -32,11 +32,8 @@ from core.voice.registry import VoiceProviderRegistry
 from core.voice.telemetry import VoiceLatencyTrace
 from core.voice.vad import VoiceActivityDetector
 from core.voice.evidence import pcm16_rms
-from core.voice.lexical import (
-    TranscriptEvidenceTracker,
-    confirms_early_interruption,
-    has_lexical_speech,
-)
+from core.voice.confidence import SpeechConfidenceDecision, SpeechConfidenceValidator
+from core.voice.lexical import TranscriptEvidenceTracker, has_lexical_speech
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,10 +58,10 @@ class VoiceLabEngine:
         channels=1,
         sample_format=AudioSampleFormat.PCM_S16LE,
     )
-    # Repair4 follows the proven V1 ownership rule: VAD/activity may open a
-    # candidate, but the *same* STT stream is the authority for real speech.
-    # One permissive 30 ms onset can therefore reach Whisper; loudness/span never
-    # veto a turn before words are considered.
+    # Repair5e: Silero opens a provisional speech candidate, the same rolling
+    # Whisper stream supplies words/ASR confidence, and a provider-neutral
+    # confidence validator decides whether the candidate becomes a real user turn.
+    # Loudness and keyword semantics never decide acceptance.
     TRANSCRIPT_HOLD_MS = 540
 
     def __init__(
@@ -79,6 +76,7 @@ class VoiceLabEngine:
         voice: VoiceProfile | None = None,
         tts_response_mode: str = "streaming",
         require_partial_confirmation: bool = False,
+        speech_confidence: SpeechConfidenceValidator | None = None,
     ) -> None:
         self.conversation = conversation
         self.providers = providers
@@ -91,14 +89,20 @@ class VoiceLabEngine:
             raise ValueError("tts_response_mode must be 'streaming' or 'whole'")
         self.tts_response_mode = tts_response_mode
         self.require_partial_confirmation = bool(require_partial_confirmation)
+        self.speech_confidence = speech_confidence or SpeechConfidenceValidator()
         self._capture_token: CancellationToken | None = None
         self._capture_trace: CorrelationContext | None = None
+        self._capture_candidate_active = False
         self._tts_token: CancellationToken | None = None
         self._tts_trace: CorrelationContext | None = None
         self._response_phase: str | None = None
         self._interruption_phase: str | None = None
 
 
+
+    @property
+    def capture_candidate_active(self) -> bool:
+        return self._capture_candidate_active
 
     async def listen_once(
         self,
@@ -107,12 +111,11 @@ class VoiceLabEngine:
     ) -> tuple[str, VoiceLatencyTrace, CorrelationContext]:
         """Capture one utterance using independent neural speech presence.
 
-        Repair5 restores the successful V1 ownership split. A trusted speech-
-        presence signal is allowed to say *someone started speaking*; Whisper is
-        then allowed to say *what they said*. Whisper text is never allowed to
-        bootstrap a user turn from silence. ``lexical_interrupt_probe`` remains
-        accepted for API compatibility/telemetry, but barge-in no longer waits
-        for or depends on transcript confirmation.
+        Repair5e keeps the V1 ownership split but treats Silero speech presence
+        as a provisional candidate, not an automatic user turn. The same rolling
+        Whisper stream supplies lexical/ASR confidence, and a generic confidence
+        validator combines VAD probability, ASR confidence, transcript stability,
+        and duration. No words receive special interruption semantics.
         """
 
         preroll_frames = max(
@@ -136,30 +139,54 @@ class VoiceLabEngine:
             transcript_hold_until = 0.0
             transcript = TranscriptEvidenceTracker()
             final_text = ""
-            lexical_emitted = False
+            final_asr_confidence: float | None = None
+            confidence_emitted = False
             first_partial_marked = False
             max_rms = 0.0
             vad_speech_ms = 0
+            vad_probabilities: list[float] = []
 
             stt_audio: asyncio.Queue[AudioFrame | None] | None = None
             stt_events: asyncio.Queue[object | None] | None = None
             stt_task: asyncio.Task[None] | None = None
 
-            def emit_lexical(text: str, *, source: str, audio_ms: float) -> None:
-                nonlocal lexical_emitted
-                if lexical_emitted:
+            def emit_confidence(
+                decision: SpeechConfidenceDecision,
+                *,
+                source: str,
+                audio_ms: float,
+            ) -> None:
+                nonlocal confidence_emitted
+                if confidence_emitted:
                     return
-                lexical_emitted = True
+                confidence_emitted = True
+                payload = decision.as_dict()
+                payload.update(
+                    {
+                        "source": source,
+                        "audio_ms": round(audio_ms),
+                        "speech_presence_authority": "silero-neural-vad",
+                        "speech_turn_authority": "multi-signal-confidence",
+                    }
+                )
+                self.conversation.event_bus.emit(
+                    "voice.speech.confidence_confirmed",
+                    origin="voice-engine",
+                    trace=trace,
+                    conversation_id=self.conversation.context.conversation_id,
+                    payload=payload,
+                )
+                # Keep the established lexical event as compatibility telemetry.
                 self.conversation.event_bus.emit(
                     "voice.speech.lexical_confirmed",
                     origin="voice-engine",
                     trace=trace,
                     conversation_id=self.conversation.context.conversation_id,
                     payload={
-                        "text": text,
+                        "text": decision.transcript,
                         "source": source,
                         "audio_ms": round(audio_ms),
-                        "speech_presence_authority": "neural-vad",
+                        "confidence": round(decision.score, 4),
                     },
                 )
 
@@ -218,7 +245,8 @@ class VoiceLabEngine:
                     await asyncio.gather(stt_task, return_exceptions=True)
 
             async def drain_stt_events() -> None:
-                nonlocal final_text, transcript_hold_until, first_partial_marked
+                nonlocal final_text, final_asr_confidence
+                nonlocal transcript_hold_until, first_partial_marked
                 if stt_events is None:
                     return
                 loop = asyncio.get_running_loop()
@@ -237,25 +265,41 @@ class VoiceLabEngine:
                                 origin="voice-engine",
                                 trace=trace,
                                 conversation_id=self.conversation.context.conversation_id,
-                                payload={"text": partial},
+                                payload={
+                                    "text": partial,
+                                    "confidence": event.confidence,
+                                },
+                            )
+
+                            decision = self.speech_confidence.evaluate(
+                                stage="partial",
+                                transcript=partial,
+                                vad_probabilities=tuple(vad_probabilities),
+                                asr_confidence=event.confidence,
+                                tracker=transcript,
+                                duration_ms=candidate_elapsed_ms,
                             )
                             if transcript.observe_partial(partial):
                                 transcript_hold_until = max(
                                     transcript_hold_until,
                                     loop.time() + (self.TRANSCRIPT_HOLD_MS / 1000.0),
                                 )
-                                if (
-                                    lexical_interrupt_probe
-                                    and confirms_early_interruption(partial)
-                                    and transcript.confirms_early_partial(partial)
-                                ):
-                                    emit_lexical(
-                                        partial,
-                                        source="stt-partial-evidence",
-                                        audio_ms=candidate_elapsed_ms,
-                                    )
+                            self.conversation.event_bus.emit(
+                                "voice.speech.confidence",
+                                origin="voice-engine",
+                                trace=trace,
+                                conversation_id=self.conversation.context.conversation_id,
+                                payload=decision.as_dict(),
+                            )
+                            if lexical_interrupt_probe and decision.accepted:
+                                emit_confidence(
+                                    decision,
+                                    source="rolling-stt-confidence",
+                                    audio_ms=candidate_elapsed_ms,
+                                )
                     elif event.event_type is TranscriptionEventType.FINAL:
                         final_text = event.text.strip()
+                        final_asr_confidence = event.confidence
                         latency.mark("stt_final")
                     elif event.event_type is TranscriptionEventType.ERROR:
                         raise RuntimeError(event.detail or "STT provider error")
@@ -263,21 +307,25 @@ class VoiceLabEngine:
             async def reset_false_candidate() -> None:
                 nonlocal candidate_active, candidate_silence_ms
                 nonlocal candidate_elapsed_ms, transcript_hold_until, transcript
-                nonlocal final_text, lexical_emitted, first_partial_marked
-                nonlocal max_rms, vad_speech_ms, stt_audio, stt_events, stt_task
+                nonlocal final_text, final_asr_confidence, confidence_emitted
+                nonlocal first_partial_marked, max_rms, vad_speech_ms
+                nonlocal vad_probabilities, stt_audio, stt_events, stt_task
                 nonlocal latency
 
                 await stop_stt()
                 candidate_active = False
+                self._capture_candidate_active = False
                 candidate_silence_ms = 0
                 candidate_elapsed_ms = 0
                 transcript_hold_until = 0.0
                 transcript = TranscriptEvidenceTracker()
                 final_text = ""
-                lexical_emitted = False
+                final_asr_confidence = None
+                confidence_emitted = False
                 first_partial_marked = False
                 max_rms = 0.0
                 vad_speech_ms = 0
+                vad_probabilities = []
                 stt_audio = None
                 stt_events = None
                 stt_task = None
@@ -297,51 +345,76 @@ class VoiceLabEngine:
                 if token.is_cancelled:
                     raise asyncio.CancelledError(token.reason or "voice capture cancelled")
 
-                # The neural VAD already independently proved physical speech was
-                # present. Whisper's only remaining job is lexical content. This
-                # breaks the Repair4 circularity where a Whisper hallucination
-                # could serve as its own proof that speech happened.
-                if has_lexical_speech(final_text):
-                    if not lexical_emitted:
-                        emit_lexical(
-                            final_text,
-                            source="stt-final-after-neural-speech",
+                decision = self.speech_confidence.evaluate(
+                    stage="final",
+                    transcript=final_text,
+                    vad_probabilities=tuple(vad_probabilities),
+                    asr_confidence=final_asr_confidence,
+                    tracker=transcript,
+                    duration_ms=candidate_elapsed_ms,
+                )
+                self.conversation.event_bus.emit(
+                    "voice.speech.confidence",
+                    origin="voice-engine",
+                    trace=trace,
+                    conversation_id=self.conversation.context.conversation_id,
+                    payload=decision.as_dict(),
+                )
+
+                if decision.accepted:
+                    if not confidence_emitted:
+                        emit_confidence(
+                            decision,
+                            source="final-stt-confidence",
                             audio_ms=candidate_elapsed_ms,
                         )
-                    self.conversation.event_bus.emit(
-                        "voice.speech.endpointed",
-                        origin="voice-engine",
-                        trace=trace,
-                        conversation_id=self.conversation.context.conversation_id,
-                        payload={
+                    endpoint_payload = decision.as_dict()
+                    endpoint_payload.update(
+                        {
                             "reason": endpoint_reason,
                             "duration_ms": candidate_elapsed_ms,
                             "vad_speech_ms": vad_speech_ms,
                             "partial_count": transcript.partial_count,
                             "peak_rms": round(max_rms, 6),
-                            "speech_presence_authority": "neural-vad",
-                        },
+                            "speech_presence_authority": "silero-neural-vad",
+                            "speech_turn_authority": "multi-signal-confidence",
+                        }
+                    )
+                    self.conversation.event_bus.emit(
+                        "voice.speech.endpointed",
+                        origin="voice-engine",
+                        trace=trace,
+                        conversation_id=self.conversation.context.conversation_id,
+                        payload=endpoint_payload,
                     )
                     self._capture_trace = None
                     self._capture_token = None
+                    self._capture_candidate_active = False
                     return final_text, latency, trace
 
+                rejected_payload = decision.as_dict()
+                rejected_payload.update(
+                    {
+                        "reason": (
+                            "speech-confidence-below-threshold"
+                            if has_lexical_speech(final_text)
+                            else "speech-without-lexical-transcript"
+                        ),
+                        "endpoint_reason": endpoint_reason,
+                        "duration_ms": candidate_elapsed_ms,
+                        "vad_speech_ms": vad_speech_ms,
+                        "partial_count": transcript.partial_count,
+                        "peak_rms": round(max_rms, 6),
+                        "speech_presence_authority": "silero-neural-vad",
+                        "speech_turn_authority": "multi-signal-confidence",
+                    }
+                )
                 self.conversation.event_bus.emit(
                     "voice.speech.rejected",
                     origin="voice-engine",
                     trace=trace,
                     conversation_id=self.conversation.context.conversation_id,
-                    payload={
-                        "accepted": False,
-                        "reason": "neural-speech-without-lexical-transcript",
-                        "endpoint_reason": endpoint_reason,
-                        "duration_ms": candidate_elapsed_ms,
-                        "vad_speech_ms": vad_speech_ms,
-                        "partial_count": transcript.partial_count,
-                        "transcript": final_text,
-                        "peak_rms": round(max_rms, 6),
-                        "speech_presence_authority": "neural-vad",
-                    },
+                    payload=rejected_payload,
                 )
                 await reset_false_candidate()
                 return None
@@ -359,6 +432,18 @@ class VoiceLabEngine:
                     await drain_stt_events()
                     vad_speech = self.vad.is_speech(frame)
                     max_rms = max(max_rms, pcm16_rms(frame.payload))
+                    probability = getattr(self.vad, "last_probability", None)
+                    evaluated = getattr(self.vad, "last_evaluated", True)
+                    if evaluated:
+                        if isinstance(probability, (int, float)):
+                            vad_score = min(1.0, max(0.0, float(probability)))
+                        else:
+                            # Provider-neutral fallback for VAD adapters that
+                            # expose only a boolean decision.
+                            vad_score = 1.0 if vad_speech else 0.0
+                        vad_probabilities.append(vad_score)
+                        if len(vad_probabilities) > 96:
+                            vad_probabilities.pop(0)
 
                     if not candidate_active:
                         preroll.append(frame)
@@ -367,6 +452,15 @@ class VoiceLabEngine:
                             continue
 
                         candidate_active = True
+                        # Confidence is scoped to this candidate only. Long idle
+                        # silence before speech must not dilute Silero evidence.
+                        current_probability = (
+                            min(1.0, max(0.0, float(probability)))
+                            if isinstance(probability, (int, float))
+                            else (1.0 if vad_speech else 0.0)
+                        )
+                        vad_probabilities.clear()
+                        vad_probabilities.append(current_probability)
                         latency.mark("speech_started")
                         initial = tuple(preroll)
                         candidate_elapsed_ms = round(
@@ -380,8 +474,9 @@ class VoiceLabEngine:
                         await start_stt(initial)
                         payload = {
                             "vad_speech": True,
-                            "candidate_only": False,
-                            "speech_presence_authority": "neural-vad",
+                            "candidate_only": True,
+                            "speech_presence_authority": "silero-neural-vad",
+                            "speech_turn_authority": "multi-signal-confidence",
                         }
                         probability = getattr(self.vad, "last_probability", None)
                         if isinstance(probability, (int, float)):
@@ -434,6 +529,7 @@ class VoiceLabEngine:
                 self._capture_trace = None
                 self._capture_token = None
             finally:
+                self._capture_candidate_active = False
                 if stt_task is not None and not stt_task.done():
                     await stop_stt(cancel=True, reason=token.reason or "voice capture closing")
 

@@ -93,11 +93,11 @@ class Repair5SileroPresenceTests(unittest.TestCase):
         self.assertNotIn("activity.classify", text)
         self.assertNotIn("SpeechActivityFusion()", text)
 
-    def test_barge_in_uses_neural_speech_started_not_whisper_text(self):
+    def test_barge_in_uses_confidence_confirmation_after_neural_candidate(self):
         text = CONTROL.read_text(encoding="utf-8")
-        self.assertIn('name="jarvis-interruption-speech-start"', text)
-        self.assertIn("neural speech presence during active turn", text)
-        self.assertNotIn('name="jarvis-interruption-lexical"', text)
+        self.assertIn('name="jarvis-interruption-confidence"', text)
+        self.assertIn('"voice.speech.confidence_confirmed"', text)
+        self.assertIn("multi-signal speech confidence during active turn", text)
 
     def test_voice_lab_uses_silero_for_continuous_and_webrtc_only_for_legacy(self):
         text = VOICE_LAB.read_text(encoding="utf-8")

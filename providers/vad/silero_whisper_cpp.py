@@ -305,18 +305,20 @@ class WhisperCppSileroVadDetector(VoiceActivityDetector):
         self._source = source or _NativeWhisperVad(self.config)
         self._pcm = bytearray()
         self.last_probability = 0.0
+        self.last_evaluated = False
         self._closed = False
 
     @property
     def description(self) -> str:
         return (
             "silero-v6.2.0 via whisper.cpp "
-            f"(threshold={self.config.threshold:.2f}, authority=neural-speech-presence)"
+            f"(threshold={self.config.threshold:.2f}, candidate=neural-speech-presence)"
         )
 
     def reset(self) -> None:
         self._pcm.clear()
         self.last_probability = 0.0
+        self.last_evaluated = False
         self._source.reset()
 
     def is_speech(self, frame: AudioFrame) -> bool:
@@ -334,6 +336,7 @@ class WhisperCppSileroVadDetector(VoiceActivityDetector):
         window_bytes = self.config.window_samples * 2
         decision = False
         evaluated = False
+        self.last_evaluated = False
         while len(self._pcm) >= window_bytes:
             raw = bytes(self._pcm[:window_bytes])
             del self._pcm[:window_bytes]
@@ -347,6 +350,7 @@ class WhisperCppSileroVadDetector(VoiceActivityDetector):
             if self.last_probability >= self.config.threshold:
                 decision = True
 
+        self.last_evaluated = evaluated
         # If this 30 ms frame did not complete Silero's 32 ms window, do not
         # invent a decision. The next frame supplies the missing samples.
         return bool(evaluated and decision)

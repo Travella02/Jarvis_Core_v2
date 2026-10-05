@@ -11,17 +11,16 @@ VOICE_LAB = ROOT / "apps" / "voice_lab.py"
 
 
 class Repair4TranscriptAuthorityTests(unittest.TestCase):
-    def test_arbitrary_partial_needs_same_stream_stability_before_early_barge_in(self):
+    def test_rolling_partials_provide_generic_stability_evidence(self):
         tracker = TranscriptEvidenceTracker()
         self.assertTrue(tracker.observe_partial("tell me"))
-        self.assertFalse(tracker.confirms_early_partial("tell me"))
-        self.assertTrue(tracker.observe_partial("tell me about mars"))
-        self.assertTrue(tracker.confirms_early_partial("tell me about mars"))
+        self.assertGreater(tracker.stability_score("tell me about mars"), 0.5)
 
-    def test_deliberate_control_word_can_interrupt_on_first_partial(self):
+    def test_one_word_partial_earns_stability_only_from_repeat_evidence(self):
         tracker = TranscriptEvidenceTracker()
-        self.assertTrue(tracker.observe_partial("wait"))
-        self.assertTrue(tracker.confirms_early_partial("wait"))
+        self.assertEqual(tracker.stability_score("yes"), 0.0)
+        tracker.observe_partial("yes")
+        self.assertGreater(tracker.stability_score("yes"), 0.9)
 
     def test_compatible_partial_confirms_quiet_final_without_amplitude_gate(self):
         tracker = TranscriptEvidenceTracker()
@@ -38,16 +37,16 @@ class Repair4TranscriptAuthorityTests(unittest.TestCase):
         self.assertNotIn("SpeechEvidenceGate(", text)
         self.assertNotIn("SpeechActivityFusion()", text)
 
-    def test_whisper_requests_model_native_non_speech_suppression(self):
+    def test_whisper_requests_model_native_non_speech_suppression_and_verbose_confidence(self):
         text = WHISPER.read_text(encoding="utf-8")
         self.assertIn('field("suppress_nst"', text)
         self.assertIn('field("no_speech_thold"', text)
+        self.assertIn('field("response_format", "verbose_json")', text)
 
     def test_continuous_session_uses_internal_partials_even_with_final_only_user_flag(self):
         text = VOICE_LAB.read_text(encoding="utf-8")
         self.assertIn("continuous_control", text)
         self.assertIn("emit_partials=True", text)
-        self.assertIn("require_partial_confirmation=False", text)
         self.assertIn("WhisperCppSileroVadDetector", text)
 
 

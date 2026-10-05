@@ -1,37 +1,17 @@
-"""Lexical speech validation for realtime voice control.
+"""Lexical transcript helpers for realtime voice control.
 
-0.0.5 Repair5 separates two jobs that Whisper must not own simultaneously:
-Silero VAD is the independent authority that human speech exists; Whisper only
-decides what that already-confirmed speech said. These helpers validate text and
-retain conservative partial-transcript telemetry, but transcript text can no
-longer create a user turn from silence by itself.
+Silero establishes candidate speech presence. Whisper supplies words and ASR
+confidence. Repair5e deliberately contains no hard-coded command-word fast path:
+speech validation is generic, and accepted text is always interpreted by Jarvis's
+normal intelligence/conversation path.
 """
 
 from __future__ import annotations
 
 import re
 
+
 _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?")
-_EARLY_SINGLE_WORDS = frozenset(
-    {
-        "actually",
-        "cancel",
-        "hold",
-        "jarvis",
-        "no",
-        "pause",
-        "stop",
-        "wait",
-        "why",
-    }
-)
-_EARLY_HALLUCINATION_PHRASES = frozenset(
-    {
-        "thank you",
-        "thanks for watching",
-        "you",
-    }
-)
 
 
 def lexical_words(text: str) -> tuple[str, ...]:
@@ -39,17 +19,13 @@ def lexical_words(text: str) -> tuple[str, ...]:
 
 
 def has_lexical_speech(text: str) -> bool:
-    """Return True when STT produced at least one real word/token."""
+    """Return True when STT produced at least one word/token."""
+
     return bool(lexical_words(text))
 
 
 def transcript_compatible(left: str, right: str) -> bool:
-    """Return True when two rolling STT observations describe the same utterance.
-
-    Whisper partials normally grow from a prefix into the final sentence. We
-    intentionally compare words rather than punctuation/case so the transcript
-    stream can confirm a real turn without using microphone amplitude as proof.
-    """
+    """Return True when rolling STT observations describe the same utterance."""
 
     a = lexical_words(left)
     b = lexical_words(right)
@@ -65,12 +41,7 @@ def transcript_compatible(left: str, right: str) -> bool:
 
 
 class TranscriptEvidenceTracker:
-    """Confirm a speech turn from Whisper partial/final agreement.
-
-    Used after independent neural speech-presence confirmation. Partial/final
-    compatibility remains useful for diagnostics and text stability, but this
-    tracker is no longer the authority for whether speech physically occurred.
-    """
+    """Track generic rolling-ASR stability without assigning word semantics."""
 
     def __init__(self) -> None:
         self._partials: list[str] = []
@@ -83,58 +54,52 @@ class TranscriptEvidenceTracker:
     def has_partial(self) -> bool:
         return bool(self._partials)
 
+    @property
+    def partials(self) -> tuple[str, ...]:
+        return tuple(self._partials)
+
     def observe_partial(self, text: str) -> bool:
         normalized = " ".join(lexical_words(text))
         if not normalized:
             return False
         self._partials.append(normalized)
-        if len(self._partials) > 6:
+        if len(self._partials) > 8:
             self._partials.pop(0)
         return True
 
-    def confirms_early_partial(self, text: str) -> bool:
-        """Return True when a rolling partial is strong enough for barge-in.
+    def stability_score(self, text: str) -> float:
+        """Return 0..1 agreement between `text` and prior rolling partials.
 
-        V1 could trust one provider transcription delta. Local Whisper rolling
-        inference is more prone to silence hallucinations, so Core v2 is stricter:
-        deliberate one-word controls/follow-ups may commit immediately; arbitrary
-        phrases need agreement with an earlier partial from the same STT stream.
+        One-word answers are not penalized semantically. If the same short word
+        repeats across Whisper snapshots it earns full stability; if a short
+        utterance has no partial yet, other confidence signals can still carry it.
         """
 
         normalized = " ".join(lexical_words(text))
-        if not normalized or normalized in _EARLY_HALLUCINATION_PHRASES:
-            return False
-        words = tuple(normalized.split())
-        if len(words) == 1 and words[0] in _EARLY_SINGLE_WORDS:
-            return True
-        if len(self._partials) < 2:
-            return False
-        current = self._partials[-1]
-        return any(
-            transcript_compatible(previous, current)
-            for previous in self._partials[:-1]
-        )
+        if not normalized or not self._partials:
+            return 0.0
+
+        current_words = lexical_words(normalized)
+        compatible = 0
+        exact = 0
+        for previous in self._partials:
+            if transcript_compatible(previous, normalized):
+                compatible += 1
+            if lexical_words(previous) == current_words:
+                exact += 1
+
+        count = len(self._partials)
+        compatible_ratio = compatible / count
+        exact_ratio = exact / count
+        # Exact repeat is stronger evidence, but normal growing partials still
+        # receive substantial credit.
+        return min(1.0, 0.70 * compatible_ratio + 0.30 * exact_ratio)
 
     def confirms_final(self, text: str, *, require_partial: bool) -> bool:
+        """Legacy helper retained for tests/adapters outside confidence policy."""
+
         if not has_lexical_speech(text):
             return False
         if not require_partial:
             return True
         return any(transcript_compatible(partial, text) for partial in self._partials)
-
-
-def confirms_early_interruption(text: str) -> bool:
-    """Conservative early-barge-in confirmation.
-
-    A rolling STT probe may run before the user finishes the utterance. To
-    avoid cancelling Jarvis on common silence hallucinations, require either
-    two lexical words or one deliberate control/follow-up word.
-    """
-
-    normalized = " ".join(lexical_words(text))
-    if not normalized or normalized in _EARLY_HALLUCINATION_PHRASES:
-        return False
-    words = tuple(normalized.split())
-    if len(words) >= 2:
-        return True
-    return words[0] in _EARLY_SINGLE_WORDS
