@@ -30,6 +30,16 @@ from .conversation_control import (
     WakeSleepConfig,
 )
 from .playback import PlaybackLedger
+from .frontend import (
+    VoiceFrontendEvent,
+    VoiceFrontendEventType,
+    VoiceFrontendHealth,
+    VoiceFrontendMetadata,
+    VoiceFrontendProvider,
+    VoiceFrontendSession,
+    VoiceFrontendSessionConfig,
+)
+from .live_bridge import LiveConversationBridge, LiveTranscriptBuffer, TranscriptFragment
 from .profiles import StoredVoiceProfile, StoredVoiceReference, VoiceReferenceLibrary
 from .registry import VoiceProviderRegistry
 from .telemetry import VoiceLatencyTrace
@@ -84,5 +94,15 @@ __all__ = [
     "VoiceTurnResult",
     "VoiceProfile",
     "VoiceProviderRegistry",
+    "VoiceFrontendEvent",
+    "VoiceFrontendEventType",
+    "VoiceFrontendHealth",
+    "VoiceFrontendMetadata",
+    "VoiceFrontendProvider",
+    "VoiceFrontendSession",
+    "VoiceFrontendSessionConfig",
+    "LiveConversationBridge",
+    "LiveTranscriptBuffer",
+    "TranscriptFragment",
     "pcm16_rms",
 ]

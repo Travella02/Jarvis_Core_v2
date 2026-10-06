@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Jarvis OpenAI Realtime WebRTC Lab</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    body { margin: 0; background: #0b0d12; color: #eef2ff; }
+    main { width: min(920px, calc(100% - 32px)); margin: 36px auto; }
+    .card { background: #141823; border: 1px solid #2a3142; border-radius: 16px; padding: 20px; margin: 14px 0; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    p { color: #b9c2d6; line-height: 1.5; }
+    button, select { font: inherit; border-radius: 10px; border: 1px solid #39445c; padding: 10px 12px; background: #1c2331; color: #fff; }
+    button { cursor: pointer; font-weight: 700; }
+    button.primary { background: #eef2ff; color: #111827; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    label { display: grid; gap: 6px; min-width: 260px; color: #b9c2d6; font-size: 13px; }
+    select { width: 100%; }
+    ol { line-height: 1.75; }
+    .status { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; color: #c8f7cf; }
+    .transcript { min-height: 130px; max-height: 320px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; line-height: 1.45; }
+    .note { color: #ffd99a; }
+    .pill { display:inline-block; padding: 4px 8px; border-radius:999px; background:#20283a; color:#cbd5e1; font-size:12px; }
+    audio { width: 100%; margin-top: 8px; }
+  </style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <span class="pill">0.0.9 Repair4 A/B</span>
+    <h1>Jarvis OpenAI Realtime WebRTC Lab</h1>
+    <p>Realtime answers ordinary conversation directly. When it needs private/project memory, actions, background work, or stronger reasoning, it calls authoritative Jarvis Core. Browser WebRTC owns mic/speaker media.</p>
+    <div class="row">
+      <button id="devices">1. Enable audio devices</button>
+      <button id="start" class="primary" disabled>2. Start Realtime test</button>
+      <button id="stop" disabled>End test</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Audio devices</h2>
+    <div class="row">
+      <label>Microphone<select id="mic"><option value="">Default microphone</option></select></label>
+      <label>Speaker<select id="speaker"><option value="">Default speaker</option></select></label>
+    </div>
+    <p class="note">Use the same HyperX microphone/headphones as the GPT-Live test so the comparison is fair.</p>
+  </div>
+
+  <div class="card">
+    <h2>Say these exact phrases</h2>
+    <ol id="phrases"></ol>
+    <p><strong>Phrase 4:</strong> start speaking before Jarvis finishes the response to phrase 3.</p>
+  </div>
+
+  <div class="card">
+    <h2>Status</h2>
+    <div id="status" class="status">Waiting for audio permission.</div>
+    <audio id="remoteAudio" autoplay></audio>
+  </div>
+
+  <div class="card">
+    <h2>Transcript / events</h2>
+    <div id="transcript" class="transcript"></div>
+  </div>
+</main>
+<script>
+const state = { pc: null, dc: null, localWs: null, localStream: null, remoteStream: null, callId: null, stopping: false };
+const el = id => document.getElementById(id);
+const log = msg => { el('status').textContent += `\n${msg}`; };
+const transcript = msg => { el('transcript').textContent += msg; el('transcript').scrollTop = el('transcript').scrollHeight; };
+
+async function loadConfig() {
+  const r = await fetch('/api/config');
+  const cfg = await r.json();
+  el('phrases').innerHTML = cfg.phrases.map(x => `<li>${escapeHtml(x)}</li>`).join('');
+  document.title = `Jarvis ${cfg.version} Realtime WebRTC Lab`;
+  el('status').textContent = `Waiting for audio permission.\nModel=${cfg.model} | voice=${cfg.voice} | reasoning=${cfg.reasoning_effort}`;
+}
+function escapeHtml(s) { return s.replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+
+async function enableDevices() {
+  try {
+    const probe = await navigator.mediaDevices.getUserMedia({audio: true});
+    probe.getTracks().forEach(t => t.stop());
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    fillSelect(el('mic'), devices.filter(d => d.kind === 'audioinput'), 'Default microphone');
+    fillSelect(el('speaker'), devices.filter(d => d.kind === 'audiooutput'), 'Default speaker');
+    el('start').disabled = false;
+    el('status').textContent = 'Audio permission granted. Select devices, then click Start Realtime test.';
+  } catch (err) {
+    el('status').textContent = `Audio permission failed: ${err}`;
+  }
+}
+function fillSelect(select, devices, fallback) {
+  select.innerHTML = `<option value="">${fallback}</option>`;
+  devices.forEach((d, i) => {
+    const o = document.createElement('option');
+    o.value = d.deviceId;
+    o.textContent = d.label || `${d.kind} ${i + 1}`;
+    select.appendChild(o);
+  });
+}
+async function waitForIceGathering(pc) {
+  if (pc.iceGatheringState === 'complete') return;
+  await new Promise((resolve, reject) => {
+    let timer = null;
+    const cleanup = () => {
+      pc.removeEventListener('icegatheringstatechange', fn);
+      if (timer !== null) clearTimeout(timer);
+    };
+    const fn = () => {
+      if (pc.iceGatheringState === 'complete') {
+        cleanup(); resolve();
+      }
+    };
+    pc.addEventListener('icegatheringstatechange', fn);
+    timer = setTimeout(() => {
+      cleanup(); reject(new Error(`ICE gathering did not complete (state=${pc.iceGatheringState})`));
+    }, 10000);
+    fn();
+  });
+}
+async function connectLocalControl() {
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${scheme}://${location.host}/ws/control`);
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = () => reject(new Error('Could not connect Jarvis local control socket'));
+  });
+  ws.onmessage = ev => {
+    let payload;
+    try { payload = JSON.parse(ev.data); } catch { return; }
+    if (payload.kind === 'realtime_send' && state.dc?.readyState === 'open') {
+      state.dc.send(JSON.stringify(payload.event));
+    } else if (payload.kind === 'lab_command' && payload.command === 'close') {
+      stopTest('Jarvis Core requested session close.');
+    } else if (payload.kind === 'status') {
+      log(payload.message || '');
+    }
+  };
+  ws.onclose = () => {
+    if (!state.stopping) stopTest('Jarvis Core control channel closed; Realtime media session closed automatically.');
+  };
+  return ws;
+}
+function forwardRealtimeEvent(event) {
+  if (state.localWs?.readyState === WebSocket.OPEN) {
+    state.localWs.send(JSON.stringify({kind: 'realtime_event', event}));
+  }
+  if (event.type === 'response.output_audio_transcript.delta') {
+    transcript(event.delta || '');
+  } else if (event.type === 'response.function_call_arguments.done' && event.name === 'delegate_to_jarvis_core') {
+    transcript(`\n[delegated to Jarvis Core]\n`);
+  } else if (event.type === 'response.done') {
+    transcript(`\n`);
+  } else if (event.type === 'error') {
+    transcript(`\n[Realtime error] ${(event.error && event.error.message) || 'unknown error'}\n`);
+  }
+}
+async function startTest() {
+  state.stopping = false;
+  el('start').disabled = true;
+  el('devices').disabled = true;
+  el('stop').disabled = false;
+  el('status').textContent = 'Starting local control channel...';
+  el('transcript').textContent = '';
+  try {
+    state.localWs = await connectLocalControl();
+    const audioConstraint = el('mic').value ? {deviceId: {exact: el('mic').value}, echoCancellation:true, noiseSuppression:true, autoGainControl:true} : {echoCancellation:true, noiseSuppression:true, autoGainControl:true};
+    state.localStream = await navigator.mediaDevices.getUserMedia({audio: audioConstraint});
+    const pc = new RTCPeerConnection();
+    state.pc = pc;
+    state.localStream.getTracks().forEach(track => pc.addTrack(track, state.localStream));
+
+    const remoteAudio = el('remoteAudio');
+    pc.ontrack = async event => {
+      state.remoteStream = event.streams[0] || new MediaStream([event.track]);
+      remoteAudio.srcObject = state.remoteStream;
+      if (el('speaker').value && typeof remoteAudio.setSinkId === 'function') {
+        try { await remoteAudio.setSinkId(el('speaker').value); } catch (err) { log(`Speaker selection warning: ${err}`); }
+      }
+      try { await remoteAudio.play(); } catch (err) { log(`Autoplay warning: ${err}`); }
+    };
+    pc.onconnectionstatechange = () => log(`WebRTC connection: ${pc.connectionState}`);
+
+    const dc = pc.createDataChannel('oai-events');
+    state.dc = dc;
+    dc.onopen = () => log('Realtime data channel open.');
+    dc.onclose = () => log('Realtime data channel closed.');
+    dc.onmessage = ev => {
+      try { forwardRealtimeEvent(JSON.parse(ev.data)); } catch (err) { log(`Bad Realtime event: ${err}`); }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitForIceGathering(pc);
+    log('ICE gathering complete.');
+    log('Exchanging WebRTC SDP through Jarvis Core...');
+    const response = await fetch('/api/realtime/session', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({sdp: pc.localDescription.sdp}),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || body.error || `session request failed (${response.status})`);
+    state.callId = body.call_id;
+    await pc.setRemoteDescription({type:'answer', sdp: body.sdp});
+    log(`OpenAI Realtime WebRTC call ready: ${state.callId}`);
+    log('Speak phrase 1 now.');
+  } catch (err) {
+    log(`Start failed: ${err}`);
+    await stopTest();
+  }
+}
+async function stopTest(reason='Test ended.') {
+  if (state.stopping) return;
+  state.stopping = true;
+  if (state.localStream) state.localStream.getTracks().forEach(t => t.stop());
+  if (state.pc) state.pc.close();
+  if (state.localWs && state.localWs.readyState <= WebSocket.OPEN) state.localWs.close();
+  state.pc = state.dc = state.localWs = state.localStream = state.remoteStream = null;
+  el('stop').disabled = true;
+  el('devices').disabled = false;
+  el('start').disabled = false;
+  log(reason);
+}
+
+el('devices').addEventListener('click', enableDevices);
+el('start').addEventListener('click', startTest);
+el('stop').addEventListener('click', () => stopTest());
+window.addEventListener('beforeunload', () => { if (state.pc) state.pc.close(); });
+loadConfig().catch(err => { el('status').textContent = `Config load failed: ${err}`; });
+</script>
+</body>
+</html>

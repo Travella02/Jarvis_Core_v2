@@ -28,6 +28,8 @@ from core.voice import (
     VoiceLatencyTrace,
     VoiceProfile,
     VoiceProviderRegistry,
+    VoiceFrontendProvider,
+    LiveConversationBridge,
 )
 
 
@@ -46,7 +48,7 @@ def collect_diagnostics() -> dict[str, Any]:
         "foundation": {
             "intelligence_contract": IntelligenceProvider.__name__,
             "tool_contracts": [ToolDefinition.__name__, ToolRequest.__name__, ToolResult.__name__],
-            "voice_contracts": [SpeechToTextProvider.__name__, TextToSpeechProvider.__name__, VoiceProfile.__name__],
+            "voice_contracts": [SpeechToTextProvider.__name__, TextToSpeechProvider.__name__, VoiceProfile.__name__, VoiceFrontendProvider.__name__],
         },
         "conversation": {
             "context": "ready" if ConversationContext else "missing",
@@ -76,6 +78,8 @@ def collect_diagnostics() -> dict[str, Any]:
             "provider_registry": "ready" if VoiceProviderRegistry else "missing",
             "mode": "0.0.5-continuous-runtime-hosted",
             "full_duplex": "ready-headset-first",
+            "frontend_contract": "ready" if VoiceFrontendProvider else "missing",
+            "live_client_delegation_bridge": "ready" if LiveConversationBridge else "missing",
         },
         "providers": {
             "intelligence": "provider-layer-ready",
@@ -83,6 +87,8 @@ def collect_diagnostics() -> dict[str, Any]:
             "tts_candidate": "chatterbox/turbo-350m",
             "tts_ab_candidate": "qwen3-tts/12hz-0.6b-base",
             "runtime_probe": "not-run",
+            "voice_frontend_default": "openai-gpt-realtime-2.1-mini/webrtc",
+            "voice_frontend_alternatives": "openai-gpt-realtime-2.1 + openai-gpt-live + local-chain",
         },
         "network_probe": "not-run",
         "audio_probe": "not-run",
@@ -117,9 +123,10 @@ def _format_text(data: dict[str, Any]) -> str:
                 "Voice: "
                 f"engine={voice['engine']}, audio={voice['audio_contracts']}, "
                 f"endpointing={voice['endpointing']}, chunking={voice['tts_chunking']}, "
-                f"telemetry={voice['latency_telemetry']}, mode={voice['mode']}"
+                f"telemetry={voice['latency_telemetry']}, frontend={voice['frontend_contract']}, "
+                f"live-bridge={voice['live_client_delegation_bridge']}, mode={voice['mode']}"
             ),
-            f"Candidates: STT={providers['stt_candidate']} | TTS={providers['tts_candidate']} | TTS A/B={providers['tts_ab_candidate']}",
+            f"Candidates: STT={providers['stt_candidate']} | TTS={providers['tts_candidate']} | TTS A/B={providers['tts_ab_candidate']} | Frontend default={providers['voice_frontend_default']} | Alternatives={providers['voice_frontend_alternatives']}",
             f"Runtime probe: {providers['runtime_probe']}",
             f"Network probe: {data['network_probe']} | Audio probe: {data['audio_probe']}",
             f"External actions: {data['external_actions']}",

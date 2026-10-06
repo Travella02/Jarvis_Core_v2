@@ -26,6 +26,9 @@ class FoundationStructureTests(unittest.TestCase):
             "core/tools",
             "providers/intelligence/openai",
             "providers/intelligence/local",
+            "providers/voice_frontend",
+            "providers/voice_frontend/openai_live",
+            "providers/voice_frontend/openai_realtime",
             "providers/stt",
             "providers/tts",
             "integrations/gmail",
@@ -55,10 +58,10 @@ class FoundationStructureTests(unittest.TestCase):
 
     def test_release_manifest_matches_candidate(self) -> None:
         manifest = json.loads((ROOT / "RELEASE_MANIFEST.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.0.8")
-        self.assertEqual(manifest["title"], "Client Input & Runtime Control")
+        self.assertEqual(manifest["version"], "0.0.9")
+        self.assertEqual(manifest["title"], "Swappable Realtime Voice Frontend + Core Delegation")
         self.assertEqual(manifest["status"], "live_acceptance_candidate")
-        self.assertEqual(manifest["required_previous_version"], "0.0.7")
+        self.assertEqual(manifest["required_previous_version"], "0.0.8")
         self.assertNotIn("repair", manifest)
 
     def test_openai_sdk_dependency_is_pinned_for_candidate(self) -> None:

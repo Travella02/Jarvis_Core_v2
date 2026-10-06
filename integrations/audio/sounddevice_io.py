@@ -133,6 +133,92 @@ def _resample_output_frame_to_rate(frame: AudioFrame, target_rate_hz: int) -> tu
     payload = _resample_pcm16_mono(frame.payload, target_samples)
     return payload, AudioFormat(target_rate_hz, 1, AudioSampleFormat.PCM_S16LE)
 
+
+class _StreamingPCM16MonoResampler:
+    """Stateful linear resampler for a continuous mono PCM16 stream.
+
+    Network voice providers are free to split one continuous waveform across
+    arbitrary packet boundaries. Resetting interpolation at every packet can
+    create small discontinuities that sound like clicks or pops. This helper
+    tracks interpolation in absolute source-sample coordinates, so splitting the
+    same PCM stream into different packets produces the same device PCM bytes.
+    """
+
+    def __init__(self, source_rate_hz: int, target_rate_hz: int) -> None:
+        if source_rate_hz <= 0 or target_rate_hz <= 0:
+            raise ValueError("sample rates must be positive")
+        self.source_rate_hz = source_rate_hz
+        self.target_rate_hz = target_rate_hz
+        self._step = source_rate_hz / target_rate_hz
+        self._buffer = array("h")
+        self._buffer_start_index = 0
+        self._total_source_samples = 0
+        self._next_output_position = 0.0
+        self._last_source_sample: int | None = None
+
+    def process(self, payload: bytes) -> bytes:
+        if not payload:
+            return b""
+        incoming = _pcm16_samples(payload)
+        if not incoming:
+            return b""
+        if not self._buffer:
+            self._buffer_start_index = self._total_source_samples
+        self._buffer.extend(incoming)
+        self._total_source_samples += len(incoming)
+        self._last_source_sample = incoming[-1]
+        return self._drain_available()
+
+    def _drain_available(self) -> bytes:
+        if len(self._buffer) < 2:
+            return b""
+        result = array("h")
+        last_index = self._buffer_start_index + len(self._buffer) - 1
+        while self._next_output_position < last_index:
+            left_index = int(self._next_output_position)
+            right_index = left_index + 1
+            left_offset = left_index - self._buffer_start_index
+            right_offset = right_index - self._buffer_start_index
+            if left_offset < 0 or right_offset >= len(self._buffer):
+                break
+            fraction = self._next_output_position - left_index
+            sample = round(
+                self._buffer[left_offset]
+                + (self._buffer[right_offset] - self._buffer[left_offset]) * fraction
+            )
+            result.append(max(-32768, min(32767, sample)))
+            self._next_output_position += self._step
+
+        # Samples strictly before floor(next_output_position) can never be used
+        # again. Keep the floor sample itself because it may be the left side of
+        # the next interpolation when another network packet arrives.
+        keep_from = int(self._next_output_position)
+        drop = max(0, min(len(self._buffer), keep_from - self._buffer_start_index))
+        if drop:
+            del self._buffer[:drop]
+            self._buffer_start_index += drop
+        return _pcm16_bytes(result)
+
+    def flush(self) -> bytes:
+        """Finish the stream while preserving the same packet-independent phase."""
+        if self._last_source_sample is None:
+            return b""
+        # Add one duplicate endpoint at the next absolute source index. This
+        # supplies the right-hand interpolation sample that a continuing stream
+        # would otherwise provide and makes finalization independent of how the
+        # source bytes were packetized.
+        if not self._buffer:
+            self._buffer_start_index = self._total_source_samples
+        self._buffer.append(self._last_source_sample)
+        self._total_source_samples += 1
+        result = self._drain_available()
+        self._buffer = array("h")
+        self._buffer_start_index = self._total_source_samples
+        self._next_output_position = float(self._total_source_samples)
+        self._last_source_sample = None
+        return result
+
+
 def _output_latency_seconds(stream) -> float:
     """Return the backend-reported output latency defensively."""
     try:
@@ -386,14 +472,36 @@ class SoundDeviceAudioOutput(AudioOutput):
         target_rate = output_info.default_sample_rate_hz
         async with self._lock:
             stream = None
+            stream_resampler: _StreamingPCM16MonoResampler | None = None
+            stream_resampler_key: tuple[int, int] | None = None
             try:
                 async for frame in audio:
                     if cancellation_token.is_cancelled:
                         break
                     play_payload = frame.payload
                     play_format = frame.format
-                    if target_rate:
-                        play_payload, play_format = _resample_output_frame_to_rate(frame, target_rate)
+                    if (
+                        target_rate
+                        and frame.format.sample_format is AudioSampleFormat.PCM_S16LE
+                        and frame.format.channels == 1
+                        and frame.format.sample_rate_hz != target_rate
+                    ):
+                        key = (frame.format.sample_rate_hz, target_rate)
+                        if stream_resampler is None or stream_resampler_key != key:
+                            stream_resampler = _StreamingPCM16MonoResampler(*key)
+                            stream_resampler_key = key
+                        play_payload = stream_resampler.process(frame.payload)
+                        play_format = AudioFormat(target_rate, 1, AudioSampleFormat.PCM_S16LE)
+                    else:
+                        stream_resampler = None
+                        stream_resampler_key = None
+                        if target_rate:
+                            play_payload, play_format = _resample_output_frame_to_rate(frame, target_rate)
+
+                    source_bytes_consumed += len(frame.payload)
+                    source_duration_ms_written += frame.duration_ms
+                    if not play_payload:
+                        continue
                     if stream is None:
                         stream, low_latency_active = _open_output_stream_low_latency_first(
                             sd,
@@ -413,8 +521,17 @@ class SoundDeviceAudioOutput(AudioOutput):
                     await asyncio.to_thread(stream.write, play_payload)
                     if first_write_completed_ns is None:
                         first_write_completed_ns = monotonic_ns()
-                    source_bytes_consumed += len(frame.payload)
-                    source_duration_ms_written += frame.duration_ms
+
+                # Flush only on a natural stream ending. On cancellation/barge-in,
+                # stale tail audio must not be forced through the speaker.
+                if (
+                    stream is not None
+                    and stream_resampler is not None
+                    and not cancellation_token.is_cancelled
+                ):
+                    tail = stream_resampler.flush()
+                    if tail:
+                        await asyncio.to_thread(stream.write, tail)
             finally:
                 if stream is not None:
                     await asyncio.to_thread(stream.stop)

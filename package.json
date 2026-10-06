@@ -1,7 +1,7 @@
 {
   "name": "jarvis-core-v2",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "private": true,
-  "description": "Jarvis Core v2 workspace. 0.0.8 adds typed client input, idempotent retries, and runtime-side command cancellation.",
+  "description": "Jarvis Core v2 workspace. 0.0.9 adds a provider-neutral full-duplex voice frontend and GPT-Live client-delegation A/B path while preserving the local voice pipeline.",
   "scripts": {}
 }

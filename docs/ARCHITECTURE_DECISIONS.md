@@ -288,3 +288,42 @@ This follows V1's duplicate-response lessons without using content similarity to
 A client may cancel the active command it submitted, but it does not set Conversation Core state directly and does not terminate provider tasks by force. The Runtime command gateway delegates cancellation to `ConversationCore.cancel_active_turn`, which owns the cancellation registry/token and provider cancel request.
 
 0.0.8 intentionally does not add a generic client command queue or arbitrary state-control RPCs. If a foreground turn is already active, a second client command is rejected as busy. Future multimodal/UI scheduling may add an explicit queue policy, but it must remain Core-owned and observable rather than being hidden in a desktop/mobile client.
+
+## ADR-045 — Native full-duplex voice is a replaceable frontend, not Jarvis authority
+
+0.0.9 introduces `VoiceFrontendProvider` above concrete speech transports. A native conversational voice model may own low-latency listening, speaking, backchannels, and interruption inside its session, but it does not own Jarvis reasoning, memory, tools, permissions, tasks, or durable state.
+
+OpenAI GPT-Live is the first adapter and uses **client delegation**. Meaningful user requests are reconstructed from Live transcript timing and enter the existing `ConversationCore.submit_voice()` path. The configured `IntelligenceProvider` (Luna by default) remains the reasoning backend. Verified backend results return to the Live session as commentary for natural spoken presentation.
+
+This intentionally applies V1 lessons from voice/reasoning coupling and ungrounded Realtime action responses. For future consequential tools, the backend action state remains authoritative; a voice frontend may not independently claim that an action succeeded. Exact confirmation/presentation ownership requires its own acceptance work before tool execution is enabled through the Live path.
+
+The accepted Whisper/Luna/Qwen pipeline remains available and is not forced through the new native-session contract in 0.0.9. That avoids destabilizing accepted local behavior merely to make two very different transports look identical. The common product-level strategy is provider selection above both implementations; future native full-duplex providers can implement `VoiceFrontendProvider` without modifying Conversation Core.
+
+A bridge-owned delegation revision prevents an older backend result from being spoken after a newer user correction. Conversation Core still owns cooperative cancellation and provider state; the frontend revision only controls whether an obsolete result may be presented.
+
+0.0.9 is explicitly an A/B prototype. Production wake/sleep lifecycle, exact physical-playback reconciliation, durable Live transcript/memory reconciliation, tools/permissions through Live, remote WebRTC clients, and custom voices remain separate milestones.
+
+## ADR-046 - Client GPT-Live media uses WebRTC; server/debug audio may use WebSockets
+
+0.0.9 Repair2 separates **voice frontend provider** from **media transport**. OpenAI GPT-Live remains the current full-duplex provider, but a user-facing browser/desktop/mobile client should carry microphone and speaker media through WebRTC rather than routing raw PCM through the Python Core.
+
+For WebRTC, the trusted Python service brokers session creation and keeps the OpenAI project API key private. The client owns negotiated media tracks. JSON transcripts and client-delegation events cross the WebRTC data channel and are relayed to the same provider-neutral `VoiceFrontendEvent`/`LiveConversationBridge` boundary. Jarvis Core, memory, permissions, tasks, and IntelligenceProvider routing therefore do not depend on WebRTC.
+
+The existing primary WebSocket implementation remains valid for server-owned audio, deterministic transport tests, diagnostics, and fallback. It is not deleted merely because WebRTC becomes the preferred client-media transport.
+
+This follows the V1 architectural lesson that the desktop interaction layer should use WebRTC while the Python Core continues independently. The Repair2 browser is intentionally loopback-only development infrastructure; authenticated remote clients and a production sideband/control topology remain separate security work.
+
+
+## ADR-047 — Realtime Mini is the current default conversational frontend, not Jarvis authority
+
+0.0.9 live acceptance selects `gpt-realtime-2.1-mini` over WebRTC as the current default conversational frontend because it delivered the preferred naturalness, interruption behavior, responsiveness, and cost profile in direct A/B testing. This is a provider choice, not a permanent architectural dependency.
+
+Realtime may answer ordinary conversation and general knowledge directly. It receives only a narrow `delegate_to_jarvis_core` capability for work that depends on durable/private memory, application state, tools/actions, permissions, background tasks, current-data workflows, or materially stronger reasoning. Realtime never chooses the concrete backend provider. Jarvis Core remains free to route delegated work to Luna, Sol, local/future models, tools, memory, or a task worker.
+
+GPT-Live, full Realtime 2.1, and the local Whisper/Qwen chain remain alternatives behind the conversational-frontend boundary. A later provider can replace Realtime Mini without moving memory, task, permission, or tool authority.
+
+## ADR-048 — Client WebRTC is product transport, browser is only the 0.0.9 harness
+
+The successful 0.0.9 WebRTC test establishes negotiated client media as the preferred user-device transport. The development browser page is not a product requirement. The planned desktop app may host the same WebRTC media/data-channel flow inside Electron/React while Jarvis Core remains a separate authoritative process/service.
+
+Raw WebSocket PCM remains valid for server-owned media, diagnostics, and fallback. Transport selection is independent from conversational frontend selection and backend intelligence routing.

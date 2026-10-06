@@ -4,27 +4,39 @@ Jarvis Core v2 is a clean rebuild of Jarvis with provider-independent intelligen
 
 ## Current milestone
 
-**0.0.8 - Client Input & Runtime Control**
+**0.0.9 - Swappable Realtime Voice Frontend + Core Delegation**
 
-0.0.8 completes the first two-way local client boundary on top of the accepted 0.0.7 Runtime API. A client can submit typed user input into the existing authoritative Conversation Core, receive a server-owned correlation trace, observe the resulting Core events, retry an uncertain submission without duplicate execution, and cancel the active command it submitted.
+0.0.9 establishes the provider-neutral conversational-frontend boundary and accepts **OpenAI Realtime 2.1 Mini over browser/client WebRTC** as the current default development direction. Realtime Mini owns low-latency conversation, speech, personality, turn-taking, and interruption. Jarvis Core remains authoritative for durable memory, private/project context, permissions, tools/actions, background tasks, current-data workflows, and backend intelligence routing.
 
-Client requests never supply Jarvis request/turn/cancellation IDs and never mutate runtime state directly. `runtime_id + conversation_id` guard every submission so a stale retry cannot silently land in a restarted runtime or replacement conversation. `client_request_id` is runtime-scoped transport idempotency, not conversation truth.
+The conversational frontend receives one narrow delegation capability: `delegate_to_jarvis_core`. It asks Core for work; it does not choose or own the backend model. The current 0.0.9 development route behind Core is Luna, but that is intentionally replaceable by the existing/future `IntelligenceProviderRouter` policy without changing the conversational frontend.
 
-The local API remains **loopback-only**. 0.0.8 does not add LAN/WAN exposure, device pairing, account authority, cloud relay, tools, memory, or a production desktop/mobile UI.
+The preferred client media transport is **WebRTC**. The browser page used in 0.0.9 is only a development harness; a future Electron/React desktop client can host the same WebRTC media/data-channel flow inside the Jarvis app. Raw WebSocket PCM remains a server/debug/fallback transport.
 
-New/continued local runtime endpoints:
+Accepted alternatives are retained rather than deleted:
 
-- `GET /v1/protocol`
-- `GET /v1/health`
-- `GET /v1/runtime/snapshot`
-- `GET /v1/runtime/events`
-- `POST /v1/runtime/commands/typed`
-- `POST /v1/runtime/commands/{command_id}/cancel`
-- `WS /v1/runtime/events/ws`
+- `gpt-realtime-2.1` can be selected for a stronger conversational frontend.
+- GPT-Live remains available as a separate full-duplex provider experiment.
+- the local Whisper -> Conversation Core -> Qwen path remains the rollback/economy/local baseline.
 
-`python -m apps.runtime_api_lab` now performs real loopback typed-command submission, duplicate-retry protection, disconnect/reconnect replay, and active-command cancellation without microphone, TTS, Luna credentials, or public Internet access.
+Natural personality is intentional. Realtime should answer simple questions directly and may react with genuine warmth, curiosity, humor, or excitement; it should use waiting acknowledgements such as “I’m on it” only when real work is actually beginning.
 
-The accepted realtime voice path remains unchanged.
+Development comparison commands:
+
+```powershell
+# accepted default conversational direction
+python -m apps.gpt_realtime_webrtc_lab --turns 5 --voice cedar
+
+# stronger Realtime A/B
+python -m apps.gpt_realtime_webrtc_lab --turns 5 --voice cedar --realtime-model gpt-realtime-2.1 --reasoning-effort low --port 8767
+
+# retained GPT-Live A/B
+python -m apps.gpt_live_webrtc_lab --turns 5 --voice meridian
+
+# retained local baseline
+python -m apps.voice_lab --turns 5 --tts-provider qwen3-streaming --voice-profile tanner-test --input-device 1
+```
+
+The Realtime lab does **not** prewarm the Core backend by default; backend work is selective. Use `--prewarm-core` only when intentionally benchmarking a warm delegated route.
 
 ## Requirements
 
