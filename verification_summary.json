@@ -1,15 +1,14 @@
 {
-  "v1_reference_review": "PASS (V1 keeps realtime transport/conversation separate from trusted Core/cloud provider routing and preserves WebRTC as a client-media boundary)",
-  "selected_direction": "OpenAI Realtime 2.1 Mini + Cedar + WebRTC, with selective model-neutral delegation into authoritative Jarvis Core",
-  "prior_live_ab": "PASS (user preferred Realtime Mini naturalness/responsiveness; WebRTC removed PCM popping; Core delegation worked in live test)",
-  "focused_tests": "PASS (26 tests)",
-  "full_regression": "PASS (385 tests, 1 skipped)",
-  "core_diagnostics": "PASS",
-  "default_model_contract": "PASS (gpt-realtime-2.1-mini default; full Realtime remains configurable)",
-  "provider_swap_invariant": "PASS (GPT-Live/full Realtime/local chain retained; Core delegation bridge does not choose a concrete backend model)",
-  "hidden_backend_warmup": "REMOVED BY DEFAULT (opt-in --prewarm-core only)",
-  "acceptance_tracking": "PASS automated contract (user-turn gate + final non-function response + no pending delegation)",
-  "final_repair6_live_acceptance": "PENDING USER CONFIRMATION",
-  "candidate_version": "0.0.9",
-  "repair": "Repair6 - Realtime Mini Default & Acceptance Finalization"
+  "v1_reference_review": "PASS (Electron owns desktop lifecycle; Core process ownership is singular; renderer stays sandboxed; WebRTC remains client media; API credentials remain in trusted Core)",
+  "selected_direction": "0.1.0 Desktop Alpha - Electron/React thin client over authoritative Jarvis Core",
+  "prior_voice_foundation": "PASS (0.0.9 accepted Realtime 2.1 Mini + Cedar + WebRTC with selective Core delegation)",
+  "desktop_focused_tests": "PASS (25 tests in local candidate validation; includes 16 new desktop tests plus retained Realtime/Core delegation gates)",
+  "electron_static_syntax": "PASS (node --check main.cjs and vite.config.mjs)",
+  "full_regression": "PASS (401 tests, 1 skipped)",
+  "core_diagnostics": "PASS (Status: ok; desktop=electron-react-alpha, boundary=loopback-thin-client)",
+  "renderer_authority": "PASS contract (presentation/WebRTC/typed input only; no API key, memory, tools, permissions, tasks, or model routing in renderer)",
+  "typed_input_contract": "PASS contract (typed input enters the same Realtime session, not a second Luna/text UI path)",
+  "desktop_lifecycle": "PASS contract (single-instance Electron owner, loopback port preflight, owned-Core graceful teardown)",
+  "live_desktop_acceptance": "PENDING USER CONFIRMATION",
+  "candidate_version": "0.1.0"
 }

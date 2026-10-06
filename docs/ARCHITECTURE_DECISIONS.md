@@ -327,3 +327,16 @@ GPT-Live, full Realtime 2.1, and the local Whisper/Qwen chain remain alternative
 The successful 0.0.9 WebRTC test establishes negotiated client media as the preferred user-device transport. The development browser page is not a product requirement. The planned desktop app may host the same WebRTC media/data-channel flow inside Electron/React while Jarvis Core remains a separate authoritative process/service.
 
 Raw WebSocket PCM remains valid for server-owned media, diagnostics, and fallback. Transport selection is independent from conversational frontend selection and backend intelligence routing.
+
+
+## ADR-049 — Desktop is a thin client over authoritative Core
+
+0.1.0 introduces the first native Jarvis desktop shell. Electron owns native application lifecycle and exactly one supervised loopback Python host. React owns presentation, client WebRTC media, progressive speech captions, and user input presentation. Neither Electron nor React owns durable Jarvis state, memory, permissions, tools, tasks, or backend intelligence selection.
+
+This applies the V1 lessons from browser-tab lifecycle and duplicate Core startup: the native shell performs a loopback health/port preflight before spawning Core, uses a single-instance lock, and only terminates the Core process it owns. A renderer reload/disconnect is a client lifecycle event, not a reason to reconstruct Jarvis Core.
+
+The renderer never receives `OPENAI_API_KEY`. The trusted Python host brokers OpenAI Realtime WebRTC session creation and carries the existing `RealtimeCoreBridge` for selective delegation. The successful browser WebRTC flow from 0.0.9 is therefore embedded in the desktop product without moving provider credentials or Core authority into the UI.
+
+Typed input intentionally enters the same Realtime session as microphone input using Realtime conversation events. This avoids a UI-specific second conversation path while preserving the existing Core delegation boundary. The versioned Runtime API is mounted beneath the desktop host so later memory/task/tool/settings surfaces can grow against Core-owned contracts instead of duplicating business logic in React.
+
+The 0.1.0 avatar is a replaceable code-native placeholder. Visual state (`idle`, `listening`, `thinking`, `speaking`, `working`, `error`) is presentation only and must never become authoritative runtime state.

@@ -90,6 +90,12 @@ def collect_diagnostics() -> dict[str, Any]:
             "voice_frontend_default": "openai-gpt-realtime-2.1-mini/webrtc",
             "voice_frontend_alternatives": "openai-gpt-realtime-2.1 + openai-gpt-live + local-chain",
         },
+        "desktop": {
+            "shell": "electron-react-alpha",
+            "core_boundary": "loopback-thin-client",
+            "media": "webrtc",
+            "ui_authority": "presentation-only",
+        },
         "network_probe": "not-run",
         "audio_probe": "not-run",
         "external_actions": "disabled-in-core-diagnostics",
@@ -102,6 +108,7 @@ def _format_text(data: dict[str, Any]) -> str:
     conversation = data["conversation"]
     runtime = data["runtime"]
     voice = data["voice"]
+    desktop = data["desktop"]
     return "\n".join(
         [
             f"{data['project']} {data['version']} - Voice Lab diagnostics",
@@ -127,6 +134,7 @@ def _format_text(data: dict[str, Any]) -> str:
                 f"live-bridge={voice['live_client_delegation_bridge']}, mode={voice['mode']}"
             ),
             f"Candidates: STT={providers['stt_candidate']} | TTS={providers['tts_candidate']} | TTS A/B={providers['tts_ab_candidate']} | Frontend default={providers['voice_frontend_default']} | Alternatives={providers['voice_frontend_alternatives']}",
+            f"Desktop: shell={desktop['shell']}, boundary={desktop['core_boundary']}, media={desktop['media']}, authority={desktop['ui_authority']}",
             f"Runtime probe: {providers['runtime_probe']}",
             f"Network probe: {data['network_probe']} | Audio probe: {data['audio_probe']}",
             f"External actions: {data['external_actions']}",

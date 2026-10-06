@@ -1,7 +1,7 @@
 [project]
 name = "jarvis-core-v2"
-version = "0.0.9"
-description = "Jarvis Core v2 swappable full-duplex voice frontend and GPT-Live A/B prototype"
+version = "0.1.0"
+description = "Jarvis Core v2 Desktop Alpha with Electron/React thin client over authoritative Core"
 requires-python = ">=3.11,<4"
 dependencies = [
     "openai[realtime]==3.13.0",
@@ -14,4 +14,4 @@ dependencies = [
 ]
 
 [tool.jarvis]
-release_title = "Swappable Full-Duplex Voice Frontend / GPT-Live A/B Prototype"
+release_title = "Desktop App Alpha - Jarvis Presence, Live Transcript, and Typed Input"

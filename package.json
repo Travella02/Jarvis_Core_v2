@@ -1,7 +1,21 @@
 {
   "name": "jarvis-core-v2",
-  "version": "0.0.9",
+  "version": "0.1.0",
   "private": true,
-  "description": "Jarvis Core v2 workspace. 0.0.9 adds a provider-neutral full-duplex voice frontend and GPT-Live client-delegation A/B path while preserving the local voice pipeline.",
-  "scripts": {}
+  "description": "Jarvis Core v2 Desktop Alpha: Electron/React thin client over authoritative Jarvis Core with Realtime Mini + Cedar + WebRTC.",
+  "main": "apps/desktop/electron/main.cjs",
+  "scripts": {
+    "desktop:build": "vite build --config apps/desktop/vite.config.mjs",
+    "desktop:check": "node --check apps/desktop/electron/main.cjs",
+    "desktop": "npm run desktop:build && electron ."
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "electron": "^43.7.7",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  }
 }

@@ -4,43 +4,37 @@ Jarvis Core v2 is a clean rebuild of Jarvis with provider-independent intelligen
 
 ## Current milestone
 
-**0.0.9 - Swappable Realtime Voice Frontend + Core Delegation**
+**0.1.0 - Desktop App Alpha**
 
-0.0.9 establishes the provider-neutral conversational-frontend boundary and accepts **OpenAI Realtime 2.1 Mini over browser/client WebRTC** as the current default development direction. Realtime Mini owns low-latency conversation, speech, personality, turn-taking, and interruption. Jarvis Core remains authoritative for durable memory, private/project context, permissions, tools/actions, background tasks, current-data workflows, and backend intelligence routing.
+0.1.0 moves the accepted Realtime 2.1 Mini + Cedar + WebRTC experience into the first real Jarvis desktop shell. The app is intentionally minimal: a centered code-native Jarvis avatar, Jarvis's spoken words appearing progressively beneath it, and one small typed-input field for users who prefer typing.
 
-The conversational frontend receives one narrow delegation capability: `delegate_to_jarvis_core`. It asks Core for work; it does not choose or own the backend model. The current 0.0.9 development route behind Core is Luna, but that is intentionally replaceable by the existing/future `IntelligenceProviderRouter` policy without changing the conversational frontend.
+The desktop architecture remains split on purpose:
 
-The preferred client media transport is **WebRTC**. The browser page used in 0.0.9 is only a development harness; a future Electron/React desktop client can host the same WebRTC media/data-channel flow inside the Jarvis app. Raw WebSocket PCM remains a server/debug/fallback transport.
+- **Electron** owns native window/process lifecycle and supervises one loopback Core host.
+- **React/TypeScript** owns presentation and client WebRTC media only.
+- **Jarvis Core** remains authoritative for the conversation runtime, memory, permissions, tools, tasks, delegated work, and backend model routing.
+- **OpenAI Realtime 2.1 Mini + Cedar + WebRTC** remains the current default conversational frontend, behind the replaceable frontend/provider boundary established in 0.0.9.
 
-Accepted alternatives are retained rather than deleted:
+Typed input enters the same active Realtime conversation as voice; 0.1.0 does not create a second text-only Jarvis. The OpenAI project API key remains in Python/Core and is never exposed to the renderer. The existing versioned Runtime API is mounted beneath the desktop host for future UI features so the app can grow alongside Core without duplicating business logic.
 
-- `gpt-realtime-2.1` can be selected for a stronger conversational frontend.
-- GPT-Live remains available as a separate full-duplex provider experiment.
-- the local Whisper -> Conversation Core -> Qwen path remains the rollback/economy/local baseline.
-
-Natural personality is intentional. Realtime should answer simple questions directly and may react with genuine warmth, curiosity, humor, or excitement; it should use waiting acknowledgements such as “I’m on it” only when real work is actually beginning.
-
-Development comparison commands:
+First-time desktop setup:
 
 ```powershell
-# accepted default conversational direction
-python -m apps.gpt_realtime_webrtc_lab --turns 5 --voice cedar
-
-# stronger Realtime A/B
-python -m apps.gpt_realtime_webrtc_lab --turns 5 --voice cedar --realtime-model gpt-realtime-2.1 --reasoning-effort low --port 8767
-
-# retained GPT-Live A/B
-python -m apps.gpt_live_webrtc_lab --turns 5 --voice meridian
-
-# retained local baseline
-python -m apps.voice_lab --turns 5 --tts-provider qwen3-streaming --voice-profile tanner-test --input-device 1
+npm install
 ```
 
-The Realtime lab does **not** prewarm the Core backend by default; backend work is selective. Use `--prewarm-core` only when intentionally benchmarking a warm delegated route.
+Run the app:
+
+```powershell
+npm run desktop
+```
+
+The Electron shell builds the React UI, starts/supervises the loopback desktop host, and opens one native Jarvis window. Do not manually start a second Core on port 8765 while using `npm run desktop`.
 
 ## Requirements
 
 - Python 3.11+ (the project development baseline remains Python 3.11)
+- Node.js/npm for the 0.1.0 Electron/React desktop alpha
 - Project-local `.venv`
 - OpenAI Python SDK 3.13.0
 - `sounddevice==0.5.6`
