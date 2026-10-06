@@ -130,17 +130,20 @@ function ParticleOrb({ state }: { state: JarvisState }) {
     let frame = 0;
     let disposed = false;
     let previousTime = performance.now();
+    // Keep one 420-unit drawing coordinate system while CSS scales the visible orb with the viewport.
     const logicalSize = 420;
 
     const resize = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.round(logicalSize * dpr);
-      canvas.height = Math.round(logicalSize * dpr);
-      canvas.style.width = `${logicalSize}px`;
-      canvas.style.height = `${logicalSize}px`;
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const cssSize = Math.max(1, canvas.getBoundingClientRect().width || logicalSize);
+      canvas.width = Math.round(cssSize * dpr);
+      canvas.height = Math.round(cssSize * dpr);
+      const visualScale = cssSize / logicalSize;
+      context.setTransform(dpr * visualScale, 0, 0, dpr * visualScale, 0, 0);
     };
     resize();
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(canvas);
     window.addEventListener('resize', resize);
 
     const draw = (time: number) => {
@@ -254,6 +257,7 @@ function ParticleOrb({ state }: { state: JarvisState }) {
     return () => {
       disposed = true;
       window.cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
       window.removeEventListener('resize', resize);
     };
   }, []);
@@ -308,6 +312,7 @@ export default function App() {
   const captionResponseCompleteRef = useRef(false);
   const captionShouldIdleRef = useRef(false);
   const captionAudioStartedRef = useRef(false);
+  const audioPlayingRef = useRef(false);
   const turnCounterRef = useRef(0);
   const latencyRef = useRef<LatencyMarks>({ turn: 0 });
 
@@ -316,11 +321,11 @@ export default function App() {
     if (message) setDetail(message);
   };
 
-  const scheduleIdle = () => {
+  const scheduleIdle = (delayMs = 220) => {
     if (idleTimerRef.current !== null) window.clearTimeout(idleTimerRef.current);
     idleTimerRef.current = window.setTimeout(() => {
       setJarvisState((current) => (current === 'speaking' || current === 'thinking' ? 'idle' : current));
-    }, 850);
+    }, delayMs);
   };
 
   const sendControlMessage = (payload: object) => {
@@ -368,17 +373,14 @@ export default function App() {
       const source = captionSourceRef.current;
       const index = captionIndexRef.current;
       if (index >= source.length) {
-        if (captionResponseCompleteRef.current && captionShouldIdleRef.current) {
-          captionShouldIdleRef.current = false;
-          scheduleIdle();
-        }
+        // The transcript can finish before Cedar's buffered WebRTC audio.
+        // Playback lifecycle events own SPEAKING/READY; captions never end the speaking state.
         return;
       }
 
       const character = source[index];
       captionIndexRef.current = index + 1;
       setCaption(normalizeCaptionForDisplay(source.slice(0, captionIndexRef.current)));
-      setStateSafely('speaking', 'Speaking');
       const backlog = source.length - captionIndexRef.current;
       captionTimerRef.current = window.setTimeout(tick, captionCharacterDelay(character, backlog));
     };
@@ -422,6 +424,7 @@ export default function App() {
       enqueueCaptionDelta(event.delta || '');
     } else if (type === 'output_audio_buffer.started') {
       latencyRef.current.firstAudio ??= now;
+      audioPlayingRef.current = true;
       captionAudioStartedRef.current = true;
       pumpCaption(45);
       setStateSafely('speaking', 'Speaking');
@@ -429,6 +432,21 @@ export default function App() {
         latencyRef.current.reported = true;
         sendLatencySummary();
       }
+    } else if (type === 'output_audio_buffer.stopped') {
+      // WebRTC owns playout. Stay SPEAKING until its output buffer is actually drained,
+      // even when transcript generation finished earlier.
+      audioPlayingRef.current = false;
+      if (captionTimerRef.current !== null) window.clearTimeout(captionTimerRef.current);
+      captionTimerRef.current = null;
+      captionIndexRef.current = captionSourceRef.current.length;
+      if (captionSourceRef.current) setCaption(normalizeCaptionForDisplay(captionSourceRef.current));
+      scheduleIdle(140);
+    } else if (type === 'output_audio_buffer.cleared') {
+      // Barge-in or explicit cancellation ends audible speech immediately. Do not override
+      // a newer LISTENING/THINKING state if that transition already arrived.
+      audioPlayingRef.current = false;
+      clearCaptionPacing(false);
+      setJarvisState((current) => current === 'speaking' ? 'idle' : current);
     } else if (type === 'response.function_call_arguments.done') {
       setStateSafely('working', 'Working');
     } else if (type === 'response.done') {
@@ -438,10 +456,12 @@ export default function App() {
         setStateSafely('working', 'Working');
       } else if (event.response?.status === 'completed') {
         captionResponseCompleteRef.current = true;
-        captionShouldIdleRef.current = true;
+        captionShouldIdleRef.current = !audioPlayingRef.current && !captionAudioStartedRef.current;
         if (!captionAudioStartedRef.current) {
+          // Text-only/fallback response: reveal the caption without pretending audio is still playing.
           captionAudioStartedRef.current = true;
           pumpCaption(120);
+          scheduleIdle(220);
         } else {
           pumpCaption();
         }
@@ -468,6 +488,7 @@ export default function App() {
       wsRef.current?.close();
       if (idleTimerRef.current !== null) window.clearTimeout(idleTimerRef.current);
       clearCaptionPacing(false);
+      audioPlayingRef.current = false;
       try { navigator.sendBeacon('/api/realtime/end'); } catch (_) { /* best effort */ }
     } finally {
       dcRef.current = null;
@@ -565,7 +586,10 @@ export default function App() {
     const dc = dcRef.current;
     if (!text || !dc || dc.readyState !== 'open') return;
 
-    if (jarvisState === 'speaking') dc.send(JSON.stringify({ type: 'response.cancel' }));
+    if (jarvisState === 'speaking') {
+      dc.send(JSON.stringify({ type: 'response.cancel' }));
+      dc.send(JSON.stringify({ type: 'output_audio_buffer.clear' }));
+    }
     turnCounterRef.current += 1;
     const now = performance.now();
     latencyRef.current = { turn: turnCounterRef.current, speechStarted: now, speechStopped: now };

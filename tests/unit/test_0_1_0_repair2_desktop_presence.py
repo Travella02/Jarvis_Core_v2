@@ -18,7 +18,7 @@ class DesktopRepair2PresenceTests(unittest.TestCase):
         self.assertGreaterEqual(int(match.group(1)), 1000)
         self.assertIn("const logicalSize = 420", self.app)
         self.assertIn('width="420" height="420"', self.app)
-        self.assertIn("width: 420px", self.styles)
+        self.assertIn("width: min(56vmin, 66vw)", self.styles)
 
     def test_orb_particles_form_a_flowing_spherical_dust_field(self) -> None:
         self.assertIn("shellRadius", self.app)
