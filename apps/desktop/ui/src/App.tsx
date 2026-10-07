@@ -1,12 +1,18 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
-type JarvisState = 'connecting' | 'idle' | 'listening' | 'thinking' | 'speaking' | 'working' | 'error';
+type PresenceState = 'sleeping' | 'awake';
+type JarvisState = 'sleeping' | 'waking' | 'connecting' | 'idle' | 'listening' | 'thinking' | 'speaking' | 'working' | 'error';
 
 type RealtimeEvent = {
   type?: string;
   delta?: string;
   error?: { message?: string };
   response?: { status?: string; output?: Array<{ type?: string }> };
+};
+
+type ResponsePolicy = {
+  max_output_tokens?: number | 'inf';
+  instructions?: string;
 };
 
 type Particle = {
@@ -32,6 +38,8 @@ type LatencyMarks = {
 };
 
 const stateLabels: Record<JarvisState, string> = {
+  sleeping: 'SLEEPING',
+  waking: 'WAKING',
   connecting: 'CONNECTING',
   idle: 'READY',
   listening: 'LISTENING',
@@ -117,6 +125,8 @@ function ParticleOrb({ state }: { state: JarvisState }) {
     };
 
     const moods: Record<JarvisState, OrbMood> = {
+      sleeping:   { speed: 0.16, scale: 0.968, brightness: 0.44, hueShift: 56, turbulence: 0.44, radialMotion: 0.001, coreEnergy: 0.34, alpha: 0.48 },
+      waking:     { speed: 0.92, scale: 1.018, brightness: 1.12, hueShift: 14, turbulence: 1.24, radialMotion: 0.018, coreEnergy: 1.08, alpha: 0.96 },
       connecting: { speed: 0.34, scale: 0.985, brightness: 0.62, hueShift: -6, turbulence: 0.72, radialMotion: 0.003, coreEnergy: 0.56, alpha: 0.62 },
       idle:       { speed: 0.58, scale: 1.000, brightness: 1.00, hueShift: 0, turbulence: 1.00, radialMotion: 0.004, coreEnergy: 0.78, alpha: 1.00 },
       listening:  { speed: 0.78, scale: 1.018, brightness: 1.08, hueShift: -34, turbulence: 0.86, radialMotion: 0.016, coreEnergy: 0.98, alpha: 1.00 },
@@ -294,18 +304,63 @@ function captionCharacterDelay(character: string, backlog: number): number {
   return Math.max(14, Math.round(delay));
 }
 
+
+function downsampleTo16k(input: Float32Array, sourceRate: number): Int16Array {
+  if (!Number.isFinite(sourceRate) || sourceRate < 16_000) {
+    throw new Error(`Unsupported microphone sample rate: ${sourceRate}`);
+  }
+  const ratio = sourceRate / 16_000;
+  const outputLength = Math.max(1, Math.floor(input.length / ratio));
+  const output = new Int16Array(outputLength);
+  for (let i = 0; i < outputLength; i += 1) {
+    const start = Math.floor(i * ratio);
+    const end = Math.max(start + 1, Math.min(input.length, Math.floor((i + 1) * ratio)));
+    let sum = 0;
+    for (let j = start; j < end; j += 1) sum += input[j];
+    const sample = Math.max(-1, Math.min(1, sum / Math.max(1, end - start)));
+    output[i] = sample < 0 ? Math.round(sample * 32768) : Math.round(sample * 32767);
+  }
+  return output;
+}
+
+function appendInt16(left: Int16Array, right: Int16Array): Int16Array {
+  if (!left.length) return right.slice();
+  const combined = new Int16Array(left.length + right.length);
+  combined.set(left, 0);
+  combined.set(right, left.length);
+  return combined;
+}
+
 export default function App() {
-  const [jarvisState, setJarvisState] = useState<JarvisState>('connecting');
+  const [presence, setPresence] = useState<PresenceState>('sleeping');
+  const [jarvisState, setJarvisState] = useState<JarvisState>('sleeping');
   const [caption, setCaption] = useState('');
   const [draft, setDraft] = useState('');
-  const [detail, setDetail] = useState('Starting Jarvis…');
+  const [detail, setDetail] = useState('Preparing local wake listener…');
+  const [transcriptExpanded, setTranscriptExpanded] = useState(false);
+  const [captionOverflow, setCaptionOverflow] = useState(false);
+  const [captionBrowsing, setCaptionBrowsing] = useState(false);
+
+  const presenceRef = useRef<PresenceState>('sleeping');
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const wakeWsRef = useRef<WebSocket | null>(null);
   const micRef = useRef<MediaStream | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const captionViewportRef = useRef<HTMLDivElement | null>(null);
+  const captionStickToLatestRef = useRef(true);
+  const wakeAudioContextRef = useRef<AudioContext | null>(null);
+  const wakeProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const wakeSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const wakeGainRef = useRef<GainNode | null>(null);
+  const wakePendingRef = useRef<Int16Array>(new Int16Array(0));
   const idleTimerRef = useRef<number | null>(null);
+  const idleSleepSecondsRef = useRef(60);
+  const wakePhraseRef = useRef('Jarvis');
   const stoppingRef = useRef(false);
+  const realtimeClosingRef = useRef(false);
+  const wakeClosingRef = useRef(false);
   const captionSourceRef = useRef('');
   const captionIndexRef = useRef(0);
   const captionTimerRef = useRef<number | null>(null);
@@ -314,6 +369,7 @@ export default function App() {
   const captionAudioStartedRef = useRef(false);
   const audioPlayingRef = useRef(false);
   const turnCounterRef = useRef(0);
+  const responsePolicyRef = useRef<ResponsePolicy | null>(null);
   const latencyRef = useRef<LatencyMarks>({ turn: 0 });
 
   const setStateSafely = (next: JarvisState, message?: string) => {
@@ -321,9 +377,19 @@ export default function App() {
     if (message) setDetail(message);
   };
 
-  const scheduleIdle = (delayMs = 220) => {
+  const setPresenceSafely = (next: PresenceState) => {
+    presenceRef.current = next;
+    setPresence(next);
+  };
+
+  const clearIdleTimer = () => {
     if (idleTimerRef.current !== null) window.clearTimeout(idleTimerRef.current);
-    idleTimerRef.current = window.setTimeout(() => {
+    idleTimerRef.current = null;
+  };
+
+  const scheduleIdle = (delayMs = 220) => {
+    window.setTimeout(() => {
+      if (presenceRef.current !== 'awake') return;
       setJarvisState((current) => (current === 'speaking' || current === 'thinking' ? 'idle' : current));
     }, delayMs);
   };
@@ -362,29 +428,30 @@ export default function App() {
     captionAudioStartedRef.current = false;
     if (captionTimerRef.current !== null) window.clearTimeout(captionTimerRef.current);
     captionTimerRef.current = null;
-    if (clearVisible) setCaption('');
+    if (clearVisible) {
+      captionStickToLatestRef.current = true;
+      setCaptionBrowsing(false);
+      setCaptionOverflow(false);
+      setCaption('');
+    }
   };
 
   const pumpCaption = (initialDelay = 0) => {
     if (captionTimerRef.current !== null) return;
-
     const tick = () => {
       captionTimerRef.current = null;
       const source = captionSourceRef.current;
       const index = captionIndexRef.current;
       if (index >= source.length) {
-        // The transcript can finish before Cedar's buffered WebRTC audio.
-        // Playback lifecycle events own SPEAKING/READY; captions never end the speaking state.
+        // The transcript can finish before Cedar's buffered WebRTC audio; captions never end the speaking state.
         return;
       }
-
       const character = source[index];
       captionIndexRef.current = index + 1;
       setCaption(normalizeCaptionForDisplay(source.slice(0, captionIndexRef.current)));
       const backlog = source.length - captionIndexRef.current;
       captionTimerRef.current = window.setTimeout(tick, captionCharacterDelay(character, backlog));
     };
-
     captionTimerRef.current = window.setTimeout(tick, initialDelay);
   };
 
@@ -404,17 +471,211 @@ export default function App() {
     if (captionAudioStartedRef.current) pumpCaption();
   };
 
+  const armIdleSleep = () => {
+    clearIdleTimer();
+    if (presenceRef.current !== 'awake') return;
+    idleTimerRef.current = window.setTimeout(() => {
+      void enterSleep('idle_timeout');
+    }, Math.max(1, idleSleepSecondsRef.current) * 1000);
+  };
+
+  const noteActivity = () => {
+    if (presenceRef.current === 'awake') armIdleSleep();
+  };
+
+  const ensureMic = async (): Promise<MediaStream> => {
+    if (micRef.current && micRef.current.getAudioTracks().some((track) => track.readyState === 'live')) {
+      return micRef.current;
+    }
+    const mic = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    micRef.current = mic;
+    return mic;
+  };
+
+  const stopWakeAudioTap = async () => {
+    const processor = wakeProcessorRef.current;
+    const source = wakeSourceRef.current;
+    const gain = wakeGainRef.current;
+    wakeProcessorRef.current = null;
+    wakeSourceRef.current = null;
+    wakeGainRef.current = null;
+    wakePendingRef.current = new Int16Array(0);
+    try { processor?.disconnect(); } catch (_) { /* best effort */ }
+    try { source?.disconnect(); } catch (_) { /* best effort */ }
+    try { gain?.disconnect(); } catch (_) { /* best effort */ }
+    const context = wakeAudioContextRef.current;
+    wakeAudioContextRef.current = null;
+    if (context && context.state !== 'closed') {
+      try { await context.close(); } catch (_) { /* best effort */ }
+    }
+  };
+
+  const stopWakeListening = async () => {
+    wakeClosingRef.current = true;
+    await stopWakeAudioTap();
+    try { wakeWsRef.current?.close(); } catch (_) { /* best effort */ }
+    wakeWsRef.current = null;
+    wakeClosingRef.current = false;
+  };
+
+  const startWakeAudioTap = async (ws: WebSocket) => {
+    const mic = await ensureMic();
+    if (wakeAudioContextRef.current) return;
+    const context = new AudioContext();
+    wakeAudioContextRef.current = context;
+    if (context.state === 'suspended') await context.resume();
+    const source = context.createMediaStreamSource(mic);
+    const processor = context.createScriptProcessor(4096, 1, 1);
+    const gain = context.createGain();
+    gain.gain.value = 0;
+    wakeSourceRef.current = source;
+    wakeProcessorRef.current = processor;
+    wakeGainRef.current = gain;
+    processor.onaudioprocess = (event) => {
+      if (ws.readyState !== WebSocket.OPEN || presenceRef.current !== 'sleeping') return;
+      const samples = event.inputBuffer.getChannelData(0);
+      let downsampled: Int16Array;
+      try { downsampled = downsampleTo16k(samples, context.sampleRate); } catch { return; }
+      let pending = appendInt16(wakePendingRef.current, downsampled);
+      const frameSamples = 480; // 30 ms at 16 kHz; matches LocalWakeListener.
+      while (pending.length >= frameSamples && ws.readyState === WebSocket.OPEN) {
+        const frame = pending.slice(0, frameSamples);
+        ws.send(frame.buffer);
+        pending = pending.slice(frameSamples);
+      }
+      wakePendingRef.current = pending;
+    };
+    source.connect(processor);
+    processor.connect(gain);
+    gain.connect(context.destination);
+  };
+
+  const startWakeListening = async () => {
+    if (stoppingRef.current || presenceRef.current !== 'sleeping') return;
+    await stopWakeListening();
+    setStateSafely('sleeping', `Say “${wakePhraseRef.current}” when you need me.`);
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${scheme}://${location.host}/ws/wake`);
+    wakeWsRef.current = ws;
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = (message) => {
+      let payload: any;
+      try { payload = JSON.parse(message.data); } catch { return; }
+      if (payload.kind === 'wake_preparing') {
+        setStateSafely('sleeping', 'Preparing local wake listener…');
+      } else if (payload.kind === 'wake_ready') {
+        const phrases = Array.isArray(payload.wake_phrases) ? payload.wake_phrases : [];
+        if (phrases.length) wakePhraseRef.current = String(phrases[phrases.length - 1] || 'Jarvis');
+        if (Number(payload.idle_sleep_seconds) > 0) idleSleepSecondsRef.current = Number(payload.idle_sleep_seconds);
+        setStateSafely('sleeping', `Say “${wakePhraseRef.current}” when you need me.`);
+        void startWakeAudioTap(ws);
+      } else if (payload.kind === 'wake_detected') {
+        const command = String(payload.command_text || '').trim();
+        void startRealtimeSession(command, 'local_wake_phrase');
+      } else if (payload.kind === 'wake_unavailable') {
+        setStateSafely('sleeping', 'Voice wake is unavailable; type a message to wake Jarvis.');
+      }
+    };
+    ws.onclose = () => {
+      if (!wakeClosingRef.current && presenceRef.current === 'sleeping' && !stoppingRef.current) {
+        window.setTimeout(() => { void startWakeListening(); }, 650);
+      }
+    };
+  };
+
+  const silenceRealtimeOutput = () => {
+    const dc = dcRef.current;
+    if (dc?.readyState === 'open') {
+      try { dc.send(JSON.stringify({ type: 'response.cancel' })); } catch (_) { /* best effort */ }
+      try { dc.send(JSON.stringify({ type: 'output_audio_buffer.clear' })); } catch (_) { /* best effort */ }
+      try { dc.send(JSON.stringify({ type: 'input_audio_buffer.clear' })); } catch (_) { /* best effort */ }
+    }
+    audioPlayingRef.current = false;
+    if (audioRef.current) {
+      try { audioRef.current.pause(); } catch (_) { /* best effort */ }
+      audioRef.current.muted = true;
+      audioRef.current.srcObject = null;
+    }
+  };
+
+  const stopRealtimeSession = async ({ notifyServer = true }: { notifyServer?: boolean } = {}) => {
+    realtimeClosingRef.current = true;
+    clearIdleTimer();
+    silenceRealtimeOutput();
+    dcRef.current?.close();
+    pcRef.current?.close();
+    wsRef.current?.close();
+    dcRef.current = null;
+    pcRef.current = null;
+    wsRef.current = null;
+    if (notifyServer) {
+      try { await fetch('/api/realtime/end', { method: 'POST' }); } catch (_) { /* best effort */ }
+    }
+    realtimeClosingRef.current = false;
+  };
+
+  const enterSleep = async (reason: string) => {
+    if (presenceRef.current === 'sleeping' || stoppingRef.current) return;
+    setPresenceSafely('sleeping');
+    clearIdleTimer();
+    setStateSafely('sleeping', reason === 'idle_timeout' ? 'Sleeping after 60 seconds of inactivity.' : `Say “${wakePhraseRef.current}” when you need me.`);
+    clearCaptionPacing(true);
+    setTranscriptExpanded(false);
+    silenceRealtimeOutput();
+    await stopRealtimeSession({ notifyServer: false });
+    try {
+      await fetch('/api/presence/sleep', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason }),
+      });
+    } catch (_) { /* best effort */ }
+    if (!stoppingRef.current) await startWakeListening();
+  };
+
+  const requestNormalRealtimeResponse = (dc: RTCDataChannel | null = dcRef.current) => {
+    if (!dc || dc.readyState !== 'open') return false;
+    const event: Record<string, unknown> = { type: 'response.create' };
+    if (responsePolicyRef.current) event.response = responsePolicyRef.current;
+    dc.send(JSON.stringify(event));
+    return true;
+  };
+
+  const dispatchTextToRealtime = (text: string) => {
+    const dc = dcRef.current;
+    const clean = text.trim();
+    if (!clean || !dc || dc.readyState !== 'open') return false;
+    turnCounterRef.current += 1;
+    const now = performance.now();
+    latencyRef.current = { turn: turnCounterRef.current, speechStarted: now, speechStopped: now };
+    clearCaptionPacing(true);
+    setStateSafely('thinking', 'Thinking');
+    dc.send(JSON.stringify({
+      type: 'conversation.item.create',
+      item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: clean }] },
+    }));
+    requestNormalRealtimeResponse(dc);
+    noteActivity();
+    return true;
+  };
+
   const handleRealtimeEvent = (event: RealtimeEvent) => {
     forwardToCore(event);
     const type = event.type || '';
     const now = performance.now();
     if (type === 'input_audio_buffer.speech_started') {
+      clearIdleTimer();
       turnCounterRef.current += 1;
       latencyRef.current = { turn: turnCounterRef.current, speechStarted: now };
       setStateSafely('listening', 'I’m listening');
     } else if (type === 'input_audio_buffer.speech_stopped') {
       latencyRef.current.speechStopped = now;
       setStateSafely('thinking', 'Thinking');
+      // Keep Semantic VAD for natural endpointing, but Jarvis owns response
+      // creation so Core can attach a turn-specific compact response policy.
+      requestNormalRealtimeResponse();
     } else if (type === 'response.created') {
       latencyRef.current.responseCreated ??= now;
       clearCaptionPacing(true);
@@ -423,6 +684,7 @@ export default function App() {
       latencyRef.current.firstTranscript ??= now;
       enqueueCaptionDelta(event.delta || '');
     } else if (type === 'output_audio_buffer.started') {
+      clearIdleTimer();
       latencyRef.current.firstAudio ??= now;
       audioPlayingRef.current = true;
       captionAudioStartedRef.current = true;
@@ -433,21 +695,21 @@ export default function App() {
         sendLatencySummary();
       }
     } else if (type === 'output_audio_buffer.stopped') {
-      // WebRTC owns playout. Stay SPEAKING until its output buffer is actually drained,
-      // even when transcript generation finished earlier.
+      // WebRTC owns playout. Stay SPEAKING until its output buffer is actually drained.
       audioPlayingRef.current = false;
       if (captionTimerRef.current !== null) window.clearTimeout(captionTimerRef.current);
       captionTimerRef.current = null;
       captionIndexRef.current = captionSourceRef.current.length;
       if (captionSourceRef.current) setCaption(normalizeCaptionForDisplay(captionSourceRef.current));
       scheduleIdle(140);
+      noteActivity();
     } else if (type === 'output_audio_buffer.cleared') {
-      // Barge-in or explicit cancellation ends audible speech immediately. Do not override
-      // a newer LISTENING/THINKING state if that transition already arrived.
       audioPlayingRef.current = false;
       clearCaptionPacing(false);
       setJarvisState((current) => current === 'speaking' ? 'idle' : current);
+      noteActivity();
     } else if (type === 'response.function_call_arguments.done') {
+      clearIdleTimer();
       setStateSafely('working', 'Working');
     } else if (type === 'response.done') {
       const hasFunctionCall = Boolean(event.response?.output?.some((item) => item?.type === 'function_call'));
@@ -458,10 +720,10 @@ export default function App() {
         captionResponseCompleteRef.current = true;
         captionShouldIdleRef.current = !audioPlayingRef.current && !captionAudioStartedRef.current;
         if (!captionAudioStartedRef.current) {
-          // Text-only/fallback response: reveal the caption without pretending audio is still playing.
           captionAudioStartedRef.current = true;
           pumpCaption(120);
           scheduleIdle(220);
+          noteActivity();
         } else {
           pumpCaption();
         }
@@ -470,37 +732,31 @@ export default function App() {
           sendLatencySummary();
         }
       } else if (event.response?.status === 'cancelled') {
-        // Never reveal transcript that was generated but never actually spoken after barge-in.
+        // Drop caption text that was generated but never actually spoken after interruption.
         clearCaptionPacing(false);
+        noteActivity();
       }
     } else if (type === 'error') {
       setStateSafely('error', event.error?.message || 'Realtime error');
     }
   };
 
-  const stop = async () => {
+  const startRealtimeSession = async (preservedCommand = '', reason = 'client_wake') => {
     if (stoppingRef.current) return;
-    stoppingRef.current = true;
-    try {
-      dcRef.current?.close();
-      pcRef.current?.close();
-      micRef.current?.getTracks().forEach((track) => track.stop());
-      wsRef.current?.close();
-      if (idleTimerRef.current !== null) window.clearTimeout(idleTimerRef.current);
-      clearCaptionPacing(false);
-      audioPlayingRef.current = false;
-      try { navigator.sendBeacon('/api/realtime/end'); } catch (_) { /* best effort */ }
-    } finally {
-      dcRef.current = null;
-      pcRef.current = null;
-      micRef.current = null;
-      wsRef.current = null;
+    if (presenceRef.current === 'awake' && dcRef.current?.readyState === 'open') {
+      if (preservedCommand) dispatchTextToRealtime(preservedCommand);
+      return;
     }
-  };
-
-  const start = async () => {
+    await stopWakeListening();
+    setPresenceSafely('awake');
+    setStateSafely('waking', 'Waking');
     try {
-      setStateSafely('connecting', 'Starting Jarvis…');
+      await fetch('/api/presence/wake', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason }),
+      });
+      const mic = await ensureMic();
       const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${scheme}://${location.host}/ws/control`);
       wsRef.current = ws;
@@ -511,20 +767,21 @@ export default function App() {
       ws.onmessage = (message) => {
         let payload: any;
         try { payload = JSON.parse(message.data); } catch { return; }
-        if (payload.kind === 'realtime_send' && dcRef.current?.readyState === 'open') {
+        if (payload.kind === 'response_policy' && payload.response && typeof payload.response === 'object') {
+          responsePolicyRef.current = payload.response as ResponsePolicy;
+        } else if (payload.kind === 'realtime_send' && dcRef.current?.readyState === 'open') {
           dcRef.current.send(JSON.stringify(payload.event));
+        } else if (payload.kind === 'lifecycle_command' && payload.command === 'sleep') {
+          void enterSleep(String(payload.reason || 'voice_command'));
         } else if (payload.kind === 'lab_command' && payload.command === 'close') {
-          void stop();
+          void enterSleep('server_close');
         }
       };
       ws.onclose = () => {
-        if (!stoppingRef.current) setStateSafely('error', 'Jarvis Core disconnected');
+        if (!realtimeClosingRef.current && presenceRef.current === 'awake' && !stoppingRef.current) {
+          setStateSafely('error', 'Jarvis Core disconnected');
+        }
       };
-
-      const mic = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      micRef.current = mic;
 
       const pc = new RTCPeerConnection();
       pcRef.current = pc;
@@ -532,13 +789,17 @@ export default function App() {
       pc.ontrack = async (event) => {
         const remote = event.streams[0] || new MediaStream([event.track]);
         if (audioRef.current) {
+          audioRef.current.muted = false;
           audioRef.current.srcObject = remote;
-          try { await audioRef.current.play(); } catch (_) { /* autoplay is enabled by Electron */ }
+          try { await audioRef.current.play(); } catch (_) { /* autoplay enabled by Electron */ }
         }
       };
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'connected') setStateSafely('idle', 'Ready');
-        if (['failed', 'disconnected', 'closed'].includes(pc.connectionState) && !stoppingRef.current) {
+        if (pc.connectionState === 'connected' && !preservedCommand) {
+          setStateSafely('idle', 'Ready');
+          noteActivity();
+        }
+        if (['failed', 'disconnected'].includes(pc.connectionState) && presenceRef.current === 'awake' && !realtimeClosingRef.current) {
           setStateSafely('error', `WebRTC ${pc.connectionState}`);
         }
       };
@@ -548,7 +809,6 @@ export default function App() {
       dc.onmessage = (message) => {
         try { handleRealtimeEvent(JSON.parse(message.data)); } catch (_) { /* ignore malformed provider event */ }
       };
-      dc.onopen = () => setStateSafely('idle', 'Ready');
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -561,54 +821,128 @@ export default function App() {
       const body = await response.json();
       if (!response.ok) throw new Error(body.detail || `Realtime session failed (${response.status})`);
       await pc.setRemoteDescription({ type: 'answer', sdp: body.sdp });
-      setStateSafely('idle', 'Ready');
+      await new Promise<void>((resolve, reject) => {
+        if (dc.readyState === 'open') { resolve(); return; }
+        const timeout = window.setTimeout(() => reject(new Error('Realtime data channel did not open')), 10_000);
+        dc.onopen = () => { window.clearTimeout(timeout); resolve(); };
+      });
+      if (preservedCommand.trim()) {
+        dispatchTextToRealtime(preservedCommand);
+      } else {
+        setStateSafely('idle', 'Ready');
+        noteActivity();
+      }
     } catch (error) {
       setStateSafely('error', error instanceof Error ? error.message : String(error));
+      await stopRealtimeSession();
+      setPresenceSafely('sleeping');
+      if (!stoppingRef.current) await startWakeListening();
     }
+  };
+
+  const stop = async () => {
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+    clearIdleTimer();
+    clearCaptionPacing(false);
+    await stopWakeListening();
+    await stopRealtimeSession();
+    micRef.current?.getTracks().forEach((track) => track.stop());
+    micRef.current = null;
   };
 
   useEffect(() => {
     stoppingRef.current = false;
-    void start();
+    const boot = async () => {
+      try {
+        const response = await fetch('/api/desktop/config');
+        if (response.ok) {
+          const config = await response.json();
+          if (Number(config.idle_sleep_seconds) > 0) idleSleepSecondsRef.current = Number(config.idle_sleep_seconds);
+          const phrases = Array.isArray(config.wake_phrases) ? config.wake_phrases : [];
+          if (phrases.length) wakePhraseRef.current = String(phrases[phrases.length - 1] || 'Jarvis');
+        }
+        setPresenceSafely('sleeping');
+        await ensureMic();
+        await startWakeListening();
+      } catch (error) {
+        setStateSafely('error', error instanceof Error ? error.message : String(error));
+      }
+    };
+    void boot();
     const unload = () => { void stop(); };
     window.addEventListener('beforeunload', unload);
     return () => {
       window.removeEventListener('beforeunload', unload);
       void stop();
     };
-    // The desktop alpha intentionally owns exactly one session per renderer lifetime.
+    // One lifecycle controller owns one renderer microphone and swaps only the
+    // local wake lane / Realtime lane beneath it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const handleCaptionScroll = () => {
+    const viewport = captionViewportRef.current;
+    if (!viewport) return;
+    const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    const nearLatest = distanceFromBottom <= 24;
+    captionStickToLatestRef.current = nearLatest;
+    setCaptionBrowsing(!nearLatest);
+  };
+
+  useEffect(() => {
+    const viewport = captionViewportRef.current;
+    if (!viewport) return;
+    const frame = window.requestAnimationFrame(() => {
+      const overflow = viewport.scrollHeight > viewport.clientHeight + 4;
+      setCaptionOverflow(overflow);
+      if (captionStickToLatestRef.current) {
+        viewport.scrollTop = viewport.scrollHeight;
+        setCaptionBrowsing(false);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [caption]);
+
+  useEffect(() => {
+    if (!transcriptExpanded) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setTranscriptExpanded(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [transcriptExpanded]);
 
   const submitText = (event: FormEvent) => {
     event.preventDefault();
     const text = draft.trim();
+    if (!text || jarvisState === 'connecting' || jarvisState === 'waking' || jarvisState === 'error') return;
+    setDraft('');
+    if (presenceRef.current === 'sleeping') {
+      void startRealtimeSession(text, 'typed_wake');
+      return;
+    }
     const dc = dcRef.current;
-    if (!text || !dc || dc.readyState !== 'open') return;
-
+    if (!dc || dc.readyState !== 'open') return;
     if (jarvisState === 'speaking') {
       dc.send(JSON.stringify({ type: 'response.cancel' }));
       dc.send(JSON.stringify({ type: 'output_audio_buffer.clear' }));
     }
-    turnCounterRef.current += 1;
-    const now = performance.now();
-    latencyRef.current = { turn: turnCounterRef.current, speechStarted: now, speechStopped: now };
-    setDraft('');
-    clearCaptionPacing(true);
-    setStateSafely('thinking', 'Thinking');
-    dc.send(JSON.stringify({
-      type: 'conversation.item.create',
-      item: {
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text }],
-      },
-    }));
-    dc.send(JSON.stringify({ type: 'response.create' }));
+    dispatchTextToRealtime(text);
   };
 
+  const isUnavailable = jarvisState === 'connecting' || jarvisState === 'waking' || jarvisState === 'error';
+  const placeholder = jarvisState === 'error'
+    ? 'Jarvis is offline'
+    : presence === 'sleeping'
+      ? 'Type to wake Jarvis…'
+      : 'Ask Jarvis…';
+  const hint = presence === 'sleeping'
+    ? `Say “${wakePhraseRef.current}” to wake me, or type instead.`
+    : 'Speak naturally, or type instead.';
+
   return (
-    <main className="shell">
+    <main className={`shell shell--${presence}`}>
       <section className="jarvis" aria-live="polite">
         <header className="brand">
           <span className={`brand__dot brand__dot--${jarvisState}`} />
@@ -618,8 +952,23 @@ export default function App() {
         <ParticleOrb state={jarvisState} />
 
         <div className="state-label">{stateLabels[jarvisState]}</div>
-        <div className={`caption ${caption ? 'caption--active' : ''}`}>
-          {caption || (jarvisState === 'error' ? detail : '\u00A0')}
+        <div className={`caption-frame ${captionOverflow ? 'caption-frame--overflow' : ''} ${captionBrowsing ? 'caption-frame--browsing' : ''}`}>
+          <div ref={captionViewportRef} className="caption__viewport" aria-live="polite" onScroll={handleCaptionScroll}>
+            <div className={`caption ${caption ? 'caption--active' : ''}`}>
+              {caption || (jarvisState === 'error' ? detail : '\u00A0')}
+            </div>
+          </div>
+          {captionOverflow && caption ? (
+            <button
+              type="button"
+              className="caption-expand"
+              aria-label="Expand full response text"
+              title="Expand response"
+              onClick={() => setTranscriptExpanded(true)}
+            >
+              ↗
+            </button>
+          ) : null}
         </div>
 
         <form className="composer" onSubmit={submitText}>
@@ -627,16 +976,29 @@ export default function App() {
             aria-label="Type to Jarvis"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            placeholder={jarvisState === 'error' ? 'Jarvis is offline' : 'Ask Jarvis…'}
-            disabled={jarvisState === 'connecting' || jarvisState === 'error'}
+            placeholder={placeholder}
+            disabled={isUnavailable}
             autoComplete="off"
           />
-          <button type="submit" disabled={!draft.trim() || jarvisState === 'connecting' || jarvisState === 'error'} aria-label="Send">
+          <button type="submit" disabled={!draft.trim() || isUnavailable} aria-label="Send">
             <span>↗</span>
           </button>
         </form>
 
-        <p className="hint">Speak naturally, or type instead.</p>
+        <p className="hint">{hint}</p>
+
+        {transcriptExpanded ? (
+          <div className="transcript-overlay" role="dialog" aria-modal="true" aria-label="Full Jarvis response">
+            <div className="transcript-overlay__panel">
+              <div className="transcript-overlay__header">
+                <span>JARVIS RESPONSE</span>
+                <button type="button" onClick={() => setTranscriptExpanded(false)} aria-label="Close full response">×</button>
+              </div>
+              <div className="transcript-overlay__body">{caption}</div>
+            </div>
+          </div>
+        ) : null}
+
         <audio ref={audioRef} autoPlay />
       </section>
     </main>

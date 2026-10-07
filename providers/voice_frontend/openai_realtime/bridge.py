@@ -14,7 +14,16 @@ from time import monotonic
 from typing import Any, Protocol
 
 from core.intelligence import ReasoningPolicy
-from providers.voice_frontend.openai_realtime.webrtc import BrowserRealtimeRelay, DELEGATE_TOOL_NAME
+from providers.voice_frontend.openai_realtime.webrtc import (
+    BrowserRealtimeRelay,
+    CORE_RESULT_RESPONSE_INSTRUCTIONS,
+    DEFAULT_REALTIME_MAX_OUTPUT_TOKENS,
+    DELEGATE_TOOL_NAME,
+    EXPANDED_REALTIME_MAX_OUTPUT_TOKENS,
+    EXPANDED_RESPONSE_INSTRUCTIONS,
+    EXPAND_RESPONSE_TOOL_NAME,
+    SLEEP_TOOL_NAME,
+)
 
 
 class ConversationBackend(Protocol):
@@ -55,10 +64,37 @@ class RealtimeCoreBridge:
     async def handle_event(self, payload: dict[str, Any]) -> bool:
         if str(payload.get("type") or "") != "response.function_call_arguments.done":
             return False
-        if str(payload.get("name") or "") != DELEGATE_TOOL_NAME:
-            return False
+        name = str(payload.get("name") or "")
         call_id = str(payload.get("call_id") or "").strip()
         if not call_id:
+            return False
+        if name == EXPAND_RESPONSE_TOOL_NAME:
+            await self.relay.send_function_output(
+                call_id,
+                {"status": "approved", "mode": "expanded"},
+                response_overrides={
+                    "max_output_tokens": EXPANDED_REALTIME_MAX_OUTPUT_TOKENS,
+                    "instructions": EXPANDED_RESPONSE_INSTRUCTIONS,
+                },
+            )
+            return True
+        if name == SLEEP_TOOL_NAME:
+            try:
+                arguments = json.loads(str(payload.get("arguments") or "{}"))
+            except ValueError:
+                arguments = {}
+            reason = str(arguments.get("reason") or "explicit_sleep").strip() or "explicit_sleep"
+            self.conversation.event_bus.emit(
+                "voice.presence.sleep_requested",
+                origin="openai-realtime-bridge",
+                conversation_id=self.conversation.context.conversation_id,
+                user_id=self.conversation.context.user_id,
+                device_id=self.conversation.context.device_id,
+                payload={"call_id": call_id, "reason": reason},
+            )
+            await self.relay.request_browser_sleep(reason=reason)
+            return True
+        if name != DELEGATE_TOOL_NAME:
             return False
         try:
             arguments = json.loads(str(payload.get("arguments") or "{}"))
@@ -140,6 +176,10 @@ class RealtimeCoreBridge:
             await self.relay.send_function_output(
                 call_id,
                 {"status": "completed", "result": result.text.strip(), "backend_ms": elapsed_ms},
+                response_overrides={
+                    "max_output_tokens": DEFAULT_REALTIME_MAX_OUTPUT_TOKENS,
+                    "instructions": CORE_RESULT_RESPONSE_INSTRUCTIONS,
+                },
             )
             event_bus.emit(
                 "voice.realtime.core.completed",

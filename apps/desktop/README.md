@@ -1,30 +1,32 @@
-# Jarvis Desktop Alpha (0.1.0)
+# Jarvis Desktop Alpha (0.1.1)
 
-The desktop app is intentionally a **thin client**. Electron owns native window/process lifecycle, React owns presentation and client WebRTC, and the loopback Python host owns the authoritative `JarvisRuntime`, Realtime session brokering, and Core delegation.
+The desktop app is a **thin client** over authoritative Jarvis Core. Electron owns native process/window lifecycle, React owns presentation and client WebRTC media, and the loopback Python host owns `JarvisRuntime`, local wake policy, Realtime session brokering, and Core delegation.
 
-The first UI is intentionally minimal:
+## Presence lifecycle
 
-- a centered code-native Jarvis avatar,
-- live Jarvis transcript beneath the avatar while he speaks,
-- one small typed-input field beneath the transcript,
-- visual states for connecting, ready, listening, thinking, speaking, working, and error.
+- The app starts **SLEEPING**.
+- Sleeping microphone PCM stays local: renderer -> loopback `/ws/wake` -> Silero + whisper.cpp.
+- `Jarvis, <request>` wakes and preserves `<request>` into the new Realtime session.
+- While awake, Realtime 2.1 Mini + Cedar + WebRTC handles continuous conversation.
+- Explicit sleep intent or 60 seconds of inactivity closes Realtime and re-arms the local wake lane.
+- Typing while asleep wakes Jarvis into the same Realtime conversation.
 
-No memory, permission, tool, task, or model authority is implemented in the renderer.
+Presence (`sleeping/awake`) is separate from activity (`listening/thinking/speaking/working/error`). The OpenAI API key remains in Python/Core and is never shipped into React.
+
+The current local wake implementation uses whisper.cpp because the alpha already ships that provider boundary. This is **not** a claim that full Whisper transcription is the final production wake-word engine; a lighter dedicated keyword spotter should be evaluated for low-end/mobile hardware later.
 
 ## First-time setup
 
-From the project root with the Python `.venv` already configured:
-
 ```powershell
 npm install
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_whisper_cpp.ps1 -Backend cuda
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_whisper_vad.ps1
 ```
 
-## Run the desktop alpha
+## Run
 
 ```powershell
 npm run desktop
 ```
 
-`npm run desktop` builds the React renderer and starts Electron. Electron supervises exactly one loopback Python desktop host at `127.0.0.1:8765`; do **not** manually start a second Core on that port.
-
-The OpenAI API key remains in the local `.env` read by Python and is never shipped into the renderer.
+Electron supervises exactly one loopback Python desktop host at `127.0.0.1:8765`; do not manually start another Core on that port.

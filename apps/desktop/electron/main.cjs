@@ -138,6 +138,9 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Local wake capture must continue when the Jarvis window is minimized.
+      // The renderer pauses no Core authority; this only keeps client media timers alive.
+      backgroundThrottling: false,
     },
   });
 

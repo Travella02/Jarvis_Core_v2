@@ -5,6 +5,7 @@ import unittest
 from core.voice.webrtc import normalize_sdp
 from providers.voice_frontend.openai_realtime import (
     DELEGATE_TOOL_NAME,
+    SLEEP_TOOL_NAME,
     OpenAIRealtimeConfig,
     build_realtime_session,
 )
@@ -26,8 +27,11 @@ class Repair4RealtimeContractTests(unittest.TestCase):
         self.assertEqual(session["audio"]["output"]["voice"], "cedar")
         self.assertEqual(session["reasoning"], {"effort": "low"})
         self.assertEqual(session["tool_choice"], "auto")
-        self.assertEqual(len(session["tools"]), 1)
-        self.assertEqual(session["tools"][0]["name"], DELEGATE_TOOL_NAME)
+        tool_names = [tool["name"] for tool in session["tools"]]
+        self.assertEqual(tool_names, [DELEGATE_TOOL_NAME, SLEEP_TOOL_NAME, "request_expanded_response"])
+        # sleep_jarvis and request_expanded_response are local lifecycle/presentation
+        # controls; delegate_to_jarvis_core remains the sole tool that can request
+        # authoritative backend work.
         instructions = session["instructions"].lower()
         self.assertIn("answer ordinary conversation", instructions)
         self.assertIn("do not pretend to look something up", instructions)

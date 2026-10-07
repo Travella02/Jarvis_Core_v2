@@ -1,6 +1,6 @@
 [project]
 name = "jarvis-core-v2"
-version = "0.1.0"
+version = "0.1.1"
 description = "Jarvis Core v2 Desktop Alpha with Electron/React thin client over authoritative Core"
 requires-python = ">=3.11,<4"
 dependencies = [
@@ -14,4 +14,4 @@ dependencies = [
 ]
 
 [tool.jarvis]
-release_title = "Desktop App Alpha - Jarvis Presence, Live Transcript, and Typed Input"
+release_title = "Wake/Sleep Presence Control - Local Wake + Realtime Lifecycle"

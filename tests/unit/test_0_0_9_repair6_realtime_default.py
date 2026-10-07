@@ -25,9 +25,12 @@ class Repair6RealtimeDefaultTests(unittest.TestCase):
         config = OpenAIRealtimeConfig.from_env({"OPENAI_API_KEY": "test-key"})
         session = build_realtime_session(config)
         self.assertEqual(session["model"], "gpt-realtime-2.1-mini")
-        self.assertEqual([tool["name"] for tool in session["tools"]], ["delegate_to_jarvis_core"])
-        self.assertIn("Natural personality is welcome", REALTIME_CONVERSATION_INSTRUCTIONS)
-        self.assertIn("Do not use personality as filler", REALTIME_CONVERSATION_INSTRUCTIONS)
+        self.assertEqual(
+            [tool["name"] for tool in session["tools"]],
+            ["delegate_to_jarvis_core", "sleep_jarvis", "request_expanded_response"],
+        )
+        self.assertIn("dry, understated wit", REALTIME_CONVERSATION_INSTRUCTIONS)
+        self.assertIn("Concise must never mean flat", REALTIME_CONVERSATION_INSTRUCTIONS)
         self.assertIn("Core remains authoritative", REALTIME_CONVERSATION_INSTRUCTIONS)
 
     def test_lab_does_not_prewarm_core_by_default_and_has_final_playout_grace(self) -> None:

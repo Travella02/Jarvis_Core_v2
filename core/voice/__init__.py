@@ -30,6 +30,7 @@ from .conversation_control import (
     WakeSleepConfig,
 )
 from .playback import PlaybackLedger
+from .wake_listener import LocalWakeListener, WakeListenerResult, WAKE_AUDIO_FORMAT, WAKE_FRAME_BYTES, WAKE_FRAME_MS
 from .frontend import (
     VoiceFrontendEvent,
     VoiceFrontendEventType,
@@ -60,6 +61,11 @@ __all__ = [
     "WakeMatch",
     "WakePhraseDetector",
     "WakeSleepConfig",
+    "LocalWakeListener",
+    "WakeListenerResult",
+    "WAKE_AUDIO_FORMAT",
+    "WAKE_FRAME_BYTES",
+    "WAKE_FRAME_MS",
     "EndpointConfig",
     "EndpointDetector",
     "EndpointSignal",

@@ -1,4 +1,4 @@
-"""Jarvis Core v2 0.1.0 desktop alpha host.
+"""Jarvis Core v2 0.1.1 desktop alpha host.
 
 Electron owns native desktop lifecycle. This loopback Python host owns the one
 JarvisRuntime, Realtime WebRTC session brokering, and Core delegation bridge.
@@ -23,6 +23,9 @@ import uvicorn
 
 from apps.runtime_api import create_app as create_runtime_api
 from core.runtime import IntelligenceProviderRouter, JarvisRuntime, RuntimeSettings
+from core.voice import LocalWakeListener, WakeSleepConfig
+from providers.stt.whisper_cpp import WhisperCppConfig, WhisperCppProvider
+from providers.vad import WhisperCppSileroVadDetector
 from providers.intelligence.openai import OpenAIProvider, OpenAIProviderConfig
 from providers.voice_frontend.openai_realtime import (
     BrowserRealtimeRelay,
@@ -31,6 +34,10 @@ from providers.voice_frontend.openai_realtime import (
     create_realtime_webrtc_call,
     hangup_realtime_call,
 )
+from providers.voice_frontend.openai_realtime.webrtc import (
+    DESKTOP_REALTIME_MAX_OUTPUT_TOKENS,
+    NORMAL_RESPONSE_INSTRUCTIONS,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +45,7 @@ DEFAULT_STATIC_DIR = PROJECT_ROOT / "apps" / "desktop" / "dist"
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Jarvis Core v2 0.1.0 Desktop Alpha host")
+    result = argparse.ArgumentParser(description="Jarvis Core v2 0.1.1 Desktop Alpha host")
     result.add_argument("--host", default="127.0.0.1")
     result.add_argument("--port", type=int, default=8765)
     result.add_argument("--static-dir", type=Path, default=DEFAULT_STATIC_DIR)
@@ -62,6 +69,116 @@ def build_runtime() -> tuple[JarvisRuntime, OpenAIProvider]:
         device_id="desktop-alpha",
     )
     return runtime, provider
+
+
+def _emit_presence(runtime: JarvisRuntime, target: str, reason: str) -> None:
+    core = runtime.conversation
+    if core is None:
+        return
+    snapshot = runtime.snapshot()
+    previous = snapshot.conversation.presence_state if snapshot.conversation else None
+    if previous == target:
+        return
+    runtime.event_bus.emit(
+        "voice.presence.changed",
+        origin="desktop-lifecycle",
+        conversation_id=core.context.conversation_id,
+        user_id=core.context.user_id,
+        device_id=core.context.device_id,
+        payload={"from": previous or "unknown", "to": target, "reason": reason},
+    )
+
+
+class DesktopWakeService:
+    """Local-only sleeping listener fed by the Electron renderer microphone.
+
+    The browser owns the physical microphone in every presence state. While
+    sleeping it streams only 16 kHz PCM to this loopback service. Silero +
+    Whisper remain local; OpenAI Realtime is not connected until a wake phrase
+    is confirmed.
+    """
+
+    def __init__(self, *, runtime: JarvisRuntime, listener: LocalWakeListener) -> None:
+        self.runtime = runtime
+        self.listener = listener
+        self._prepare_lock = asyncio.Lock()
+        self._prepared = False
+
+    async def prepare(self) -> None:
+        if self._prepared:
+            return
+        async with self._prepare_lock:
+            if self._prepared:
+                return
+            health = await self.listener.health()
+            if not health.ready:
+                raise RuntimeError(health.detail or f"wake STT is {health.status}")
+            await self.listener.warmup()
+            self._prepared = True
+
+    async def listen(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        try:
+            await websocket.send_json({"kind": "wake_preparing"})
+            await self.prepare()
+            self.listener.reset()
+            await websocket.send_json(
+                {
+                    "kind": "wake_ready",
+                    "wake_phrases": list(self.listener.config.wake_phrases),
+                    "idle_sleep_seconds": self.listener.config.idle_timeout_seconds,
+                }
+            )
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                payload = message.get("bytes")
+                if payload is None:
+                    continue
+                result = await self.listener.feed_pcm(bytes(payload))
+                if result is None:
+                    continue
+                if not result.woke or result.match is None:
+                    await websocket.send_json({"kind": "wake_ignored"})
+                    continue
+                _emit_presence(self.runtime, "awake", "local_wake_phrase")
+                await websocket.send_json(
+                    {
+                        "kind": "wake_detected",
+                        "phrase": result.match.phrase,
+                        "command_text": result.match.command_text,
+                    }
+                )
+                return
+        except WebSocketDisconnect:
+            return
+        except Exception as exc:
+            with suppress(Exception):
+                await websocket.send_json(
+                    {"kind": "wake_unavailable", "detail": f"{type(exc).__name__}: {exc}"}
+                )
+        finally:
+            self.listener.reset()
+            with suppress(Exception):
+                await websocket.close()
+
+    async def close(self) -> None:
+        await self.listener.close()
+
+
+def build_wake_service(runtime: JarvisRuntime) -> DesktopWakeService:
+    wake_config = WakeSleepConfig.from_env(env_file=PROJECT_ROOT / ".env")
+    whisper_config = WhisperCppConfig.from_env(env_file=PROJECT_ROOT / ".env")
+    # Sleeping wake detection waits for the local endpoint before transcription;
+    # rolling partials would waste local inference without improving wake policy.
+    whisper_config = replace(whisper_config, emit_partials=False)
+    listener = LocalWakeListener(
+        stt=WhisperCppProvider(whisper_config),
+        vad=WhisperCppSileroVadDetector(),
+        config=wake_config,
+    )
+    return DesktopWakeService(runtime=runtime, listener=listener)
 
 
 class DesktopRealtimeSession:
@@ -100,6 +217,16 @@ class DesktopRealtimeSession:
                 name="desktop-realtime-core-bridge",
             )
 
+        # Jarvis Core owns response policy. The renderer only forwards these
+        # per-turn overrides when it manually creates a Realtime response.
+        await websocket.send_json({
+            "kind": "response_policy",
+            "response": {
+                "max_output_tokens": DESKTOP_REALTIME_MAX_OUTPUT_TOKENS,
+                "instructions": NORMAL_RESPONSE_INSTRUCTIONS,
+            },
+        })
+
         async def sender() -> None:
             async for payload in relay.outgoing():
                 await websocket.send_json(payload)
@@ -130,7 +257,26 @@ class DesktopRealtimeSession:
                     continue
                 if kind != "realtime_event" or not isinstance(message.get("event"), dict):
                     continue
-                await relay.feed_event(message["event"])
+                event = message["event"]
+                if str(event.get("type") or "") == "response.done" and isinstance(event.get("response"), dict):
+                    response = event["response"]
+                    details = response.get("status_details")
+                    reason = None
+                    if isinstance(details, dict):
+                        reason = details.get("reason") or details.get("type")
+                    usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+                    output_details = usage.get("output_token_details") if isinstance(usage.get("output_token_details"), dict) else {}
+                    print(
+                        "[Desktop response budget] "
+                        f"status={response.get('status')} | "
+                        f"max_output_tokens={response.get('max_output_tokens')} | "
+                        f"output_tokens={usage.get('output_tokens', 'n/a')} | "
+                        f"text_tokens={output_details.get('text_tokens', 'n/a')} | "
+                        f"audio_tokens={output_details.get('audio_tokens', 'n/a')} | "
+                        f"reason={reason or 'natural'}",
+                        flush=True,
+                    )
+                await relay.feed_event(event)
         except WebSocketDisconnect:
             pass
         finally:
@@ -153,7 +299,12 @@ class DesktopRealtimeSession:
                 raise RuntimeError("desktop control channel must connect before WebRTC session creation")
             if relay.call_id is not None:
                 raise RuntimeError("desktop Realtime call already exists")
-        call_id, answer_sdp = await create_realtime_webrtc_call(self.config, clean)
+        call_id, answer_sdp = await create_realtime_webrtc_call(
+            self.config,
+            clean,
+            auto_create_response=False,
+            include_expand_response_tool=False,
+        )
         relay.set_call_id(call_id)
         return call_id, answer_sdp
 
@@ -202,9 +353,12 @@ def create_desktop_app(
     provider: OpenAIProvider,
     realtime_config: OpenAIRealtimeConfig,
     static_dir: Path = DEFAULT_STATIC_DIR,
+    wake_service: DesktopWakeService | None = None,
 ) -> FastAPI:
     version = (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     session = DesktopRealtimeSession(runtime=runtime, config=realtime_config)
+    wake_config = wake_service.listener.config if wake_service is not None else WakeSleepConfig.from_env(env_file=PROJECT_ROOT / ".env")
+    _emit_presence(runtime, "sleeping", "desktop_start")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -212,12 +366,15 @@ def create_desktop_app(
             yield
         finally:
             await session.stop()
+            if wake_service is not None:
+                await wake_service.close()
             await provider.close()
             runtime.close()
 
     app = FastAPI(title="Jarvis Desktop Alpha Host", version=version, docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.jarvis_runtime = runtime
     app.state.desktop_realtime_session = session
+    app.state.desktop_wake_service = wake_service
 
     @app.get("/api/desktop/health")
     async def desktop_health() -> dict[str, Any]:
@@ -232,6 +389,8 @@ def create_desktop_app(
             "model": realtime_config.model,
             "voice": realtime_config.voice,
             "transport": "webrtc",
+            "presence": snapshot.conversation.presence_state if snapshot.conversation else None,
+            "local_wake": wake_service is not None,
         }
 
     @app.get("/api/desktop/config")
@@ -242,7 +401,33 @@ def create_desktop_app(
             "voice": realtime_config.voice,
             "reasoning_effort": realtime_config.reasoning_effort,
             "transport": "webrtc",
+            "wake_phrases": list(wake_config.wake_phrases),
+            "idle_sleep_seconds": wake_config.idle_timeout_seconds,
+            "initial_presence": "sleeping",
+            "local_wake": wake_service is not None,
         }
+
+    @app.post("/api/presence/wake")
+    async def presence_wake(body: dict[str, object] | None = None) -> dict[str, str]:
+        reason = str((body or {}).get("reason") or "client_wake")
+        _emit_presence(runtime, "awake", reason)
+        return {"presence": "awake"}
+
+    @app.post("/api/presence/sleep")
+    async def presence_sleep(body: dict[str, object] | None = None) -> dict[str, str]:
+        reason = str((body or {}).get("reason") or "client_sleep")
+        await session.stop()
+        _emit_presence(runtime, "sleeping", reason)
+        return {"presence": "sleeping"}
+
+    @app.websocket("/ws/wake")
+    async def wake_socket(websocket: WebSocket) -> None:
+        if wake_service is None:
+            await websocket.accept()
+            await websocket.send_json({"kind": "wake_unavailable", "detail": "local wake listener is not configured"})
+            await websocket.close(code=1011)
+            return
+        await wake_service.listen(websocket)
 
     @app.post("/api/realtime/session")
     async def create_realtime_session(body: dict[str, object]) -> dict[str, str]:
@@ -296,7 +481,7 @@ def create_desktop_app(
 def main() -> int:
     args = parser().parse_args()
     if args.host not in {"127.0.0.1", "localhost"}:
-        raise SystemExit("[FAIL] 0.1.0 Desktop Alpha host is loopback-only")
+        raise SystemExit("[FAIL] 0.1.1 Desktop Alpha host is loopback-only")
     if not 1024 <= args.port <= 65535:
         raise SystemExit("[FAIL] --port must be between 1024 and 65535")
 
@@ -306,11 +491,20 @@ def main() -> int:
         runtime.close()
         raise SystemExit("[FAIL] OPENAI_API_KEY is not configured in local .env")
 
+    wake_service: DesktopWakeService | None = None
+    try:
+        wake_service = build_wake_service(runtime)
+    except Exception as exc:
+        # Keep the desktop usable for typed/manual wake if the local wake runtime
+        # is not installed yet. Production packaging will ship this dependency.
+        print(f"[WARN] Local wake listener unavailable: {type(exc).__name__}: {exc}", flush=True)
+
     app = create_desktop_app(
         runtime=runtime,
         provider=provider,
         realtime_config=realtime_config,
         static_dir=args.static_dir,
+        wake_service=wake_service,
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
     return 0

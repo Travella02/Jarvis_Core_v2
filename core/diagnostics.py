@@ -30,6 +30,8 @@ from core.voice import (
     VoiceProviderRegistry,
     VoiceFrontendProvider,
     LiveConversationBridge,
+    LocalWakeListener,
+    WakeSleepConfig,
 )
 
 
@@ -80,6 +82,8 @@ def collect_diagnostics() -> dict[str, Any]:
             "full_duplex": "ready-headset-first",
             "frontend_contract": "ready" if VoiceFrontendProvider else "missing",
             "live_client_delegation_bridge": "ready" if LiveConversationBridge else "missing",
+            "local_wake_listener": "ready" if LocalWakeListener else "missing",
+            "wake_sleep_policy": "ready" if WakeSleepConfig else "missing",
         },
         "providers": {
             "intelligence": "provider-layer-ready",
@@ -95,6 +99,8 @@ def collect_diagnostics() -> dict[str, Any]:
             "core_boundary": "loopback-thin-client",
             "media": "webrtc",
             "ui_authority": "presentation-only",
+            "presence": "local-wake + realtime-awake + local-sleep",
+            "idle_sleep_seconds": 60,
         },
         "network_probe": "not-run",
         "audio_probe": "not-run",
@@ -131,10 +137,11 @@ def _format_text(data: dict[str, Any]) -> str:
                 f"engine={voice['engine']}, audio={voice['audio_contracts']}, "
                 f"endpointing={voice['endpointing']}, chunking={voice['tts_chunking']}, "
                 f"telemetry={voice['latency_telemetry']}, frontend={voice['frontend_contract']}, "
-                f"live-bridge={voice['live_client_delegation_bridge']}, mode={voice['mode']}"
+                f"live-bridge={voice['live_client_delegation_bridge']}, local-wake={voice['local_wake_listener']}, "
+                f"wake-sleep={voice['wake_sleep_policy']}, mode={voice['mode']}"
             ),
             f"Candidates: STT={providers['stt_candidate']} | TTS={providers['tts_candidate']} | TTS A/B={providers['tts_ab_candidate']} | Frontend default={providers['voice_frontend_default']} | Alternatives={providers['voice_frontend_alternatives']}",
-            f"Desktop: shell={desktop['shell']}, boundary={desktop['core_boundary']}, media={desktop['media']}, authority={desktop['ui_authority']}",
+            f"Desktop: shell={desktop['shell']}, boundary={desktop['core_boundary']}, media={desktop['media']}, authority={desktop['ui_authority']}, presence={desktop['presence']}",
             f"Runtime probe: {providers['runtime_probe']}",
             f"Network probe: {data['network_probe']} | Audio probe: {data['audio_probe']}",
             f"External actions: {data['external_actions']}",

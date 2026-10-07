@@ -15,14 +15,22 @@ from typing import Any
 
 import httpx
 
+from core.conversation.persona import JARVIS_CONCISE_EXAMPLES, JARVIS_PERSONALITY_INSTRUCTIONS
 from core.voice.webrtc import normalize_sdp
 from providers.voice_frontend.openai_realtime.config import OpenAIRealtimeConfig
 
 
 DELEGATE_TOOL_NAME = "delegate_to_jarvis_core"
+SLEEP_TOOL_NAME = "sleep_jarvis"
+EXPAND_RESPONSE_TOOL_NAME = "request_expanded_response"
+DEFAULT_REALTIME_MAX_OUTPUT_TOKENS = 1024
+EXPANDED_REALTIME_MAX_OUTPUT_TOKENS = 2048
+DESKTOP_REALTIME_MAX_OUTPUT_TOKENS = 2048
 
-REALTIME_CONVERSATION_INSTRUCTIONS = """You are Jarvis's realtime conversational layer.
-Your priority is natural, human conversation: quick turn-taking, useful emotion, concise speech, and immediate interruption handling.
+REALTIME_CONVERSATION_INSTRUCTIONS = f"""You are Jarvis's realtime conversational layer.
+Your priority is natural, human conversation: quick turn-taking, useful emotion, immediate interruption handling, and disciplined spoken length.
+
+{JARVIS_PERSONALITY_INSTRUCTIONS}
 
 Direct-answer policy:
 - Answer ordinary conversation, general knowledge, simple explanations, jokes, and other things you can answer confidently directly.
@@ -36,12 +44,54 @@ Jarvis Core delegation policy:
 Natural acknowledgement policy:
 - A brief acknowledgement such as 'Sure, I'm on it' is appropriate when the user actually asked Jarvis to do work, perform an action, search, coordinate, research, or wait for a result.
 - Do not add waiting language before an answer you can give immediately.
-- Natural personality is welcome: react with genuine warmth, curiosity, humor, or excitement when it fits the moment. Do not flatten a lively response merely to be terse.
-- Do not use personality as filler. A reaction should flow directly into the answer unless real work is actually starting.
+- A brief reaction, dry observation, or bit of wit is welcome when it fits, but it must flow directly into the useful answer rather than becoming filler.
 - While Core is working, remain available for interruption or follow-up. If asked about a pending result, say that it is still in progress rather than inventing an answer.
+
+Spoken-length policy (high priority):
+- Response-specific instructions may impose a concise conversational shape for an individual turn. Follow those response instructions precisely.
+- For ordinary questions, give the shortest natural answer that fully answers the user.
+- Brief continuation questions such as 'why?', 'why does that happen?', 'how?', or 'what do you mean?' ask only for the missing point. Do not restart the earlier explanation or add unrelated background.
+- Do not add a second analogy, unsolicited related fact, recap, or invitation to continue once the answer is complete.
+- Preserve personality inside the concise answer. Concise must never mean flat, robotic, or personality-free.
+- If the user explicitly asks for detail, depth, examples, a walkthrough, a deep dive, a thorough explanation, or otherwise clearly requests a long answer, follow the response-specific instructions for that turn. In the desktop manual-response path, answer the detailed response directly in one continuous response; do not add a separate waiting acknowledgement first. The request_expanded_response tool remains only as a compatibility path for older/automatic labs.
+
+{JARVIS_CONCISE_EXAMPLES}
+
+Sleep lifecycle policy:
+- When the user clearly ends the interaction or explicitly asks Jarvis to sleep (for example, "that's all", "go to sleep", or "good night Jarvis"), call sleep_jarvis immediately as the only response.
+- For clear sleep intent, produce no spoken acknowledgement, filler, or normal answer before or after the sleep_jarvis tool call. The lifecycle transition itself is the acknowledgement.
+- Do not use sleep_jarvis for ordinary pauses, interruptions, "stop" inside another task, or ambiguous language.
 
 When Jarvis Core returns a function result, communicate it naturally and faithfully. Core remains authoritative for memory, permissions, tool outcomes, tasks, and verified facts returned by delegated work.
 """
+
+
+NORMAL_RESPONSE_INSTRUCTIONS = f"""This response is an ordinary conversational turn.
+Lifecycle/tool control has higher priority than spoken formatting:
+- If the user clearly ends the interaction or asks Jarvis to sleep (for example, "that's all", "that's all Jarvis", "go to sleep", or "good night Jarvis"), do not speak; call sleep_jarvis immediately as the initial and only output of this response.
+- Never acknowledge an explicit sleep request with words such as "got it", "signing off", or "good night" before calling sleep_jarvis. The silent lifecycle transition is the acknowledgement.
+- If the request requires durable/private context, tools, permissions, actions, background work, or stronger backend reasoning, use delegate_to_jarvis_core rather than pretending the work is complete.
+- If the user explicitly asked for a detailed, thorough, deep, step-by-step, example-rich, or otherwise intentionally long answer, answer that detailed request directly in this same response. Do not call request_expanded_response from the desktop manual-response path; enough safety headroom is already provided.
+- For a detailed direct answer, begin the useful answer immediately. At most one brief natural lead-in is allowed. Never say you need a moment, need to think, or are about to explain something and then restart with a second acknowledgement. Waiting language is only appropriate when real backend work is actually pending.
+
+For an ordinary direct spoken answer, answer in at most two complete spoken sentences and normally no more than about 35 words. This is a response-format constraint, not a suggestion.
+Answer only the point the user asked for; do not restart prior context, add a second example, recap, or invite the user to continue.
+Keep Jarvis's wit, warmth, confidence, and natural reactions inside that compact answer. Never become robotic just to be short.
+Always finish the sentence you start. Do not trail off.
+{JARVIS_CONCISE_EXAMPLES}
+"""
+
+CORE_RESULT_RESPONSE_INSTRUCTIONS = f"""Jarvis Core has returned authoritative backend work.
+Present the useful result naturally and faithfully in at most two compact spoken sentences unless the user explicitly requested a detailed result. Do not repeat the request or narrate routing.
+Keep Jarvis's personality intact; concise means efficient, not flat.
+{JARVIS_PERSONALITY_INSTRUCTIONS}
+"""
+
+EXPANDED_RESPONSE_INSTRUCTIONS = f"""The user explicitly asked for a detailed or expanded answer.
+Use the larger response budget for this response only. Give the requested depth cleanly and naturally without mentioning budgets, tools, routing, or this instruction.
+{JARVIS_PERSONALITY_INSTRUCTIONS}
+"""
+
 
 DELEGATE_TOOL = {
     "type": "function",
@@ -69,6 +119,47 @@ DELEGATE_TOOL = {
     },
 }
 
+SLEEP_TOOL = {
+    "type": "function",
+    "name": SLEEP_TOOL_NAME,
+    "description": (
+        "Put Jarvis into the local sleeping presence state only when the user clearly ends the interaction "
+        "or explicitly asks Jarvis to sleep. This closes the paid Realtime session while the local wake listener remains armed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": "Short lifecycle reason such as user_done or explicit_sleep.",
+            }
+        },
+        "required": [],
+        "additionalProperties": False,
+    },
+}
+
+
+EXPAND_RESPONSE_TOOL = {
+    "type": "function",
+    "name": EXPAND_RESPONSE_TOOL_NAME,
+    "description": (
+        "Request a larger spoken-response budget only when the user explicitly asks for a detailed, thorough, "
+        "deep, example-rich, step-by-step, or otherwise intentionally long explanation. Never use this for an "
+        "ordinary question or a short follow-up such as why/how/what do you mean."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": "Very short reason the user explicitly requested an expanded answer.",
+            }
+        },
+        "required": [],
+        "additionalProperties": False,
+    },
+}
 
 class RealtimeWebRTCSessionCreationError(RuntimeError):
     def __init__(self, message: str, *, status_code: int | None = None, request_id: str | None = None) -> None:
@@ -77,24 +168,33 @@ class RealtimeWebRTCSessionCreationError(RuntimeError):
         self.request_id = request_id
 
 
-def build_realtime_session(config: OpenAIRealtimeConfig) -> dict[str, Any]:
+def build_realtime_session(
+    config: OpenAIRealtimeConfig,
+    *,
+    auto_create_response: bool = True,
+    include_expand_response_tool: bool = True,
+) -> dict[str, Any]:
+    tools = [DELEGATE_TOOL, SLEEP_TOOL]
+    if include_expand_response_tool:
+        tools.append(EXPAND_RESPONSE_TOOL)
     return {
         "type": "realtime",
         "model": config.model,
         "instructions": REALTIME_CONVERSATION_INSTRUCTIONS,
         "output_modalities": ["audio"],
+        "max_output_tokens": DEFAULT_REALTIME_MAX_OUTPUT_TOKENS,
         "audio": {
             "input": {
                 "turn_detection": {
                     "type": "semantic_vad",
-                    "create_response": True,
+                    "create_response": auto_create_response,
                     "interrupt_response": True,
                 }
             },
             "output": {"voice": config.voice},
         },
         "reasoning": {"effort": config.reasoning_effort},
-        "tools": [DELEGATE_TOOL],
+        "tools": tools,
         "tool_choice": "auto",
     }
 
@@ -105,11 +205,20 @@ async def create_realtime_webrtc_call(
     *,
     client: httpx.AsyncClient | None = None,
     url: str | None = None,
+    auto_create_response: bool = True,
+    include_expand_response_tool: bool = True,
 ) -> tuple[str, str]:
     if not config.api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     clean_sdp = normalize_sdp(offer_sdp, label="Realtime WebRTC SDP offer")
-    session_json = json.dumps(build_realtime_session(config), separators=(",", ":"))
+    session_json = json.dumps(
+        build_realtime_session(
+            config,
+            auto_create_response=auto_create_response,
+            include_expand_response_tool=include_expand_response_tool,
+        ),
+        separators=(",", ":"),
+    )
 
     owns_client = client is None
     if client is None:
@@ -217,7 +326,14 @@ class BrowserRealtimeRelay:
                 return
             yield item
 
-    async def send_function_output(self, call_id: str, output: Mapping[str, Any], *, continue_response: bool = True) -> None:
+    async def send_function_output(
+        self,
+        call_id: str,
+        output: Mapping[str, Any],
+        *,
+        continue_response: bool = True,
+        response_overrides: Mapping[str, Any] | None = None,
+    ) -> None:
         if self._closed:
             return
         await self._outgoing.put(
@@ -234,7 +350,14 @@ class BrowserRealtimeRelay:
             }
         )
         if continue_response:
-            await self._outgoing.put({"kind": "realtime_send", "event": {"type": "response.create"}})
+            event: dict[str, Any] = {"type": "response.create"}
+            if response_overrides:
+                event["response"] = dict(response_overrides)
+            await self._outgoing.put({"kind": "realtime_send", "event": event})
+
+    async def request_browser_sleep(self, *, reason: str = "explicit_sleep") -> None:
+        if not self._closed:
+            await self._outgoing.put({"kind": "lifecycle_command", "command": "sleep", "reason": reason})
 
     async def request_browser_close(self) -> None:
         if not self._closed:

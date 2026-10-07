@@ -4,23 +4,22 @@ Jarvis Core v2 is a clean rebuild of Jarvis with provider-independent intelligen
 
 ## Current milestone
 
-**0.1.0 - Desktop App Alpha**
+**0.1.1 - Wake/Sleep Presence Control**
 
-0.1.0 moves the accepted Realtime 2.1 Mini + Cedar + WebRTC experience into the first real Jarvis desktop shell. The app is intentionally minimal: a centered code-native Jarvis avatar, Jarvis's spoken words appearing progressively beneath it, and one small typed-input field for users who prefer typing.
+0.1.1 makes the Desktop Alpha behave like an assistant that can be present without keeping a paid cloud voice session open. Jarvis now starts in a local **sleeping** presence state. While sleeping, Electron keeps one microphone stream on-device and sends 16 kHz PCM only to the loopback Core host; local Silero speech presence plus local whisper.cpp decide whether the completed utterance begins with the configured wake phrase. No OpenAI Realtime session exists until local wake confirmation.
 
-The desktop architecture remains split on purpose:
+The default wake phrases remain **“Hey Jarvis”** and **“Jarvis”**. A wake phrase may be embedded in the full request: **“Jarvis, tell me something interesting about space”** wakes Jarvis and preserves the remainder of that same utterance instead of asking the user to repeat it. Once awake, Realtime 2.1 Mini + Cedar + WebRTC continue as the normal conversational frontend. Explicit end-of-interaction intent can return Jarvis to sleep, and 60 seconds of inactivity auto-sleeps the desktop. Typing while asleep is a deliberate manual wake path into the same Realtime conversation.
 
-- **Electron** owns native window/process lifecycle and supervises one loopback Core host.
-- **React/TypeScript** owns presentation and client WebRTC media only.
-- **Jarvis Core** remains authoritative for the conversation runtime, memory, permissions, tools, tasks, delegated work, and backend model routing.
-- **OpenAI Realtime 2.1 Mini + Cedar + WebRTC** remains the current default conversational frontend, behind the replaceable frontend/provider boundary established in 0.0.9.
+Presence and activity remain separate concepts: `sleeping/awake` is lifecycle presence, while `listening/thinking/speaking/working/error` remains foreground activity. Jarvis Core remains authoritative; the renderer coordinates local media lanes and presentation only.
 
-Typed input enters the same active Realtime conversation as voice; 0.1.0 does not create a second text-only Jarvis. The OpenAI project API key remains in Python/Core and is never exposed to the renderer. The existing versioned Runtime API is mounted beneath the desktop host for future UI features so the app can grow alongside Core without duplicating business logic.
+The local wake implementation is intentionally replaceable. whisper.cpp is suitable for this alpha because the runtime already exists and preserves full-command wake behavior, but it is heavier than a dedicated keyword spotter. A production low-end/mobile wake provider can replace it behind the local wake boundary without changing Conversation Core or Realtime.
 
-First-time desktop setup:
+First-time desktop/local voice setup:
 
 ```powershell
 npm install
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_whisper_cpp.ps1 -Backend cuda
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_whisper_vad.ps1
 ```
 
 Run the app:
@@ -29,7 +28,7 @@ Run the app:
 npm run desktop
 ```
 
-The Electron shell builds the React UI, starts/supervises the loopback desktop host, and opens one native Jarvis window. Do not manually start a second Core on port 8765 while using `npm run desktop`.
+Electron builds the React renderer, starts/supervises the loopback Core host, arms local wake listening, and opens one native Jarvis window. Do not manually start a second Core on port 8765 while using `npm run desktop`.
 
 ## Requirements
 

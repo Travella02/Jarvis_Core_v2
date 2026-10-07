@@ -340,3 +340,13 @@ The renderer never receives `OPENAI_API_KEY`. The trusted Python host brokers Op
 Typed input intentionally enters the same Realtime session as microphone input using Realtime conversation events. This avoids a UI-specific second conversation path while preserving the existing Core delegation boundary. The versioned Runtime API is mounted beneath the desktop host so later memory/task/tool/settings surfaces can grow against Core-owned contracts instead of duplicating business logic in React.
 
 The 0.1.0 avatar is a replaceable code-native placeholder. Visual state (`idle`, `listening`, `thinking`, `speaking`, `working`, `error`) is presentation only and must never become authoritative runtime state.
+
+## ADR-050 — Sleep is local presence; awake Realtime is a replaceable conversational lane
+
+0.1.1 separates **presence lifecycle** from foreground voice activity. `sleeping/awake` belongs to Jarvis lifecycle; `listening/thinking/speaking/working/error` remains activity/presentation. A desktop renderer may display both, but it may not invent Core authority from either.
+
+While sleeping, no OpenAI Realtime call is active. The one physical microphone remains owned by the client and 16 kHz mono PCM is sent only to the loopback Core host. A provider-neutral `LocalWakeListener` combines replaceable local speech-presence, local STT, and the existing `WakePhraseDetector`. Only a completed local wake decision may open Realtime. The wake phrase is stripped from the beginning of the complete utterance and the remainder is preserved as the opening command, so `Jarvis, do X` never requires a second repetition.
+
+While awake, Realtime Mini + Cedar + WebRTC remains the current conversational lane. Clear end-of-interaction intent is mapped by the Realtime adapter to a **lifecycle-only** sleep signal; it does not call backend intelligence and cannot mutate memory/tools/tasks. A 60-second local inactivity timer provides the second sleep path. Sleeping tears down Realtime before re-arming local wake.
+
+The local wake provider is replaceable. whisper.cpp is accepted for the desktop alpha because it already exists, can preserve full-command wake text, and keeps sleeping audio local. It is heavier than a dedicated keyword-spotting engine and is not presumed to be the final production/mobile implementation.

@@ -3,6 +3,7 @@
 from .benchmark import ConversationBenchmarkResult, run_conversation_benchmark
 from .engine import ConversationCore, TurnResult
 from .events import CoreEvent, EventBus
+from .persona import JARVIS_CONCISE_EXAMPLES, JARVIS_PERSONALITY_INSTRUCTIONS
 from .models import (
     ConversationContext,
     HeardResponseState,
@@ -27,6 +28,8 @@ __all__ = [
     "HeardResponseState",
     "InputChannel",
     "InvalidStateTransition",
+    "JARVIS_CONCISE_EXAMPLES",
+    "JARVIS_PERSONALITY_INSTRUCTIONS",
     "Referent",
     "ReferentKind",
     "ReferentResolution",
