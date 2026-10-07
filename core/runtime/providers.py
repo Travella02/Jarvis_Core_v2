@@ -67,6 +67,13 @@ class IntelligenceProviderRouter:
                 raise ProviderRouteError(f"unknown provider route: {route}")
             self._default_route = route
 
+    def has_route(self, name: str) -> bool:
+        route = name.strip()
+        if not route:
+            return False
+        with self._lock:
+            return route in self._providers
+
     def resolve(
         self,
         name: str | None = None,

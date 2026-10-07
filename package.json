@@ -1,8 +1,8 @@
 {
   "name": "jarvis-core-v2",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
-  "description": "Jarvis Core v2 0.1.1 Desktop Alpha: local wake word, sleep presence, Realtime Mini + Cedar + WebRTC, authoritative Core.",
+  "description": "Jarvis Core v2 0.1.2: Core-owned intelligence routing and delegated backend orchestration behind Realtime Mini.",
   "main": "apps/desktop/electron/main.cjs",
   "scripts": {
     "desktop:build": "vite build --config apps/desktop/vite.config.mjs",

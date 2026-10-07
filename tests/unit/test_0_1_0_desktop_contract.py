@@ -15,8 +15,8 @@ class DesktopAlphaContractTests(unittest.TestCase):
         self.host = (ROOT / "apps" / "desktop_alpha.py").read_text(encoding="utf-8")
 
     def test_candidate_version_and_electron_entrypoint(self) -> None:
-        self.assertEqual((ROOT / "VERSION").read_text(encoding="utf-8").strip(), "0.1.1")
-        self.assertEqual(self.package["version"], "0.1.1")
+        self.assertEqual((ROOT / "VERSION").read_text(encoding="utf-8").strip(), "0.1.2")
+        self.assertEqual(self.package["version"], "0.1.2")
         self.assertEqual(self.package["main"], "apps/desktop/electron/main.cjs")
 
     def test_desktop_scripts_build_before_electron_launch(self) -> None:

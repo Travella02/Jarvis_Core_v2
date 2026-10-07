@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from core.conversation import ConversationContext, ConversationCore, CoreStateMachine, EventBus, ReferentResolver
-from core.intelligence import IntelligenceProvider
+from core.intelligence import DelegationOrchestrator, IntelligenceProvider
 from core.tools import ToolDefinition, ToolRequest, ToolResult
 from core.runtime import JarvisRuntime, RuntimeSettings, IntelligenceProviderRouter, PROTOCOL_VERSION
 from core.voice import (
@@ -65,6 +65,7 @@ def collect_diagnostics() -> dict[str, Any]:
             "host": "ready" if JarvisRuntime else "missing",
             "settings": "ready" if RuntimeSettings else "missing",
             "provider_router": "ready" if IntelligenceProviderRouter else "missing",
+            "delegation_orchestrator": "ready" if DelegationOrchestrator else "missing",
             "event_replay": "sequence-cursor-ready",
             "client_protocol": f"jarvis-runtime-v{PROTOCOL_VERSION}",
             "local_api": "http-websocket-ready",
@@ -129,7 +130,7 @@ def _format_text(data: dict[str, Any]) -> str:
             (
                 "Runtime: "
                 f"host={runtime['host']}, settings={runtime['settings']}, "
-                f"router={runtime['provider_router']}, replay={runtime['event_replay']}, "
+                f"router={runtime['provider_router']}, delegation={runtime['delegation_orchestrator']}, replay={runtime['event_replay']}, "
                 f"api={runtime['local_api']}, protocol={runtime['client_protocol']}"
             ),
             (

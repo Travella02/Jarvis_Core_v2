@@ -9,6 +9,14 @@ from .benchmark import (
     run_benchmark,
     run_case,
 )
+from .delegation import (
+    DelegationDecision,
+    DelegationMode,
+    DelegationOrchestrator,
+    DelegationRequest,
+    DelegationResult,
+    DelegationStatus,
+)
 from .contracts import (
     ContextLimits,
     IntelligenceContext,
@@ -27,6 +35,12 @@ __all__ = [
     "BenchmarkExpectation",
     "BenchmarkResult",
     "BenchmarkRun",
+    "DelegationDecision",
+    "DelegationMode",
+    "DelegationOrchestrator",
+    "DelegationRequest",
+    "DelegationResult",
+    "DelegationStatus",
     "ContextLimits",
     "IntelligenceContext",
     "IntelligenceEvent",

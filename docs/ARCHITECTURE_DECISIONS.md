@@ -350,3 +350,13 @@ While sleeping, no OpenAI Realtime call is active. The one physical microphone r
 While awake, Realtime Mini + Cedar + WebRTC remains the current conversational lane. Clear end-of-interaction intent is mapped by the Realtime adapter to a **lifecycle-only** sleep signal; it does not call backend intelligence and cannot mutate memory/tools/tasks. A 60-second local inactivity timer provides the second sleep path. Sleeping tears down Realtime before re-arming local wake.
 
 The local wake provider is replaceable. whisper.cpp is accepted for the desktop alpha because it already exists, can preserve full-command wake text, and keeps sleeping audio local. It is heavier than a dedicated keyword-spotting engine and is not presumed to be the final production/mobile implementation.
+
+## ADR-051 — Core owns delegated capability and backend model routing
+
+0.1.2 introduces a provider-neutral `DelegationOrchestrator` between conversational frontends and backend intelligence/capabilities. A frontend such as Realtime Mini may decide that authoritative Core help is required and may describe a coarse capability category, but it may not select Luna, a stronger model, a concrete tool provider, memory implementation, current-data source, or task worker.
+
+Routine delegated reasoning uses the configured default intelligence route. A separately configured `strong` provider may be selected by Core for materially harder reasoning using an observable local policy. The selected provider is a per-turn override inside Conversation Core; it never mutates the conversation's default provider route.
+
+Memory, action, current-data, and long-task delegation are explicit Core capability slots. Until an authoritative handler is registered for one of those slots, the request fails `unavailable`. It must not silently fall through to a language model that could invent a memory, current fact, completed action, or background task. This follows V1's strongest routing lesson: once work is positively routed to a capability, failure remains inside that capability boundary rather than falling through into another one.
+
+The first complexity policy is intentionally deterministic and local. Jarvis does not pay a second classifier-model call on every delegation merely to choose another model. The policy may be replaced later if routing telemetry demonstrates a materially better approach, but the provider-neutral contract remains.

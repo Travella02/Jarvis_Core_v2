@@ -74,6 +74,7 @@ class ConversationCore:
             initial_state=CoreState.LISTENING,
         )
         self._active_trace: CorrelationContext | None = None
+        self._active_provider: IntelligenceProvider | None = None
 
     @property
     def active_trace(self) -> CorrelationContext | None:
@@ -115,6 +116,28 @@ class ConversationCore:
             reasoning_policy=reasoning_policy,
         )
 
+    async def submit_delegated(
+        self,
+        text: str,
+        *,
+        provider: IntelligenceProvider,
+        reasoning_policy: ReasoningPolicy | None = None,
+        tools: Sequence[ToolDefinition] = (),
+    ) -> TurnResult:
+        """Submit authoritative delegated work through a Core-selected provider.
+
+        The provider override is per-turn only. It never changes the conversation's
+        configured default provider and therefore cannot leak routing authority back
+        into a client or conversational frontend.
+        """
+        return await self._submit_text(
+            text,
+            channel=InputChannel.VOICE,
+            tools=tools,
+            reasoning_policy=reasoning_policy,
+            provider_override=provider,
+        )
+
     async def _submit_text(
         self,
         text: str,
@@ -123,6 +146,7 @@ class ConversationCore:
         tools: Sequence[ToolDefinition] = (),
         reasoning_policy: ReasoningPolicy | None = None,
         trace: CorrelationContext | None = None,
+        provider_override: IntelligenceProvider | None = None,
     ) -> TurnResult:
         prompt = text.strip()
         if not prompt:
@@ -135,6 +159,8 @@ class ConversationCore:
         trace = trace or CorrelationContext.create()
         handle = self.cancellations.register(trace)
         self._active_trace = trace
+        active_provider = provider_override or self.provider
+        self._active_provider = active_provider
         chunks: list[str] = []
         tool_requests: list[ToolRequest] = []
         provider_response_id: str | None = None
@@ -187,8 +213,9 @@ class ConversationCore:
             user_id=self.context.user_id,
             device_id=self.context.device_id,
             payload={
-                "provider": self.provider.metadata.provider,
-                "model": self.provider.metadata.model,
+                "provider": active_provider.metadata.provider,
+                "model": active_provider.metadata.model,
+                "provider_override": provider_override is not None,
             },
         )
 
@@ -209,7 +236,7 @@ class ConversationCore:
                 # The interruption note belongs to this next voice turn only. It
                 # remains in OpenAI's previous_response_id chain once submitted.
                 self.context.pending_voice_interruption = None
-            async for event in self.provider.stream_response(
+            async for event in active_provider.stream_response(
                 context=snapshot,
                 tools=tools,
                 reasoning_policy=reasoning_policy or ReasoningPolicy(),
@@ -393,6 +420,7 @@ class ConversationCore:
         finally:
             self.cancellations.complete(handle.cancellation_id)
             self._active_trace = None
+            self._active_provider = None
 
     def record_voice_playback(
         self,
@@ -464,5 +492,6 @@ class ConversationCore:
             device_id=self.context.device_id,
             payload={"reason": reason},
         )
-        await self.provider.cancel(trace.request_id)
+        provider = self._active_provider or self.provider
+        await provider.cancel(trace.request_id)
         return True

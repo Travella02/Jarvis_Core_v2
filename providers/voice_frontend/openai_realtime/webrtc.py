@@ -110,8 +110,8 @@ DELEGATE_TOOL = {
             },
             "mode": {
                 "type": "string",
-                "enum": ["reasoning", "memory", "action", "long_task"],
-                "description": "Why Core is needed. Core remains free to choose the actual model/tool route.",
+                "enum": ["reasoning", "memory", "action", "current_data", "long_task"],
+                "description": "Why Core is needed. This is a capability category only; Core remains free to choose the actual model/tool/provider route.",
             },
         },
         "required": ["request", "mode"],

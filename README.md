@@ -4,31 +4,30 @@ Jarvis Core v2 is a clean rebuild of Jarvis with provider-independent intelligen
 
 ## Current milestone
 
-**0.1.1 - Wake/Sleep Presence Control**
+**0.1.2 - Intelligence Router & Core Delegation Orchestrator**
 
-0.1.1 makes the Desktop Alpha behave like an assistant that can be present without keeping a paid cloud voice session open. Jarvis now starts in a local **sleeping** presence state. While sleeping, Electron keeps one microphone stream on-device and sends 16 kHz PCM only to the loopback Core host; local Silero speech presence plus local whisper.cpp decide whether the completed utterance begins with the configured wake phrase. No OpenAI Realtime session exists until local wake confirmation.
+0.1.2 moves backend model/capability choice fully behind Jarvis Core. Realtime Mini may request help by describing the goal and a coarse capability category, but it never chooses Luna, a stronger model, a tool provider, memory implementation, or task worker. Core plans the delegation and emits an observable route decision.
 
-The default wake phrases remain **“Hey Jarvis”** and **“Jarvis”**. A wake phrase may be embedded in the full request: **“Jarvis, tell me something interesting about space”** wakes Jarvis and preserves the remainder of that same utterance instead of asking the user to repeat it. Once awake, Realtime 2.1 Mini + Cedar + WebRTC continue as the normal conversational frontend. Explicit end-of-interaction intent can return Jarvis to sleep, and 60 seconds of inactivity auto-sleeps the desktop. Typing while asleep is a deliberate manual wake path into the same Realtime conversation.
+Routine delegated reasoning stays on the configured default intelligence route. If an optional stronger OpenAI model is configured with `JARVIS_OPENAI_STRONG_MODEL`, Core can select the `strong` route for materially harder delegated reasoning while ordinary work remains on the cheaper/faster default. The selection is per-turn and never changes the conversation's default provider.
 
-Presence and activity remain separate concepts: `sleeping/awake` is lifecycle presence, while `listening/thinking/speaking/working/error` remains foreground activity. Jarvis Core remains authoritative; the renderer coordinates local media lanes and presentation only.
+Non-model capabilities are fail-closed. Durable memory, actions, current-data lookup, and background-task modes now have explicit Core capability slots. Until their authoritative handlers are implemented, Core returns `unavailable` instead of letting a language model pretend the operation succeeded. This is deliberate groundwork for later Memory, Tools, Permissions, and Tasks milestones.
 
-The local wake implementation is intentionally replaceable. whisper.cpp is suitable for this alpha because the runtime already exists and preserves full-command wake behavior, but it is heavier than a dedicated keyword spotter. A production low-end/mobile wake provider can replace it behind the local wake boundary without changing Conversation Core or Realtime.
+The 0.1.1 wake/sleep lifecycle remains unchanged: Jarvis sleeps locally with no paid Realtime session, wakes from the full utterance, uses Realtime Mini + Cedar + WebRTC while awake, and returns to local sleep on explicit intent or inactivity.
 
-First-time desktop/local voice setup:
+Optional stronger delegated reasoning can be configured in local `.env`:
 
-```powershell
-npm install
-powershell -ExecutionPolicy Bypass -File .\scripts\setup_whisper_cpp.ps1 -Backend cuda
-powershell -ExecutionPolicy Bypass -File .\scripts\setup_whisper_vad.ps1
+```text
+JARVIS_OPENAI_STRONG_MODEL=<validated stronger model id>
+JARVIS_OPENAI_STRONG_REASONING_EFFORT=low
 ```
+
+Leave `JARVIS_OPENAI_STRONG_MODEL` blank to keep every delegated reasoning request on the default route. Provider IDs remain configuration, not Core architecture.
 
 Run the app:
 
 ```powershell
 npm run desktop
 ```
-
-Electron builds the React renderer, starts/supervises the loopback Core host, arms local wake listening, and opens one native Jarvis window. Do not manually start a second Core on port 8765 while using `npm run desktop`.
 
 ## Requirements
 

@@ -22,11 +22,13 @@ from fastapi.responses import FileResponse, HTMLResponse
 import uvicorn
 
 from apps.runtime_api import create_app as create_runtime_api
+from core.intelligence import DelegationOrchestrator
 from core.runtime import IntelligenceProviderRouter, JarvisRuntime, RuntimeSettings
 from core.voice import LocalWakeListener, WakeSleepConfig
 from providers.stt.whisper_cpp import WhisperCppConfig, WhisperCppProvider
 from providers.vad import WhisperCppSileroVadDetector
 from providers.intelligence.openai import OpenAIProvider, OpenAIProviderConfig
+from providers.intelligence.openai.config import merged_environment
 from providers.voice_frontend.openai_realtime import (
     BrowserRealtimeRelay,
     OpenAIRealtimeConfig,
@@ -52,15 +54,34 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def build_runtime() -> tuple[JarvisRuntime, OpenAIProvider]:
+def build_runtime() -> tuple[JarvisRuntime, OpenAIProvider, tuple[OpenAIProvider, ...], DelegationOrchestrator]:
     intelligence_config = OpenAIProviderConfig.from_env(env_file=PROJECT_ROOT / ".env")
     # Keep backend intelligence independent from the client-facing WebRTC
-    # transport. Luna remains today's delegated route, not a desktop concern.
+    # transport. The conversational frontend asks Core for a goal; this
+    # composition root registers replaceable backend routes behind Core.
     intelligence_config = replace(intelligence_config, voice_transport="websocket")
     provider = OpenAIProvider(intelligence_config)
+    providers: list[OpenAIProvider] = [provider]
     runtime_settings = RuntimeSettings.from_env(env_file=PROJECT_ROOT / ".env")
     router = IntelligenceProviderRouter(default_route=runtime_settings.default_intelligence_route)
     router.register(runtime_settings.default_intelligence_route, provider, make_default=True)
+
+    env = merged_environment(PROJECT_ROOT / ".env")
+    strong_model = str(env.get("JARVIS_OPENAI_STRONG_MODEL") or "").strip()
+    strong_reasoning = str(env.get("JARVIS_OPENAI_STRONG_REASONING_EFFORT") or "low").strip().lower() or "low"
+    if strong_reasoning not in {"none", "low", "medium", "high", "xhigh", "max"}:
+        raise ValueError(f"Unsupported JARVIS_OPENAI_STRONG_REASONING_EFFORT={strong_reasoning!r}")
+    if strong_model and strong_model != intelligence_config.model:
+        strong_provider = OpenAIProvider(
+            replace(
+                intelligence_config,
+                model=strong_model,
+                reasoning_effort=strong_reasoning,
+            )
+        )
+        router.register("strong", strong_provider)
+        providers.append(strong_provider)
+
     runtime = JarvisRuntime(settings=runtime_settings, provider_router=router)
     runtime.start()
     runtime.create_conversation(
@@ -68,7 +89,13 @@ def build_runtime() -> tuple[JarvisRuntime, OpenAIProvider]:
         speaker_id="desktop-alpha-user",
         device_id="desktop-alpha",
     )
-    return runtime, provider
+    orchestrator = DelegationOrchestrator(
+        provider_router=router,
+        default_route=runtime_settings.default_intelligence_route,
+        strong_route="strong",
+        strong_reasoning_level=strong_reasoning,
+    )
+    return runtime, provider, tuple(providers), orchestrator
 
 
 def _emit_presence(runtime: JarvisRuntime, target: str, reason: str) -> None:
@@ -184,11 +211,18 @@ def build_wake_service(runtime: JarvisRuntime) -> DesktopWakeService:
 class DesktopRealtimeSession:
     """Own one renderer Realtime session without giving the renderer Core authority."""
 
-    def __init__(self, *, runtime: JarvisRuntime, config: OpenAIRealtimeConfig) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: JarvisRuntime,
+        config: OpenAIRealtimeConfig,
+        delegation_orchestrator: DelegationOrchestrator | None = None,
+    ) -> None:
         if runtime.conversation is None:
             raise RuntimeError("JarvisRuntime conversation must exist before desktop voice starts")
         self.runtime = runtime
         self.config = config
+        self.delegation_orchestrator = delegation_orchestrator
         self._relay: BrowserRealtimeRelay | None = None
         self._bridge: RealtimeCoreBridge | None = None
         self._event_task: asyncio.Task[None] | None = None
@@ -209,7 +243,11 @@ class DesktopRealtimeSession:
                 await websocket.close(code=1013, reason="desktop realtime session already active")
                 return
             relay = BrowserRealtimeRelay()
-            bridge = RealtimeCoreBridge(conversation=self.runtime.conversation, relay=relay)
+            bridge = RealtimeCoreBridge(
+                conversation=self.runtime.conversation,
+                relay=relay,
+                delegation_orchestrator=self.delegation_orchestrator,
+            )
             self._relay = relay
             self._bridge = bridge
             self._event_task = asyncio.create_task(
@@ -354,9 +392,15 @@ def create_desktop_app(
     realtime_config: OpenAIRealtimeConfig,
     static_dir: Path = DEFAULT_STATIC_DIR,
     wake_service: DesktopWakeService | None = None,
+    delegation_orchestrator: DelegationOrchestrator | None = None,
+    additional_providers: tuple[OpenAIProvider, ...] = (),
 ) -> FastAPI:
     version = (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    session = DesktopRealtimeSession(runtime=runtime, config=realtime_config)
+    session = DesktopRealtimeSession(
+        runtime=runtime,
+        config=realtime_config,
+        delegation_orchestrator=delegation_orchestrator,
+    )
     wake_config = wake_service.listener.config if wake_service is not None else WakeSleepConfig.from_env(env_file=PROJECT_ROOT / ".env")
     _emit_presence(runtime, "sleeping", "desktop_start")
 
@@ -368,7 +412,12 @@ def create_desktop_app(
             await session.stop()
             if wake_service is not None:
                 await wake_service.close()
-            await provider.close()
+            closed: set[int] = set()
+            for backend_provider in (provider, *additional_providers):
+                if id(backend_provider) in closed:
+                    continue
+                closed.add(id(backend_provider))
+                await backend_provider.close()
             runtime.close()
 
     app = FastAPI(title="Jarvis Desktop Alpha Host", version=version, docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -391,6 +440,8 @@ def create_desktop_app(
             "transport": "webrtc",
             "presence": snapshot.conversation.presence_state if snapshot.conversation else None,
             "local_wake": wake_service is not None,
+            "delegation_router": delegation_orchestrator is not None,
+            "backend_routes": [route.name for route in runtime.provider_router.routes()],
         }
 
     @app.get("/api/desktop/config")
@@ -485,7 +536,7 @@ def main() -> int:
     if not 1024 <= args.port <= 65535:
         raise SystemExit("[FAIL] --port must be between 1024 and 65535")
 
-    runtime, provider = build_runtime()
+    runtime, provider, backend_providers, delegation_orchestrator = build_runtime()
     realtime_config = OpenAIRealtimeConfig.from_env(env_file=PROJECT_ROOT / ".env")
     if not realtime_config.api_key:
         runtime.close()
@@ -505,6 +556,8 @@ def main() -> int:
         realtime_config=realtime_config,
         static_dir=args.static_dir,
         wake_service=wake_service,
+        delegation_orchestrator=delegation_orchestrator,
+        additional_providers=tuple(item for item in backend_providers if item is not provider),
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
