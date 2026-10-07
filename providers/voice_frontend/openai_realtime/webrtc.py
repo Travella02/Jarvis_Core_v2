@@ -21,6 +21,7 @@ from providers.voice_frontend.openai_realtime.config import OpenAIRealtimeConfig
 
 
 DELEGATE_TOOL_NAME = "delegate_to_jarvis_core"
+ROUTE_TURN_TOOL_NAME = "route_jarvis_turn"
 SLEEP_TOOL_NAME = "sleep_jarvis"
 EXPAND_RESPONSE_TOOL_NAME = "request_expanded_response"
 DEFAULT_REALTIME_MAX_OUTPUT_TOKENS = 1024
@@ -41,11 +42,20 @@ Jarvis Core delegation policy:
 - Delegate when deeper or longer reasoning would materially improve the answer, or when you are uncertain enough that Jarvis Core should route to a stronger model.
 - Preserve the user's constraints faithfully in the delegated request. Never claim a delegated action or result succeeded before Core returns it.
 
-Natural acknowledgement policy:
-- A brief acknowledgement such as 'Sure, I'm on it' is appropriate when the user actually asked Jarvis to do work, perform an action, search, coordinate, research, or wait for a result.
-- Do not add waiting language before an answer you can give immediately.
-- A brief reaction, dry observation, or bit of wit is welcome when it fits, but it must flow directly into the useful answer rather than becoming filler.
+Delegation speech discipline:
+- When you decide to call delegate_to_jarvis_core, that tool call must be the initial output for the response. Do not speak an acknowledgement, plan, or filler before the tool call.
+- Never say or imply that an action, background task, search, lookup, or other delegated capability is starting, queued, prepared, possible, or completed until Jarvis Core returns an authoritative result confirming that state.
+- The desktop WORKING state is the acknowledgement while delegated work is pending. After Core returns, speak only the verified result.
 - While Core is working, remain available for interruption or follow-up. If asked about a pending result, say that it is still in progress rather than inventing an answer.
+
+Internal implementation privacy:
+- Core, delegation, backend routing, tool calls, model/provider selection, and internal layers are implementation details. Never narrate or name them in a user-facing response unless the user is explicitly asking how Jarvis is architected.
+- If a user says something like 'use your Core' as part of an ordinary task request, treat that only as an internal routing preference. Do not echo it, announce it, or say that you are pulling in Core. Start with the useful result once it is available.
+- Never expose phrases such as 'talking to Core', 'delegating this', 'routing this', 'calling a tool', or 'using the backend' as conversational filler.
+
+Natural acknowledgement policy:
+- A brief acknowledgement such as 'Sure, I'm on it' can still be natural for work that does not require a Core delegation, but do not add waiting language before an answer you can give immediately.
+- A brief reaction, dry observation, or bit of wit is welcome when it fits, but it must flow directly into the useful answer rather than becoming filler.
 
 Spoken-length policy (high priority):
 - Response-specific instructions may impose a concise conversational shape for an individual turn. Follow those response instructions precisely.
@@ -81,8 +91,27 @@ Always finish the sentence you start. Do not trail off.
 {JARVIS_CONCISE_EXAMPLES}
 """
 
-CORE_RESULT_RESPONSE_INSTRUCTIONS = f"""Jarvis Core has returned authoritative backend work.
-Present the useful result naturally and faithfully in at most two compact spoken sentences unless the user explicitly requested a detailed result. Do not repeat the request or narrate routing.
+
+TURN_ROUTER_INSTRUCTIONS = """This is an internal routing pass. Do not answer the user in this response.
+Call route_jarvis_turn exactly once and make that function call the only semantic output.
+Choose direct for ordinary conversation/general knowledge that the realtime layer can answer immediately.
+Choose reasoning when the user explicitly asks to use Jarvis Core or when deeper backend reasoning is needed.
+Choose memory for durable/private memory retrieval, action for external/device/tool execution, current_data for fresh external information, long_task for durable/background work, and sleep only for a clear request to end the Jarvis interaction.
+Preserve the user's actual request faithfully in the request field. Never include a spoken acknowledgement, plan, filler, or user-facing prose in this routing pass.
+"""
+
+DIRECT_ROUTED_RESPONSE_INSTRUCTIONS = f"""The silent routing pass selected a direct realtime answer.
+Answer the user's latest request now. Start with the useful answer itself; do not mention routing, Core, tools, models, providers, or the routing function.
+Do not say 'let me think', 'let me check', 'give me a moment', or any other waiting/filler phrase.
+For an ordinary direct spoken answer, answer in at most two complete spoken sentences and normally no more than about 35 words unless the user explicitly requested detail. Always finish the sentence you start.
+{JARVIS_PERSONALITY_INSTRUCTIONS}
+{JARVIS_CONCISE_EXAMPLES}
+"""
+
+CORE_RESULT_RESPONSE_INSTRUCTIONS = f"""Authoritative work has returned a verified result.
+Read the function result status first and present only what was actually verified. Never describe an unavailable, failed, cancelled, or superseded capability as started, queued, prepared, attempted successfully, or completed.
+If the status is unavailable, state the limitation plainly and stop; do not invent a workaround, ask for implementation details, or imply the work can begin in this build unless the user specifically asks for planning.
+Present completed useful results naturally and faithfully in at most two compact spoken sentences unless the user explicitly requested a detailed result. Do not repeat the request or narrate Core, delegation, backend routing, tools, models, or providers.
 Keep Jarvis's personality intact; concise means efficient, not flat.
 {JARVIS_PERSONALITY_INSTRUCTIONS}
 """
@@ -92,6 +121,31 @@ Use the larger response budget for this response only. Give the requested depth 
 {JARVIS_PERSONALITY_INSTRUCTIONS}
 """
 
+
+ROUTE_TURN_TOOL = {
+    "type": "function",
+    "name": ROUTE_TURN_TOOL_NAME,
+    "description": (
+        "Internal pre-speech router. Classify the latest user turn before any audible answer is allowed. "
+        "This function call is never narrated to the user."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "route": {
+                "type": "string",
+                "enum": ["direct", "reasoning", "memory", "action", "current_data", "long_task", "sleep"],
+                "description": "The single route that should own this turn before any user-facing speech.",
+            },
+            "request": {
+                "type": "string",
+                "description": "A faithful, self-contained statement of the user's actual request, preserving constraints.",
+            },
+        },
+        "required": ["route", "request"],
+        "additionalProperties": False,
+    },
+}
 
 DELEGATE_TOOL = {
     "type": "function",

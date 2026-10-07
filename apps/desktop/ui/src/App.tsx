@@ -6,13 +6,21 @@ type JarvisState = 'sleeping' | 'waking' | 'connecting' | 'idle' | 'listening' |
 type RealtimeEvent = {
   type?: string;
   delta?: string;
+  response_id?: string;
+  item_id?: string;
+  name?: string;
+  arguments?: string;
+  item?: { id?: string; type?: string; name?: string };
   error?: { message?: string };
-  response?: { status?: string; output?: Array<{ type?: string }> };
+  response?: { id?: string; status?: string; output?: Array<{ id?: string; type?: string; name?: string }> };
 };
 
 type ResponsePolicy = {
   max_output_tokens?: number | 'inf';
   instructions?: string;
+  output_modalities?: string[];
+  tools?: unknown[];
+  tool_choice?: string | { type: 'function'; name: string };
 };
 
 type Particle = {
@@ -370,6 +378,9 @@ export default function App() {
   const audioPlayingRef = useRef(false);
   const turnCounterRef = useRef(0);
   const responsePolicyRef = useRef<ResponsePolicy | null>(null);
+  const activeResponseIdRef = useRef('');
+  const suppressedResponseIdsRef = useRef<Set<string>>(new Set());
+  const responseMessageItemIdsRef = useRef<Map<string, Set<string>>>(new Map());
   const latencyRef = useRef<LatencyMarks>({ turn: 0 });
 
   const setStateSafely = (next: JarvisState, message?: string) => {
@@ -401,6 +412,91 @@ export default function App() {
 
   const forwardToCore = (event: RealtimeEvent) => {
     sendControlMessage({ kind: 'realtime_event', event });
+  };
+
+  const responseIdForEvent = (event: RealtimeEvent): string => {
+    return String(event.response_id || event.response?.id || activeResponseIdRef.current || '').trim();
+  };
+
+  const responseIsSuppressed = (event: RealtimeEvent): boolean => {
+    const responseId = responseIdForEvent(event);
+    return Boolean(responseId && suppressedResponseIdsRef.current.has(responseId));
+  };
+
+  const rememberResponseItem = (event: RealtimeEvent) => {
+    if (event.type !== 'response.output_item.added') return;
+    const responseId = responseIdForEvent(event);
+    const itemId = String(event.item?.id || event.item_id || '').trim();
+    if (!responseId || !itemId || event.item?.type !== 'message') return;
+    const ids = responseMessageItemIdsRef.current.get(responseId) || new Set<string>();
+    ids.add(itemId);
+    responseMessageItemIdsRef.current.set(responseId, ids);
+  };
+
+  const trimSuppressedResponses = () => {
+    while (suppressedResponseIdsRef.current.size > 64) {
+      const oldest = suppressedResponseIdsRef.current.values().next().value;
+      if (!oldest) break;
+      suppressedResponseIdsRef.current.delete(oldest);
+      responseMessageItemIdsRef.current.delete(oldest);
+    }
+  };
+
+  const suppressDelegationPreamble = (event: RealtimeEvent) => {
+    const responseId = responseIdForEvent(event);
+    if (responseId) {
+      suppressedResponseIdsRef.current.add(responseId);
+      trimSuppressedResponses();
+    }
+
+    // A delegation response is internal control traffic, not user-facing speech.
+    // If the provider generated a pre-tool sentence anyway, mute and purge it before
+    // buffered WebRTC audio or transcript pacing can leak internal routing narration.
+    if (audioRef.current) audioRef.current.muted = true;
+    audioPlayingRef.current = false;
+    clearCaptionPacing(true);
+
+    const dc = dcRef.current;
+    if (dc?.readyState === 'open') {
+      try { dc.send(JSON.stringify({ type: 'output_audio_buffer.clear' })); } catch (_) { /* best effort */ }
+    }
+    setStateSafely('working', 'Working');
+  };
+
+  const suppressTurnRouterOutput = (event: RealtimeEvent) => {
+    const responseId = responseIdForEvent(event);
+    if (responseId) {
+      suppressedResponseIdsRef.current.add(responseId);
+      trimSuppressedResponses();
+    }
+
+    // Repair3 makes the routing response text-only at response.create, so there
+    // should be no audio to hear. Keep a client-side mute/clear as defense in
+    // depth if a provider ever violates that response-level modality contract.
+    if (audioRef.current) audioRef.current.muted = true;
+    audioPlayingRef.current = false;
+    clearCaptionPacing(true);
+    const dc = dcRef.current;
+    if (dc?.readyState === 'open') {
+      try { dc.send(JSON.stringify({ type: 'output_audio_buffer.clear' })); } catch (_) { /* best effort */ }
+    }
+    setStateSafely('thinking', 'Thinking');
+  };
+
+  const deleteSuppressedResponseMessages = (event: RealtimeEvent) => {
+    const responseId = responseIdForEvent(event);
+    if (!responseId) return;
+    const itemIds = responseMessageItemIdsRef.current.get(responseId);
+    if (!itemIds?.size) return;
+    const dc = dcRef.current;
+    if (dc?.readyState === 'open') {
+      for (const itemId of itemIds) {
+        try {
+          dc.send(JSON.stringify({ type: 'conversation.item.delete', item_id: itemId }));
+        } catch (_) { /* best effort */ }
+      }
+    }
+    responseMessageItemIdsRef.current.delete(responseId);
   };
 
   const sendLatencySummary = () => {
@@ -453,6 +549,15 @@ export default function App() {
       captionTimerRef.current = window.setTimeout(tick, captionCharacterDelay(character, backlog));
     };
     captionTimerRef.current = window.setTimeout(tick, initialDelay);
+  };
+
+  const finalizeCaptionPacing = () => {
+    if (captionTimerRef.current !== null) window.clearTimeout(captionTimerRef.current);
+    captionTimerRef.current = null;
+    captionIndexRef.current = captionSourceRef.current.length;
+    if (captionSourceRef.current) {
+      setCaption(normalizeCaptionForDisplay(captionSourceRef.current));
+    }
   };
 
   const enqueueCaptionDelta = (delta: string) => {
@@ -610,6 +715,9 @@ export default function App() {
     dcRef.current = null;
     pcRef.current = null;
     wsRef.current = null;
+    activeResponseIdRef.current = '';
+    suppressedResponseIdsRef.current.clear();
+    responseMessageItemIdsRef.current.clear();
     if (notifyServer) {
       try { await fetch('/api/realtime/end', { method: 'POST' }); } catch (_) { /* best effort */ }
     }
@@ -678,12 +786,36 @@ export default function App() {
       requestNormalRealtimeResponse();
     } else if (type === 'response.created') {
       latencyRef.current.responseCreated ??= now;
+      const responseId = responseIdForEvent(event);
+      if (responseId) activeResponseIdRef.current = responseId;
+      if (!responseId || !suppressedResponseIdsRef.current.has(responseId)) {
+        if (audioRef.current) audioRef.current.muted = false;
+      }
       clearCaptionPacing(true);
       setStateSafely('thinking', 'Thinking');
+    } else if (type === 'response.output_item.added') {
+      rememberResponseItem(event);
+      if (event.item?.type === 'function_call' && event.item?.name === 'route_jarvis_turn') {
+        clearIdleTimer();
+        suppressTurnRouterOutput(event);
+      } else if (event.item?.type === 'function_call' && event.item?.name === 'delegate_to_jarvis_core') {
+        clearIdleTimer();
+        suppressDelegationPreamble(event);
+      }
     } else if (type === 'response.output_audio_transcript.delta') {
+      if (responseIsSuppressed(event)) return;
       latencyRef.current.firstTranscript ??= now;
       enqueueCaptionDelta(event.delta || '');
     } else if (type === 'output_audio_buffer.started') {
+      if (responseIsSuppressed(event)) {
+        if (audioRef.current) audioRef.current.muted = true;
+        const dc = dcRef.current;
+        if (dc?.readyState === 'open') {
+          try { dc.send(JSON.stringify({ type: 'output_audio_buffer.clear' })); } catch (_) { /* best effort */ }
+        }
+        return;
+      }
+      if (audioRef.current) audioRef.current.muted = false;
       clearIdleTimer();
       latencyRef.current.firstAudio ??= now;
       audioPlayingRef.current = true;
@@ -695,6 +827,7 @@ export default function App() {
         sendLatencySummary();
       }
     } else if (type === 'output_audio_buffer.stopped') {
+      if (responseIsSuppressed(event)) return;
       // WebRTC owns playout. Stay SPEAKING until its output buffer is actually drained.
       audioPlayingRef.current = false;
       if (captionTimerRef.current !== null) window.clearTimeout(captionTimerRef.current);
@@ -709,13 +842,41 @@ export default function App() {
       setJarvisState((current) => current === 'speaking' ? 'idle' : current);
       noteActivity();
     } else if (type === 'response.function_call_arguments.done') {
-      clearIdleTimer();
-      setStateSafely('working', 'Working');
+      if (event.name === 'route_jarvis_turn') {
+        clearIdleTimer();
+        suppressTurnRouterOutput(event);
+        try {
+          const routed = JSON.parse(String(event.arguments || '{}'));
+          if (routed?.route && !['direct', 'sleep'].includes(String(routed.route))) {
+            setStateSafely('working', 'Working');
+          }
+        } catch (_) { /* routing schema is validated provider-side; keep Thinking on malformed telemetry */ }
+      } else if (event.name === 'delegate_to_jarvis_core') {
+        clearIdleTimer();
+        suppressDelegationPreamble(event);
+      }
     } else if (type === 'response.done') {
+      const routingCall = event.response?.output?.find(
+        (item) => item?.type === 'function_call' && item?.name === 'route_jarvis_turn',
+      );
+      const delegationCall = event.response?.output?.find(
+        (item) => item?.type === 'function_call' && item?.name === 'delegate_to_jarvis_core',
+      );
       const hasFunctionCall = Boolean(event.response?.output?.some((item) => item?.type === 'function_call'));
-      if (hasFunctionCall) {
-        clearCaptionPacing(false);
-        setStateSafely('working', 'Working');
+      if (routingCall) {
+        // The first response is an internal text-only routing transaction. Nothing
+        // from it belongs in the user-facing audio/caption surface or chat history.
+        suppressTurnRouterOutput(event);
+        deleteSuppressedResponseMessages(event);
+      } else if (delegationCall) {
+        // Provider-generated pre-tool speech is internal routing noise. It is intentionally
+        // discarded rather than preserved; only the post-tool authoritative answer is visible/audible.
+        suppressDelegationPreamble(event);
+        // Wait until response.done before removing any generated assistant message item so
+        // Realtime never receives an item-delete request for content that is still streaming.
+        deleteSuppressedResponseMessages(event);
+      } else if (hasFunctionCall) {
+        clearCaptionPacing(true);
       } else if (event.response?.status === 'completed') {
         captionResponseCompleteRef.current = true;
         captionShouldIdleRef.current = !audioPlayingRef.current && !captionAudioStartedRef.current;

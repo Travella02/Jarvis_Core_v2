@@ -6,17 +6,17 @@
   "status": "live_acceptance_candidate",
   "required_previous_version": "0.1.1",
   "required_previous_checkpoint": "accepted 0.1.1 Wake/Sleep Presence Control through Repair7 source tree",
-  "scope": "Provider-neutral Core delegation planning, per-turn backend provider routing, optional strong reasoning route, and fail-closed capability slots for memory/actions/current-data/background tasks while Realtime remains only the conversational frontend.",
+  "scope": "Provider-neutral Core delegation planning plus a desktop pre-speech routing gate: route ownership is resolved in a silent text-only forced-function response before any user-facing audio can be created.",
   "automated_test_command": "python -m unittest discover -s tests -v",
-  "automated_test_count": 493,
-  "focused_test_command": "python -m unittest tests.unit.test_0_1_2_intelligence_router tests.integration.test_0_1_2_realtime_delegation_router tests.integration.test_0_1_2_conversation_provider_override tests.integration.test_0_0_9_repair4_realtime_core_delegation tests.unit.test_0_0_6_provider_router -v",
-  "focused_test_count": 19,
+  "automated_test_count": 514,
+  "focused_test_command": "python -m unittest tests.unit.test_0_1_2_repair3_pre_speech_routing_gate tests.integration.test_0_1_2_repair3_routing_bridge tests.unit.test_0_1_2_repair2_delegation_preamble_suppression tests.unit.test_0_1_2_repair1_delegation_caption_truthfulness tests.unit.test_0_1_2_intelligence_router tests.integration.test_0_1_2_realtime_delegation_router tests.integration.test_0_1_2_conversation_provider_override tests.integration.test_0_0_9_repair4_realtime_core_delegation -v",
+  "focused_test_count": 36,
   "desktop_static_check": "npm run desktop:check",
   "desktop_run_command": "npm run desktop",
-  "testing_guide": "docs/TESTING_GUIDE_0.1.2.md",
+  "testing_guide": "docs/TESTING_GUIDE_0.1.2_REPAIR3.md",
   "canonical_handoff": "Jarvis_Core_v2_Cloud_First_Master_Handoff_2026-09-15.pdf",
   "v1_reference": "Reference_jarvis_corev1/Jarvis_0.3.6_clean_checkpoint.zip",
-  "live_acceptance": "pending default reasoning route, optional strong route, fail-closed unsupported capability, wake/sleep regression confirmation",
+  "live_acceptance": "pending Repair3 pre-speech routing tests: reasoning delegation, fail-closed background task, direct-response latency regression, and sleep regression",
   "delegation": {
     "frontend_authority": "goal + coarse capability category only",
     "core_authority": "capability handler + backend provider/model route",
@@ -30,7 +30,8 @@
     "provider override is per-turn and never mutates Conversation Core default provider",
     "unsupported action/memory/current-data/background-task work never falls through to model-generated fake success",
     "Electron/React remains a thin client; Jarvis Core remains authoritative",
-    "Realtime Mini/Cedar/WebRTC, backend providers, wake providers, and future capability handlers remain replaceable"
+    "Realtime Mini/Cedar/WebRTC, backend providers, wake providers, and future capability handlers remain replaceable",
+    "desktop route ownership is resolved in a forced text-only function response before any audible response; final spoken responses have tools disabled"
   ],
   "known_limitations": [
     "Memory 2.0 capability handler is not implemented yet",
@@ -38,7 +39,8 @@
     "current-data lookup capability is not implemented yet",
     "durable background task worker is not implemented yet",
     "strong backend model route is opt-in and requires a separately validated model ID in local configuration",
-    "initial hard-reasoning routing policy is deterministic and local rather than model-classified"
+    "initial hard-reasoning routing policy is deterministic and local rather than model-classified",
+    "direct desktop turns now include a silent routing inference before audible generation; live latency must be accepted before commit"
   ],
   "files": {
     ".env.example": "e98f65cab3945b23e76268f3f2439aee386db464ea6c97cbe107d63f3e5acf72",
@@ -51,9 +53,9 @@
     "core/intelligence/delegation.py": "a0a8ec53c12fa6a9d888696fa98f0df92ed602220995cd5e134b0c347377c53f",
     "core/runtime/providers.py": "e9bd43ccf66048201fce5c2e5b1ae2f44448739ada5f6cbd0a66906b2e3b2de6",
     "core/conversation/engine.py": "fcd4be6aedcec73379885b145cbb041692b3ec4470f807d1abdbc80842282f40",
-    "apps/desktop_alpha.py": "21e1623c7cb9a48f2a51fdc5b7ca837f757e8ac430160d1524d6956eaa150b80",
-    "providers/voice_frontend/openai_realtime/bridge.py": "2ac68b784e685b0de5e02601421978717764e76eebfa5119247322bc353f4222",
-    "providers/voice_frontend/openai_realtime/webrtc.py": "6853a40015792c96e5c667a5b511e3d8aa73a1e64be048fdb8cf440250b8d4df",
+    "apps/desktop_alpha.py": "5b6165c6c637c6e161f1258c46026a4c88e67f4771f1cb7854bc088d4a7f9b4e",
+    "providers/voice_frontend/openai_realtime/bridge.py": "a474504f0cb8b93e32b2374397bf7411d4a54c1d2e522adc757b3d10f094e11c",
+    "providers/voice_frontend/openai_realtime/webrtc.py": "4105cb499b2bfaf8b3c2c58fbbe6ff218bfde03d46b86c77b68d00b8500c95c4",
     "docs/ARCHITECTURE_DECISIONS.md": "41799f7bbc28149ffa9541597ba9199184a60061220707ae8943a1c24a467c08",
     "docs/PATCH_NOTES_0.1.2.md": "75b36cc418eb4ae0c72264e87ec0f2df6801fc0f2f6945df8da910ea866edd52",
     "docs/TESTING_GUIDE_0.1.2.md": "bb0953762f64ee3bc512d3b27c8b46da2c898ae5e78bdec95525dcf40a4dd301",
@@ -62,6 +64,20 @@
     "tests/integration/test_0_1_2_realtime_delegation_router.py": "b5552095efa8404d4d25023a2b86fb49278c68697855fd2075b34694ba360ad8",
     "tests/integration/test_0_1_2_conversation_provider_override.py": "c6bbc3e26ac47da7e32c43ea0acbaf80a9331e61b9022874185fb374de59849b",
     "tests/unit/test_0_1_0_desktop_contract.py": "d1ef69b5b20beb8fa4251e00887fae3cc863fd42d0df27439ee990fb8fdf223b",
-    "tests/unit/test_foundation_structure.py": "975b891cbcc3eb7c4e70a1e7547e7a80ff8f8a08f0b1c58e07162f5433e79623"
+    "tests/unit/test_foundation_structure.py": "975b891cbcc3eb7c4e70a1e7547e7a80ff8f8a08f0b1c58e07162f5433e79623",
+    "apps/desktop/ui/src/App.tsx": "5ff51e79e9ffce4ee966c3d15aae195ebe4c3f44e27b2e042689878dd3e7bfb1",
+    "docs/PATCH_NOTES_0.1.2_REPAIR1.md": "0477ee0a43448f17fae784f8e43ed4971372dc2464f23362bc4be5b5f96001b0",
+    "docs/TESTING_GUIDE_0.1.2_REPAIR1.md": "a4f7d129b82cf668ad3455f67acd3da5cd9555bb7cd63c3976be643a17927b4a",
+    "issues/ISSUE_063_0_1_2_DELEGATION_PREAMBLE_CONTRADICTION_AND_CAPTION_TRUNCATION.md": "4601806e7cbd9f545d209af35439e9668d67a9494196a6be1e480b7e4c873de3",
+    "tests/unit/test_0_1_2_repair1_delegation_caption_truthfulness.py": "1b5056a105f9dac25d641bcd7f4916ce89562b7529426729fc9b49f5ad0d4e3e",
+    "tests/unit/test_0_1_2_repair2_delegation_preamble_suppression.py": "306cb3ef845c3f1e8787153e3049ae2fbcfb9a5b911c59cd3eb4ac52dd1d61e4",
+    "docs/PATCH_NOTES_0.1.2_REPAIR2.md": "9cdb79b349f08d3c1758b3e26f2581fd3bbe53b1a0a59f6c2cb486374fbcb89a",
+    "docs/TESTING_GUIDE_0.1.2_REPAIR2.md": "001496237be247963524b8b62110dfd911d4b3e74da88c69be5543bb1d01899e",
+    "issues/ISSUE_064_0_1_2_DELEGATION_PREAMBLE_STILL_LEAKED_AFTER_REPAIR1.md": "8b1e24a3f5b281e14d3a39f9632a0e1f10ea47d037d26a483d85e1efce812608",
+    "docs/PATCH_NOTES_0.1.2_REPAIR3.md": "e339ccb9bdccd409b14d8110078262e987dbf2f3d8114ec7d445ae760710d31d",
+    "docs/TESTING_GUIDE_0.1.2_REPAIR3.md": "19976c58bf3d9b9fb031744c1ed0eb32f8ffcb5b3d4cc532452f48456b825257",
+    "issues/ISSUE_065_0_1_2_PRE_TOOL_AUDIO_RACE_REQUIRES_PRE_SPEECH_ROUTING.md": "ca78c5185d29a418d753d19e7bb2900376466ca925328f1279e646ee151ff331",
+    "tests/unit/test_0_1_2_repair3_pre_speech_routing_gate.py": "80df9a018f94f44d3e98815801efe764becbf2551d884b23b78965d0081b5675",
+    "tests/integration/test_0_1_2_repair3_routing_bridge.py": "6bcb2e170e79aff7c8e1d16efa6fd6c01a707076c014b4b18aa90a0719f387bb"
   }
 }

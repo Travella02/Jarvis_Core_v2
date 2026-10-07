@@ -1,0 +1,61 @@
+{
+  "patch": "0.1.2-repair3",
+  "required_version": "0.1.2",
+  "baseline": "0.1.2-repair2 applied live-test candidate",
+  "v1_reference_compared": "Reference_jarvis_corev1/Jarvis_0.3.6_clean_checkpoint.zip",
+  "strategy": "forced text-only pre-speech route_jarvis_turn response, then tool-disabled audio continuation",
+  "files": {
+    "apps/desktop/ui/src/App.tsx": {
+      "baseline_sha256": "f3c8acda365c053707beee2137a02ff9d174c4d40c7744f2a8b670c8e99cbef2",
+      "baseline_normalized_sha256": "f3c8acda365c053707beee2137a02ff9d174c4d40c7744f2a8b670c8e99cbef2",
+      "payload_sha256": "5ff51e79e9ffce4ee966c3d15aae195ebe4c3f44e27b2e042689878dd3e7bfb1"
+    },
+    "apps/desktop_alpha.py": {
+      "baseline_sha256": "960c9aa87af387ede7e8d4938f1c83caf8601e45af8b8c4f2e06fcea444d893f",
+      "baseline_normalized_sha256": "21e1623c7cb9a48f2a51fdc5b7ca837f757e8ac430160d1524d6956eaa150b80",
+      "payload_sha256": "5b6165c6c637c6e161f1258c46026a4c88e67f4771f1cb7854bc088d4a7f9b4e"
+    },
+    "providers/voice_frontend/openai_realtime/webrtc.py": {
+      "baseline_sha256": "b8061065ec121d636a0a12e7e9d76b9b0862a70cfaf1225eedc3bf5b6ec5f5a5",
+      "baseline_normalized_sha256": "b8061065ec121d636a0a12e7e9d76b9b0862a70cfaf1225eedc3bf5b6ec5f5a5",
+      "payload_sha256": "4105cb499b2bfaf8b3c2c58fbbe6ff218bfde03d46b86c77b68d00b8500c95c4"
+    },
+    "providers/voice_frontend/openai_realtime/bridge.py": {
+      "baseline_sha256": "154d227a67eec059dfd137d73ea1771b35cdf69b1647f21edd21980b27206a71",
+      "baseline_normalized_sha256": "154d227a67eec059dfd137d73ea1771b35cdf69b1647f21edd21980b27206a71",
+      "payload_sha256": "a474504f0cb8b93e32b2374397bf7411d4a54c1d2e522adc757b3d10f094e11c"
+    },
+    "RELEASE_MANIFEST.json": {
+      "baseline_sha256": "00bcc995659490b277e7228e6038fe497353c3a6e7f940ee0f1ac3679bdb4fd5",
+      "baseline_normalized_sha256": "00bcc995659490b277e7228e6038fe497353c3a6e7f940ee0f1ac3679bdb4fd5",
+      "payload_sha256": "9158df9b0449b4faecb52d06e0c707b7e3bed8a74d1ad6683aec42b4ac7ceee3"
+    },
+    "docs/PATCH_NOTES_0.1.2_REPAIR3.md": {
+      "baseline_sha256": null,
+      "baseline_normalized_sha256": null,
+      "payload_sha256": "e339ccb9bdccd409b14d8110078262e987dbf2f3d8114ec7d445ae760710d31d"
+    },
+    "docs/TESTING_GUIDE_0.1.2_REPAIR3.md": {
+      "baseline_sha256": null,
+      "baseline_normalized_sha256": null,
+      "payload_sha256": "19976c58bf3d9b9fb031744c1ed0eb32f8ffcb5b3d4cc532452f48456b825257"
+    },
+    "issues/ISSUE_065_0_1_2_PRE_TOOL_AUDIO_RACE_REQUIRES_PRE_SPEECH_ROUTING.md": {
+      "baseline_sha256": null,
+      "baseline_normalized_sha256": null,
+      "payload_sha256": "ca78c5185d29a418d753d19e7bb2900376466ca925328f1279e646ee151ff331"
+    },
+    "tests/unit/test_0_1_2_repair3_pre_speech_routing_gate.py": {
+      "baseline_sha256": null,
+      "baseline_normalized_sha256": null,
+      "payload_sha256": "80df9a018f94f44d3e98815801efe764becbf2551d884b23b78965d0081b5675"
+    },
+    "tests/integration/test_0_1_2_repair3_routing_bridge.py": {
+      "baseline_sha256": null,
+      "baseline_normalized_sha256": null,
+      "payload_sha256": "6bcb2e170e79aff7c8e1d16efa6fd6c01a707076c014b4b18aa90a0719f387bb"
+    }
+  },
+  "apply_script": "apply_0_1_2_repair3_patch.py",
+  "testing_guide": "docs/TESTING_GUIDE_0.1.2_REPAIR3.md"
+}

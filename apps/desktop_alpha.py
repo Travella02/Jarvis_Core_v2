@@ -39,6 +39,9 @@ from providers.voice_frontend.openai_realtime import (
 from providers.voice_frontend.openai_realtime.webrtc import (
     DESKTOP_REALTIME_MAX_OUTPUT_TOKENS,
     NORMAL_RESPONSE_INSTRUCTIONS,
+    ROUTE_TURN_TOOL,
+    ROUTE_TURN_TOOL_NAME,
+    TURN_ROUTER_INSTRUCTIONS,
 )
 
 
@@ -261,7 +264,12 @@ class DesktopRealtimeSession:
             "kind": "response_policy",
             "response": {
                 "max_output_tokens": DESKTOP_REALTIME_MAX_OUTPUT_TOKENS,
-                "instructions": NORMAL_RESPONSE_INSTRUCTIONS,
+                "instructions": NORMAL_RESPONSE_INSTRUCTIONS + "\n\n" + TURN_ROUTER_INSTRUCTIONS,
+                # Repair3 ports V1's pre-speech ownership rule: the first desktop
+                # response is a silent routing pass, never user-facing audio.
+                "output_modalities": ["text"],
+                "tools": [ROUTE_TURN_TOOL],
+                "tool_choice": {"type": "function", "name": ROUTE_TURN_TOOL_NAME},
             },
         })
 

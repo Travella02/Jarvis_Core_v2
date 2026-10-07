@@ -1,0 +1,46 @@
+{
+  "patch": "0.1.2-repair2",
+  "required_version": "0.1.2",
+  "baseline": "0.1.2-repair1 applied live-test candidate",
+  "v1_reference_compared": "Reference_jarvis_corev1/Jarvis_0.3.6_clean_checkpoint.zip",
+  "files": {
+    "apps/desktop/ui/src/App.tsx": {
+      "baseline_sha256": "f38b0cd936bde09da67dcb8483b6c62185921e915a4a881ee5b73d07aca5ae98",
+      "payload_sha256": "f3c8acda365c053707beee2137a02ff9d174c4d40c7744f2a8b670c8e99cbef2"
+    },
+    "providers/voice_frontend/openai_realtime/webrtc.py": {
+      "baseline_sha256": "9600082ff2cf801afeb7dbe2eacfb28d4e523d59de8b00fa206d6bc6c6cb0edf",
+      "payload_sha256": "b8061065ec121d636a0a12e7e9d76b9b0862a70cfaf1225eedc3bf5b6ec5f5a5"
+    },
+    "providers/voice_frontend/openai_realtime/bridge.py": {
+      "baseline_sha256": "1769eb97c9b637f89b36325a6bd2c7324046426c64f16e49f60e9accf4f26fbd",
+      "payload_sha256": "154d227a67eec059dfd137d73ea1771b35cdf69b1647f21edd21980b27206a71"
+    },
+    "RELEASE_MANIFEST.json": {
+      "baseline_sha256": "c8c5db584d228c12a78fd26e20383ce760b12c97c727938d1623808c01142258",
+      "payload_sha256": "00bcc995659490b277e7228e6038fe497353c3a6e7f940ee0f1ac3679bdb4fd5"
+    },
+    "docs/PATCH_NOTES_0.1.2_REPAIR2.md": {
+      "baseline_sha256": null,
+      "payload_sha256": "9cdb79b349f08d3c1758b3e26f2581fd3bbe53b1a0a59f6c2cb486374fbcb89a"
+    },
+    "docs/TESTING_GUIDE_0.1.2_REPAIR2.md": {
+      "baseline_sha256": null,
+      "payload_sha256": "001496237be247963524b8b62110dfd911d4b3e74da88c69be5543bb1d01899e"
+    },
+    "issues/ISSUE_064_0_1_2_DELEGATION_PREAMBLE_STILL_LEAKED_AFTER_REPAIR1.md": {
+      "baseline_sha256": null,
+      "payload_sha256": "8b1e24a3f5b281e14d3a39f9632a0e1f10ea47d037d26a483d85e1efce812608"
+    },
+    "tests/unit/test_0_1_2_repair1_delegation_caption_truthfulness.py": {
+      "baseline_sha256": "4afb4b26503ae7bf5fb1b0d202a20cab34547ee410ae94b75d5a2ea2d9bdb578",
+      "payload_sha256": "1b5056a105f9dac25d641bcd7f4916ce89562b7529426729fc9b49f5ad0d4e3e"
+    },
+    "tests/unit/test_0_1_2_repair2_delegation_preamble_suppression.py": {
+      "baseline_sha256": null,
+      "payload_sha256": "306cb3ef845c3f1e8787153e3049ae2fbcfb9a5b911c59cd3eb4ac52dd1d61e4"
+    }
+  },
+  "apply_script": "apply_0_1_2_repair2_patch.py",
+  "testing_guide": "docs/TESTING_GUIDE_0.1.2_REPAIR2.md"
+}
