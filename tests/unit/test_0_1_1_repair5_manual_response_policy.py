@@ -8,6 +8,7 @@ from providers.voice_frontend.openai_realtime.webrtc import (
     DEFAULT_REALTIME_MAX_OUTPUT_TOKENS,
     EXPANDED_REALTIME_MAX_OUTPUT_TOKENS,
     NORMAL_RESPONSE_INSTRUCTIONS,
+    TURN_ROUTER_INSTRUCTIONS,
     build_realtime_session,
 )
 
@@ -39,8 +40,9 @@ class ManualResponsePolicyTests(unittest.TestCase):
 
     def test_desktop_host_owns_policy_and_disables_provider_auto_creation(self) -> None:
         self.assertIn('"kind": "response_policy"', DESKTOP_HOST)
-        self.assertIn('"instructions": NORMAL_RESPONSE_INSTRUCTIONS', DESKTOP_HOST)
+        self.assertIn('"instructions": TURN_ROUTER_INSTRUCTIONS', DESKTOP_HOST)
         self.assertIn("auto_create_response=False", DESKTOP_HOST)
+        self.assertIn("DIRECT_ROUTED_RESPONSE_INSTRUCTIONS", BRIDGE)
 
     def test_renderer_manually_creates_voice_and_typed_responses(self) -> None:
         self.assertIn("const requestNormalRealtimeResponse", APP)

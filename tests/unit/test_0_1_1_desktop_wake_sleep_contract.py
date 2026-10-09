@@ -26,7 +26,7 @@ class DesktopWakeSleepContractTests(unittest.TestCase):
     def test_embedded_wake_command_is_preserved_into_same_realtime_session(self) -> None:
         self.assertIn("command_text", APP)
         self.assertIn("startRealtimeSession(command, 'local_wake_phrase')", APP)
-        self.assertIn("dispatchTextToRealtime(preservedCommand)", APP)
+        self.assertIn("dispatchTextToRealtime(preservedCommand, 'wake_transcript')", APP)
 
     def test_typed_input_can_wake_without_a_parallel_text_brain(self) -> None:
         self.assertIn("startRealtimeSession(text, 'typed_wake')", APP)

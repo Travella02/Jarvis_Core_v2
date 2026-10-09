@@ -1,0 +1,72 @@
+{
+  "patch": "0.1.2-repair5",
+  "required_version": "0.1.2",
+  "required_baseline": "0.1.2-repair4 applied source tree / checkpoint commit",
+  "scope": "Development conversation trace plus background-vs-immediate routing precision; preserves Repair3/4 pre-speech ownership gate.",
+  "v1_reference_reviewed": "Reference_jarvis_corev1/Jarvis_0.3.6_clean_checkpoint.zip",
+  "files": [
+    {
+      "path": ".env.example",
+      "baseline_sha256": "92ca073626e10ec3255da64cce1b0966dda7d5db4b682f2d3fb99f609ace6632",
+      "payload_sha256": "6ce5f27c27488fdec8ec96fb8c9496e66060b9f89f3ba11b699d061e4769fbe7"
+    },
+    {
+      "path": "apps/desktop_alpha.py",
+      "baseline_sha256": "d5b2311cb6b85c8c9b46bd197b8c80fc6a258a8e7119f885a67f7b8fd3605985",
+      "payload_sha256": "8cc2de51e8c5d0d772ee2c85076ca261209649462dd8e4bf1eed808055239627"
+    },
+    {
+      "path": "apps/desktop/ui/src/App.tsx",
+      "baseline_sha256": "0f0d101b3c1a62efa5f19bfc8df5a4a88d26370859042d1ba19bee15de545b6e",
+      "payload_sha256": "f6847cc59c877c5e7e2b1ea0cf4f068386fb24f2b8c25aace9103fdae27ac8f6"
+    },
+    {
+      "path": "providers/voice_frontend/openai_realtime/config.py",
+      "baseline_sha256": "9a646a07b8cc5c6823869307f6c44a56f58c4bec0e70d385ecc456d28ef03ed1",
+      "payload_sha256": "83c0d20dfa206e31caa4f19361cb7f02b82d692c5421f251ccfcc7b83fb53a91"
+    },
+    {
+      "path": "providers/voice_frontend/openai_realtime/webrtc.py",
+      "baseline_sha256": "884f005b76f2ed6026715479aaf4c2defbac3933ac823be7b85f73d59a883589",
+      "payload_sha256": "954f7a71c1d2273c29ac45293bb22f635d9a9aed562dfa1adf84eec400fc84c1"
+    },
+    {
+      "path": "tests/unit/test_0_1_1_desktop_wake_sleep_contract.py",
+      "baseline_sha256": "bd99bb803aca1409412a04023628d815c02fccd6c5e79f3fafc23793f9fbc103",
+      "payload_sha256": "e5b54808328466b5b394fdef3e86651b11b0ffce1e06157e2c80e882d0e6052d"
+    },
+    {
+      "path": "tests/unit/test_0_1_2_repair5_conversation_trace_and_long_task.py",
+      "baseline_sha256": null,
+      "payload_sha256": "cfe7521f5c98e2fa700ea1a23b90e1c518af7c89144d3ae9091ceebfe13a11a9"
+    },
+    {
+      "path": "docs/PATCH_NOTES_0.1.2_REPAIR5.md",
+      "baseline_sha256": null,
+      "payload_sha256": "0712e5cc7e07295aff6c4c1bc6d60e6e73090c3c1a8600de7e7f5ab8e3925923"
+    },
+    {
+      "path": "docs/TESTING_GUIDE_0.1.2_REPAIR5.md",
+      "baseline_sha256": null,
+      "payload_sha256": "2637f7c0b9e2c1b9ad02ffaca53ed5d01996b219937aecaadb9dae54554990a8"
+    },
+    {
+      "path": "issues/ISSUE_067_0_1_2_CONVERSATION_TRACE_AND_BACKGROUND_ROUTE_CLASSIFICATION.md",
+      "baseline_sha256": null,
+      "payload_sha256": "f6609adb9ee745b67e10588d9d8c9c1d8d485cea16a186f8ec0c44e35ce7de75"
+    },
+    {
+      "path": "RELEASE_MANIFEST.json",
+      "baseline_sha256": "f725b85d4e863dbc0af80244727709121d1979e8727887ae54b2f47af4fe3634",
+      "payload_sha256": "63cc6c09159f2bd9a3c865dbf1e0fc5c6938f67f2211a47955b0df506188f6e7"
+    }
+  ],
+  "validation": {
+    "focused_tests": "68 passed",
+    "full_tests": "527 passed, 1 existing skip",
+    "diagnostics": "Status: ok",
+    "desktop_check": "passed",
+    "tsx_syntax": "passed via TypeScript transpileModule",
+    "desktop_build": "live-machine validation required because node_modules is unavailable in build environment"
+  }
+}

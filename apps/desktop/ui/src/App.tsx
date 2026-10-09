@@ -3,16 +3,32 @@ import { FormEvent, useEffect, useRef, useState } from 'react';
 type PresenceState = 'sleeping' | 'awake';
 type JarvisState = 'sleeping' | 'waking' | 'connecting' | 'idle' | 'listening' | 'thinking' | 'speaking' | 'working' | 'error';
 
+type RealtimeContent = {
+  type?: string;
+  transcript?: string;
+  text?: string;
+};
+
+type RealtimeItem = {
+  id?: string;
+  type?: string;
+  name?: string;
+  role?: string;
+  content?: RealtimeContent[];
+};
+
 type RealtimeEvent = {
   type?: string;
   delta?: string;
+  transcript?: string;
   response_id?: string;
   item_id?: string;
   name?: string;
   arguments?: string;
-  item?: { id?: string; type?: string; name?: string };
+  call_id?: string;
+  item?: RealtimeItem;
   error?: { message?: string };
-  response?: { id?: string; status?: string; output?: Array<{ id?: string; type?: string; name?: string }> };
+  response?: { id?: string; status?: string; output?: RealtimeItem[] };
 };
 
 type ResponsePolicy = {
@@ -21,6 +37,8 @@ type ResponsePolicy = {
   output_modalities?: string[];
   tools?: unknown[];
   tool_choice?: string | { type: 'function'; name: string };
+  reasoning?: { effort?: string };
+  metadata?: Record<string, string>;
 };
 
 type Particle = {
@@ -40,6 +58,8 @@ type LatencyMarks = {
   speechStarted?: number;
   speechStopped?: number;
   responseCreated?: number;
+  routeDecided?: number;
+  route?: string;
   firstTranscript?: number;
   firstAudio?: number;
   reported?: boolean;
@@ -297,6 +317,19 @@ function normalizeCaptionForDisplay(value: string): string {
     .replace(/([,;:])(?=[A-Za-z0-9])/g, '$1 ');
 }
 
+function responseTranscript(response: RealtimeEvent['response']): string {
+  if (!response?.output) return '';
+  const pieces: string[] = [];
+  for (const item of response.output) {
+    if (item.type !== 'message' || !Array.isArray(item.content)) continue;
+    for (const content of item.content) {
+      const value = String(content.transcript || content.text || '').trim();
+      if (value) pieces.push(value);
+    }
+  }
+  return normalizeCaptionForDisplay(pieces.join(' ')).trim();
+}
+
 function captionCharacterDelay(character: string, backlog: number): number {
   let delay = 54;
   if (character === ' ') delay = 20;
@@ -381,6 +414,8 @@ export default function App() {
   const activeResponseIdRef = useRef('');
   const suppressedResponseIdsRef = useRef<Set<string>>(new Set());
   const responseMessageItemIdsRef = useRef<Map<string, Set<string>>>(new Map());
+  const userItemTurnsRef = useRef<Map<string, number>>(new Map());
+  const conversationTraceRef = useRef(true);
   const latencyRef = useRef<LatencyMarks>({ turn: 0 });
 
   const setStateSafely = (next: JarvisState, message?: string) => {
@@ -506,6 +541,12 @@ export default function App() {
     sendControlMessage({
       kind: 'desktop_latency',
       turn: marks.turn,
+      route: marks.route || null,
+      speech_end_to_route_ms: fromSpeechEnd(marks.routeDecided),
+      route_to_first_audio_ms:
+        marks.routeDecided !== undefined && marks.firstAudio !== undefined
+          ? Math.round(marks.firstAudio - marks.routeDecided)
+          : null,
       speech_end_to_response_created_ms: fromSpeechEnd(marks.responseCreated),
       speech_end_to_first_transcript_ms: fromSpeechEnd(marks.firstTranscript),
       speech_end_to_first_audio_ms: fromSpeechEnd(marks.firstAudio),
@@ -746,18 +787,34 @@ export default function App() {
   const requestNormalRealtimeResponse = (dc: RTCDataChannel | null = dcRef.current) => {
     if (!dc || dc.readyState !== 'open') return false;
     const event: Record<string, unknown> = { type: 'response.create' };
-    if (responsePolicyRef.current) event.response = responsePolicyRef.current;
+    if (responsePolicyRef.current) {
+      event.response = {
+        ...responsePolicyRef.current,
+        metadata: {
+          ...(responsePolicyRef.current.metadata || {}),
+          jarvis_turn: String(latencyRef.current.turn || turnCounterRef.current || 0),
+        },
+      };
+    }
     dc.send(JSON.stringify(event));
     return true;
   };
 
-  const dispatchTextToRealtime = (text: string) => {
+  const dispatchTextToRealtime = (text: string, source = 'typed') => {
     const dc = dcRef.current;
     const clean = text.trim();
     if (!clean || !dc || dc.readyState !== 'open') return false;
     turnCounterRef.current += 1;
     const now = performance.now();
     latencyRef.current = { turn: turnCounterRef.current, speechStarted: now, speechStopped: now };
+    if (conversationTraceRef.current) {
+      sendControlMessage({
+        kind: 'desktop_user',
+        turn: turnCounterRef.current,
+        source,
+        text: clean,
+      });
+    }
     clearCaptionPacing(true);
     setStateSafely('thinking', 'Thinking');
     dc.send(JSON.stringify({
@@ -770,9 +827,56 @@ export default function App() {
   };
 
   const handleRealtimeEvent = (event: RealtimeEvent) => {
-    forwardToCore(event);
     const type = event.type || '';
     const now = performance.now();
+    if (
+      (type === 'conversation.item.created' || type === 'conversation.item.added' || type === 'conversation.item.done')
+      && event.item?.role === 'user'
+      && event.item?.id
+    ) {
+      const itemId = String(event.item.id);
+      if (!userItemTurnsRef.current.has(itemId)) {
+        userItemTurnsRef.current.set(itemId, latencyRef.current.turn || turnCounterRef.current || 0);
+        while (userItemTurnsRef.current.size > 64) {
+          userItemTurnsRef.current.delete(userItemTurnsRef.current.keys().next().value || '');
+        }
+      }
+    }
+    if (type === 'conversation.item.input_audio_transcription.completed') {
+      const itemId = String(event.item_id || '');
+      const turn = userItemTurnsRef.current.get(itemId) || latencyRef.current.turn || turnCounterRef.current || 0;
+      const transcript = normalizeCaptionForDisplay(String(event.transcript || '')).trim();
+      if (conversationTraceRef.current && transcript) {
+        sendControlMessage({
+          kind: 'desktop_user',
+          turn,
+          source: 'voice',
+          text: transcript,
+        });
+      }
+      if (itemId) userItemTurnsRef.current.delete(itemId);
+    }
+    if (type === 'response.function_call_arguments.done' && event.name === 'route_jarvis_turn') {
+      try {
+        const routed = JSON.parse(String(event.arguments || '{}'));
+        const route = String(routed?.route || 'unknown');
+        latencyRef.current.routeDecided ??= now;
+        latencyRef.current.route = route;
+        sendControlMessage({
+          kind: 'desktop_route',
+          turn: latencyRef.current.turn,
+          call_id: String(event.call_id || ''),
+          route,
+          speech_end_to_route_ms:
+            latencyRef.current.speechStopped === undefined
+              ? null
+              : Math.round(now - latencyRef.current.speechStopped),
+        });
+      } catch (_) { /* malformed routing telemetry still flows to Core for fail-closed handling */ }
+    }
+    // Route telemetry is intentionally sent first so Core can bind this call_id
+    // to the visible turn before the matching function-call event starts work.
+    forwardToCore(event);
     if (type === 'input_audio_buffer.speech_started') {
       clearIdleTimer();
       turnCounterRef.current += 1;
@@ -878,6 +982,17 @@ export default function App() {
       } else if (hasFunctionCall) {
         clearCaptionPacing(true);
       } else if (event.response?.status === 'completed') {
+        if (conversationTraceRef.current) {
+          const text = responseTranscript(event.response) || normalizeCaptionForDisplay(captionSourceRef.current).trim();
+          if (text) {
+            sendControlMessage({
+              kind: 'desktop_reply',
+              turn: latencyRef.current.turn || turnCounterRef.current || 0,
+              source: latencyRef.current.route === 'direct' ? 'realtime' : 'core',
+              text,
+            });
+          }
+        }
         captionResponseCompleteRef.current = true;
         captionShouldIdleRef.current = !audioPlayingRef.current && !captionAudioStartedRef.current;
         if (!captionAudioStartedRef.current) {
@@ -905,7 +1020,7 @@ export default function App() {
   const startRealtimeSession = async (preservedCommand = '', reason = 'client_wake') => {
     if (stoppingRef.current) return;
     if (presenceRef.current === 'awake' && dcRef.current?.readyState === 'open') {
-      if (preservedCommand) dispatchTextToRealtime(preservedCommand);
+      if (preservedCommand) dispatchTextToRealtime(preservedCommand, 'wake_transcript');
       return;
     }
     await stopWakeListening();
@@ -988,7 +1103,7 @@ export default function App() {
         dc.onopen = () => { window.clearTimeout(timeout); resolve(); };
       });
       if (preservedCommand.trim()) {
-        dispatchTextToRealtime(preservedCommand);
+        dispatchTextToRealtime(preservedCommand, 'wake_transcript');
       } else {
         setStateSafely('idle', 'Ready');
         noteActivity();
@@ -1020,6 +1135,7 @@ export default function App() {
         if (response.ok) {
           const config = await response.json();
           if (Number(config.idle_sleep_seconds) > 0) idleSleepSecondsRef.current = Number(config.idle_sleep_seconds);
+          conversationTraceRef.current = config.conversation_trace !== false;
           const phrases = Array.isArray(config.wake_phrases) ? config.wake_phrases : [];
           if (phrases.length) wakePhraseRef.current = String(phrases[phrases.length - 1] || 'Jarvis');
         }
@@ -1089,7 +1205,7 @@ export default function App() {
       dc.send(JSON.stringify({ type: 'response.cancel' }));
       dc.send(JSON.stringify({ type: 'output_audio_buffer.clear' }));
     }
-    dispatchTextToRealtime(text);
+    dispatchTextToRealtime(text, 'typed');
   };
 
   const isUnavailable = jarvisState === 'connecting' || jarvisState === 'waking' || jarvisState === 'error';

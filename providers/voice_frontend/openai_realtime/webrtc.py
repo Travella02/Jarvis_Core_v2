@@ -27,6 +27,8 @@ EXPAND_RESPONSE_TOOL_NAME = "request_expanded_response"
 DEFAULT_REALTIME_MAX_OUTPUT_TOKENS = 1024
 EXPANDED_REALTIME_MAX_OUTPUT_TOKENS = 2048
 DESKTOP_REALTIME_MAX_OUTPUT_TOKENS = 2048
+ROUTER_REALTIME_MAX_OUTPUT_TOKENS = 512
+ROUTER_REALTIME_REASONING_EFFORT = "minimal"
 
 REALTIME_CONVERSATION_INSTRUCTIONS = f"""You are Jarvis's realtime conversational layer.
 Your priority is natural, human conversation: quick turn-taking, useful emotion, immediate interruption handling, and disciplined spoken length.
@@ -92,12 +94,16 @@ Always finish the sentence you start. Do not trail off.
 """
 
 
-TURN_ROUTER_INSTRUCTIONS = """This is an internal routing pass. Do not answer the user in this response.
-Call route_jarvis_turn exactly once and make that function call the only semantic output.
-Choose direct for ordinary conversation/general knowledge that the realtime layer can answer immediately.
-Choose reasoning when the user explicitly asks to use Jarvis Core or when deeper backend reasoning is needed.
-Choose memory for durable/private memory retrieval, action for external/device/tool execution, current_data for fresh external information, long_task for durable/background work, and sleep only for a clear request to end the Jarvis interaction.
-Preserve the user's actual request faithfully in the request field. Never include a spoken acknowledgement, plan, filler, or user-facing prose in this routing pass.
+TURN_ROUTER_INSTRUCTIONS = """Internal routing only. Call route_jarvis_turn exactly once; emit no user-facing prose.
+direct = ordinary conversation/general knowledge you can answer immediately.
+reasoning = the user explicitly requests Core or deeper backend reasoning is needed.
+memory = durable/private memory.
+action = external/device/tool work intended to execute and finish in the current interaction.
+current_data = fresh external information.
+long_task = durable, autonomous, queued, background, or extended work that must continue beyond the immediate interaction, including work the user expects to keep running while they are away.
+sleep = clear end-of-interaction request.
+If a request is both an action and background/durable work, choose long_task. The execution lifetime wins over the generic action label.
+For direct or sleep, omit request. For every Core-owned route, include one concise faithful request preserving the user's constraints.
 """
 
 DIRECT_ROUTED_RESPONSE_INSTRUCTIONS = f"""The silent routing pass selected a direct realtime answer.
@@ -135,14 +141,17 @@ ROUTE_TURN_TOOL = {
             "route": {
                 "type": "string",
                 "enum": ["direct", "reasoning", "memory", "action", "current_data", "long_task", "sleep"],
-                "description": "The single route that should own this turn before any user-facing speech.",
+                "description": (
+                    "The single route that should own this turn before any user-facing speech. "
+                    "Use long_task rather than action whenever the defining requirement is durable/background execution."
+                ),
             },
             "request": {
                 "type": "string",
-                "description": "A faithful, self-contained statement of the user's actual request, preserving constraints.",
+                "description": "Core routes only: one concise faithful statement of the user's request and constraints. Omit for direct or sleep.",
             },
         },
-        "required": ["route", "request"],
+        "required": ["route"],
         "additionalProperties": False,
     },
 }
@@ -227,10 +236,26 @@ def build_realtime_session(
     *,
     auto_create_response: bool = True,
     include_expand_response_tool: bool = True,
+    include_input_transcription: bool = False,
 ) -> dict[str, Any]:
     tools = [DELEGATE_TOOL, SLEEP_TOOL]
     if include_expand_response_tool:
         tools.append(EXPAND_RESPONSE_TOOL)
+    input_audio: dict[str, Any] = {
+        "turn_detection": {
+            "type": "semantic_vad",
+            "create_response": auto_create_response,
+            "interrupt_response": True,
+        }
+    }
+    if include_input_transcription:
+        # Development conversation tracing uses a separate asynchronous ASR
+        # stream. It never gates Realtime response creation and can be disabled
+        # without changing Jarvis routing or conversational behavior.
+        input_audio["transcription"] = {
+            "model": config.input_transcription_model,
+            "delay": "minimal",
+        }
     return {
         "type": "realtime",
         "model": config.model,
@@ -238,13 +263,7 @@ def build_realtime_session(
         "output_modalities": ["audio"],
         "max_output_tokens": DEFAULT_REALTIME_MAX_OUTPUT_TOKENS,
         "audio": {
-            "input": {
-                "turn_detection": {
-                    "type": "semantic_vad",
-                    "create_response": auto_create_response,
-                    "interrupt_response": True,
-                }
-            },
+            "input": input_audio,
             "output": {"voice": config.voice},
         },
         "reasoning": {"effort": config.reasoning_effort},
@@ -261,6 +280,7 @@ async def create_realtime_webrtc_call(
     url: str | None = None,
     auto_create_response: bool = True,
     include_expand_response_tool: bool = True,
+    include_input_transcription: bool = False,
 ) -> tuple[str, str]:
     if not config.api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -270,6 +290,7 @@ async def create_realtime_webrtc_call(
             config,
             auto_create_response=auto_create_response,
             include_expand_response_tool=include_expand_response_tool,
+            include_input_transcription=include_input_transcription,
         ),
         separators=(",", ":"),
     )

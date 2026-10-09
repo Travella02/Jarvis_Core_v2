@@ -7,6 +7,7 @@ from pathlib import Path
 from providers.voice_frontend.openai_realtime.config import OpenAIRealtimeConfig
 from providers.voice_frontend.openai_realtime.webrtc import (
     DESKTOP_REALTIME_MAX_OUTPUT_TOKENS,
+    ROUTER_REALTIME_MAX_OUTPUT_TOKENS,
     NORMAL_RESPONSE_INSTRUCTIONS,
     build_realtime_session,
 )
@@ -28,10 +29,11 @@ class Repair7SinglePassDetailScrollTests(unittest.TestCase):
             ["delegate_to_jarvis_core", "sleep_jarvis"],
         )
 
-    def test_desktop_detail_uses_single_response_with_safe_headroom(self) -> None:
+    def test_desktop_router_budget_is_separate_from_answer_headroom(self) -> None:
         self.assertEqual(DESKTOP_REALTIME_MAX_OUTPUT_TOKENS, 2048)
+        self.assertLess(ROUTER_REALTIME_MAX_OUTPUT_TOKENS, DESKTOP_REALTIME_MAX_OUTPUT_TOKENS)
         self.assertIn("include_expand_response_tool=False", DESKTOP_HOST)
-        self.assertIn('"max_output_tokens": DESKTOP_REALTIME_MAX_OUTPUT_TOKENS', DESKTOP_HOST)
+        self.assertIn('"max_output_tokens": ROUTER_REALTIME_MAX_OUTPUT_TOKENS', DESKTOP_HOST)
         self.assertIn("answer that detailed request directly in this same response", NORMAL_RESPONSE_INSTRUCTIONS)
         self.assertIn("At most one brief natural lead-in is allowed", NORMAL_RESPONSE_INSTRUCTIONS)
         self.assertIn("Never say you need a moment", NORMAL_RESPONSE_INSTRUCTIONS)

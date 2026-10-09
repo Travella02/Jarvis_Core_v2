@@ -13,7 +13,11 @@ DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1-mini"
 DEFAULT_REALTIME_VOICE = "cedar"
 DEFAULT_REALTIME_WEBRTC_URL = "https://api.openai.com/v1/realtime/calls"
 DEFAULT_REASONING_EFFORT = "low"
+DEFAULT_INPUT_TRANSCRIPTION_MODEL = "gpt-realtime-whisper"
+DEFAULT_DESKTOP_CONVERSATION_TRACE = True
 _ALLOWED_REASONING = {"minimal", "low", "medium", "high", "xhigh"}
+_ALLOWED_TRUE = {"1", "true", "yes", "on"}
+_ALLOWED_FALSE = {"0", "false", "no", "off"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +28,8 @@ class OpenAIRealtimeConfig:
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     webrtc_url: str = DEFAULT_REALTIME_WEBRTC_URL
     open_timeout_seconds: float = 20.0
+    input_transcription_model: str = DEFAULT_INPUT_TRANSCRIPTION_MODEL
+    desktop_conversation_trace: bool = DEFAULT_DESKTOP_CONVERSATION_TRACE
 
     @classmethod
     def from_env(
@@ -45,6 +51,20 @@ class OpenAIRealtimeConfig:
         timeout = float(source.get("JARVIS_REALTIME_OPEN_TIMEOUT_SECONDS", "20"))
         if timeout <= 0:
             raise ValueError("JARVIS_REALTIME_OPEN_TIMEOUT_SECONDS must be positive")
+        transcription_model = (
+            source.get("JARVIS_REALTIME_INPUT_TRANSCRIPTION_MODEL", DEFAULT_INPUT_TRANSCRIPTION_MODEL).strip()
+            or DEFAULT_INPUT_TRANSCRIPTION_MODEL
+        )
+        trace_raw = source.get(
+            "JARVIS_DESKTOP_CONVERSATION_TRACE",
+            "1" if DEFAULT_DESKTOP_CONVERSATION_TRACE else "0",
+        ).strip().lower()
+        if trace_raw in _ALLOWED_TRUE:
+            desktop_conversation_trace = True
+        elif trace_raw in _ALLOWED_FALSE:
+            desktop_conversation_trace = False
+        else:
+            raise ValueError("JARVIS_DESKTOP_CONVERSATION_TRACE must be a boolean value")
         return cls(
             api_key=key,
             model=model,
@@ -52,4 +72,6 @@ class OpenAIRealtimeConfig:
             reasoning_effort=effort,
             webrtc_url=url,
             open_timeout_seconds=timeout,
+            input_transcription_model=transcription_model,
+            desktop_conversation_trace=desktop_conversation_trace,
         )

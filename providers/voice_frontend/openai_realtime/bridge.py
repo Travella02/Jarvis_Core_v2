@@ -64,12 +64,28 @@ class RealtimeCoreBridge:
         self.delegation_orchestrator = delegation_orchestrator
         self._revision = 0
         self._tasks: set[asyncio.Task[None]] = set()
+        self._route_turns: dict[str, int] = {}
         self._closed = False
 
     @property
     def pending_count(self) -> int:
         """Number of Core delegations still running for this live session."""
         return sum(1 for task in self._tasks if not task.done())
+
+    def note_route_telemetry(self, *, call_id: str, turn: int) -> None:
+        clean = str(call_id or "").strip()
+        if clean and turn > 0:
+            self._route_turns[clean] = int(turn)
+            # Realtime sessions are long-lived. Keep this diagnostic map bounded
+            # even if a provider event is lost before the matching route settles.
+            while len(self._route_turns) > 64:
+                self._route_turns.pop(next(iter(self._route_turns)))
+
+    def _turn_for_call(self, call_id: str) -> int | None:
+        return self._route_turns.get(call_id)
+
+    def _finish_route_turn(self, call_id: str) -> None:
+        self._route_turns.pop(call_id, None)
 
     @staticmethod
     def _spoken_response_overrides(instructions: str) -> dict[str, Any]:
@@ -86,6 +102,11 @@ class RealtimeCoreBridge:
 
     async def _start_core_call(self, *, call_id: str, request: str, mode: str) -> None:
         self._revision += 1
+        turn = self._turn_for_call(call_id)
+        print(
+            f"[Jarvis Core Call] turn={turn if turn is not None else 'n/a'} | mode={mode} | status=started | call_id={call_id}",
+            flush=True,
+        )
         revision = self._revision
         if self.conversation.active_trace is not None:
             await self.conversation.cancel_active_turn("superseded by newer realtime core delegation")
@@ -110,13 +131,6 @@ class RealtimeCoreBridge:
                 arguments = {}
             route = str(arguments.get("route") or "").strip()
             request = str(arguments.get("request") or "").strip()
-            if not request:
-                await self.relay.send_function_output(
-                    call_id,
-                    {"status": "failed", "error": "The internal routing request was empty."},
-                    response_overrides=self._spoken_response_overrides(CORE_RESULT_RESPONSE_INSTRUCTIONS),
-                )
-                return True
             if route == "sleep":
                 self.conversation.event_bus.emit(
                     "voice.presence.sleep_requested",
@@ -127,6 +141,7 @@ class RealtimeCoreBridge:
                     payload={"call_id": call_id, "reason": "explicit_sleep"},
                 )
                 await self.relay.request_browser_sleep(reason="explicit_sleep")
+                self._finish_route_turn(call_id)
                 return True
             if route == "direct":
                 self.conversation.event_bus.emit(
@@ -139,12 +154,25 @@ class RealtimeCoreBridge:
                 )
                 await self.relay.send_function_output(
                     call_id,
-                    {"status": "direct", "request": request},
+                    {"status": "direct"},
                     response_overrides=self._spoken_response_overrides(DIRECT_ROUTED_RESPONSE_INSTRUCTIONS),
                 )
+                self._finish_route_turn(call_id)
                 return True
             if route not in {mode.value for mode in DelegationMode}:
                 route = DelegationMode.REASONING.value
+            if not request:
+                print(
+                    f"[Jarvis Core Call] turn={self._turn_for_call(call_id) or 'n/a'} | mode={route} | status=blocked_missing_request | call_id={call_id}",
+                    flush=True,
+                )
+                await self.relay.send_function_output(
+                    call_id,
+                    {"status": "failed", "error": "The internal routing request was empty."},
+                    response_overrides=self._spoken_response_overrides(CORE_RESULT_RESPONSE_INSTRUCTIONS),
+                )
+                self._finish_route_turn(call_id)
+                return True
             await self._start_core_call(call_id=call_id, request=request, mode=route)
             return True
 
@@ -242,6 +270,11 @@ class RealtimeCoreBridge:
                         },
                         response_overrides=self._spoken_response_overrides(CORE_RESULT_RESPONSE_INSTRUCTIONS),
                     )
+                    print(
+                        f"[Jarvis Core Call] turn={self._turn_for_call(call_id) or 'n/a'} | mode={mode} | status=unavailable | backend_ms={elapsed_ms} | call_id={call_id}",
+                        flush=True,
+                    )
+                    self._finish_route_turn(call_id)
                     event_bus.emit(
                         "voice.realtime.core.unavailable",
                         origin="openai-realtime-bridge",
@@ -268,6 +301,11 @@ class RealtimeCoreBridge:
                 parent_event_id=received.event_id,
                 payload={"call_id": call_id, "exception_type": type(exc).__name__},
             )
+            print(
+                f"[Jarvis Core Call] turn={self._turn_for_call(call_id) or 'n/a'} | mode={mode} | status=failed | exception={type(exc).__name__} | call_id={call_id}",
+                flush=True,
+            )
+            self._finish_route_turn(call_id)
             await self.relay.send_function_output(
                 call_id,
                 {"status": "failed", "error": "I couldn't complete that request."},
@@ -286,6 +324,11 @@ class RealtimeCoreBridge:
                 parent_event_id=received.event_id,
                 payload={"call_id": call_id},
             )
+            print(
+                f"[Jarvis Core Call] turn={self._turn_for_call(call_id) or 'n/a'} | mode={mode} | status=superseded | call_id={call_id}",
+                flush=True,
+            )
+            self._finish_route_turn(call_id)
             await self.relay.send_function_output(
                 call_id,
                 {"status": "superseded", "message": "A newer user request superseded this backend result. Do not present it as current."},
@@ -295,6 +338,11 @@ class RealtimeCoreBridge:
 
         if routed_status == "completed" and routed_text:
             elapsed_ms = round((monotonic() - started) * 1000.0, 1)
+            print(
+                f"[Jarvis Core Call] turn={self._turn_for_call(call_id) or 'n/a'} | mode={mode} | status=completed | backend_ms={elapsed_ms} | route={route_name} | call_id={call_id}",
+                flush=True,
+            )
+            self._finish_route_turn(call_id)
             await self.relay.send_function_output(
                 call_id,
                 {
@@ -324,6 +372,11 @@ class RealtimeCoreBridge:
             )
             return
 
+        print(
+            f"[Jarvis Core Call] turn={self._turn_for_call(call_id) or 'n/a'} | mode={mode} | status={routed_status} | route={route_name} | call_id={call_id}",
+            flush=True,
+        )
+        self._finish_route_turn(call_id)
         await self.relay.send_function_output(
             call_id,
             {"status": routed_status, "result": routed_text, "route": route_name},

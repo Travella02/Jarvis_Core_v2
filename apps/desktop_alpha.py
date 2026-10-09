@@ -37,8 +37,8 @@ from providers.voice_frontend.openai_realtime import (
     hangup_realtime_call,
 )
 from providers.voice_frontend.openai_realtime.webrtc import (
-    DESKTOP_REALTIME_MAX_OUTPUT_TOKENS,
-    NORMAL_RESPONSE_INSTRUCTIONS,
+    ROUTER_REALTIME_MAX_OUTPUT_TOKENS,
+    ROUTER_REALTIME_REASONING_EFFORT,
     ROUTE_TURN_TOOL,
     ROUTE_TURN_TOOL_NAME,
     TURN_ROUTER_INSTRUCTIONS,
@@ -47,6 +47,14 @@ from providers.voice_frontend.openai_realtime.webrtc import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STATIC_DIR = PROJECT_ROOT / "apps" / "desktop" / "dist"
+
+
+def _terminal_chat_text(value: object, *, limit: int = 8000) -> str:
+    """Render one safe, single-line conversation trace entry for the dev terminal."""
+    clean = " ".join(str(value or "").replace("\x1b", "").split())
+    if len(clean) > limit:
+        clean = clean[: max(0, limit - 1)] + "…"
+    return json.dumps(clean, ensure_ascii=False)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -263,13 +271,16 @@ class DesktopRealtimeSession:
         await websocket.send_json({
             "kind": "response_policy",
             "response": {
-                "max_output_tokens": DESKTOP_REALTIME_MAX_OUTPUT_TOKENS,
-                "instructions": NORMAL_RESPONSE_INSTRUCTIONS + "\n\n" + TURN_ROUTER_INSTRUCTIONS,
-                # Repair3 ports V1's pre-speech ownership rule: the first desktop
-                # response is a silent routing pass, never user-facing audio.
+                # Repair4 keeps V1-style pre-speech ownership, but makes the gate
+                # intentionally tiny: minimal reasoning, router-only instructions,
+                # and a bounded tool-call budget instead of the normal answer prompt.
+                "max_output_tokens": ROUTER_REALTIME_MAX_OUTPUT_TOKENS,
+                "instructions": TURN_ROUTER_INSTRUCTIONS,
                 "output_modalities": ["text"],
+                "reasoning": {"effort": ROUTER_REALTIME_REASONING_EFFORT},
                 "tools": [ROUTE_TURN_TOOL],
                 "tool_choice": {"type": "function", "name": ROUTE_TURN_TOOL_NAME},
+                "metadata": {"jarvis_stage": "route"},
             },
         })
 
@@ -286,6 +297,41 @@ class DesktopRealtimeSession:
                 except ValueError:
                     continue
                 kind = message.get("kind")
+                if kind == "desktop_user":
+                    turn = int(message.get("turn") or 0)
+                    source = str(message.get("source") or "unknown")
+                    print(
+                        f"[USER SPEECH] turn={turn or 'n/a'} | source={source} | text={_terminal_chat_text(message.get('text'))}",
+                        flush=True,
+                    )
+                    continue
+                if kind == "desktop_reply":
+                    turn = int(message.get("turn") or 0)
+                    source = str(message.get("source") or "unknown")
+                    print(
+                        f"[JARVIS REPLY] turn={turn or 'n/a'} | source={source} | text={_terminal_chat_text(message.get('text'))}",
+                        flush=True,
+                    )
+                    continue
+                if kind == "desktop_route":
+                    turn = int(message.get("turn") or 0)
+                    route = str(message.get("route") or "unknown")
+                    call_id = str(message.get("call_id") or "").strip()
+                    route_ms = message.get("speech_end_to_route_ms")
+                    route_metric = "n/a" if route_ms is None else f"{route_ms} ms"
+                    if call_id and turn > 0:
+                        bridge.note_route_telemetry(call_id=call_id, turn=turn)
+                    owner = "realtime" if route == "direct" else ("lifecycle" if route == "sleep" else "core")
+                    print(
+                        f"[Jarvis Route] turn={turn or 'n/a'} | route={route} | owner={owner} | route_ms={route_metric} | call_id={call_id or 'n/a'}",
+                        flush=True,
+                    )
+                    if route == "direct":
+                        print(
+                            f"[Jarvis Direct] turn={turn or 'n/a'} | realtime-only | call_id={call_id or 'n/a'}",
+                            flush=True,
+                        )
+                    continue
                 if kind == "desktop_latency":
                     turn = message.get("turn")
                     def metric(name: str) -> str:
@@ -294,6 +340,9 @@ class DesktopRealtimeSession:
                     print(
                         "[Desktop latency] "
                         f"turn={turn} | "
+                        f"route={message.get('route') or 'n/a'} | "
+                        f"speech_end->route={metric('speech_end_to_route_ms')} | "
+                        f"route->first_audio={metric('route_to_first_audio_ms')} | "
                         f"speech_end->response_created={metric('speech_end_to_response_created_ms')} | "
                         f"speech_end->first_transcript={metric('speech_end_to_first_transcript_ms')} | "
                         f"speech_end->first_audio={metric('speech_end_to_first_audio_ms')} | "
@@ -350,6 +399,7 @@ class DesktopRealtimeSession:
             clean,
             auto_create_response=False,
             include_expand_response_tool=False,
+            include_input_transcription=self.config.desktop_conversation_trace,
         )
         relay.set_call_id(call_id)
         return call_id, answer_sdp
@@ -449,6 +499,7 @@ def create_desktop_app(
             "presence": snapshot.conversation.presence_state if snapshot.conversation else None,
             "local_wake": wake_service is not None,
             "delegation_router": delegation_orchestrator is not None,
+            "conversation_trace": realtime_config.desktop_conversation_trace,
             "backend_routes": [route.name for route in runtime.provider_router.routes()],
         }
 
@@ -459,6 +510,7 @@ def create_desktop_app(
             "model": realtime_config.model,
             "voice": realtime_config.voice,
             "reasoning_effort": realtime_config.reasoning_effort,
+            "conversation_trace": realtime_config.desktop_conversation_trace,
             "transport": "webrtc",
             "wake_phrases": list(wake_config.wake_phrases),
             "idle_sleep_seconds": wake_config.idle_timeout_seconds,

@@ -22,16 +22,17 @@ class Repair3PreSpeechRoutingGateTests(unittest.TestCase):
         self.assertIn('"tools": [ROUTE_TURN_TOOL]', DESKTOP_HOST)
         self.assertIn('"tool_choice": {"type": "function", "name": ROUTE_TURN_TOOL_NAME}', DESKTOP_HOST)
 
-    def test_router_contract_requires_one_route_and_faithful_request(self) -> None:
+    def test_router_contract_requires_route_and_keeps_core_request_field(self) -> None:
         route_schema = ROUTE_TURN_TOOL["parameters"]["properties"]["route"]
         self.assertEqual(
             route_schema["enum"],
             ["direct", "reasoning", "memory", "action", "current_data", "long_task", "sleep"],
         )
-        self.assertEqual(ROUTE_TURN_TOOL["parameters"]["required"], ["route", "request"])
-        self.assertIn("Do not answer the user in this response", TURN_ROUTER_INSTRUCTIONS)
-        self.assertIn("only semantic output", TURN_ROUTER_INSTRUCTIONS)
-        self.assertIn("explicitly asks to use Jarvis Core", TURN_ROUTER_INSTRUCTIONS)
+        self.assertEqual(ROUTE_TURN_TOOL["parameters"]["required"], ["route"])
+        self.assertIn("Internal routing only", TURN_ROUTER_INSTRUCTIONS)
+        self.assertIn("emit no user-facing prose", TURN_ROUTER_INSTRUCTIONS)
+        self.assertIn("explicitly requests Core", TURN_ROUTER_INSTRUCTIONS)
+        self.assertIn("For direct or sleep, omit request", TURN_ROUTER_INSTRUCTIONS)
 
     def test_user_facing_followup_disables_all_tools(self) -> None:
         helper_start = BRIDGE.index("def _spoken_response_overrides")
