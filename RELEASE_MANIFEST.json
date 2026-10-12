@@ -6,17 +6,17 @@
   "status": "live_acceptance_candidate",
   "required_previous_version": "0.1.1",
   "required_previous_checkpoint": "accepted 0.1.1 Wake/Sleep Presence Control through Repair7 source tree",
-  "scope": "Provider-neutral Core delegation plus a pre-speech routing gate with explicit per-turn ownership telemetry, development conversation trace, and background-vs-immediate routing precision.",
+  "scope": "Core delegation and safe pre-speech routing with experimental opt-in parallel shadow probe (text-only Realtime + read-only Luna telemetry; no speculative audible output).",
   "automated_test_command": "python -m unittest discover -s tests -v",
-  "automated_test_count": 527,
-  "focused_test_command": "python -m unittest tests.unit.test_0_1_2_repair5_conversation_trace_and_long_task tests.unit.test_0_1_1_desktop_wake_sleep_contract tests.unit.test_0_1_2_repair4_route_latency_observability tests.integration.test_0_1_2_repair4_route_telemetry tests.unit.test_0_1_2_repair3_pre_speech_routing_gate tests.integration.test_0_1_2_repair3_routing_bridge tests.unit.test_0_1_2_repair2_delegation_preamble_suppression tests.unit.test_0_1_2_repair1_delegation_caption_truthfulness tests.unit.test_0_1_2_intelligence_router tests.integration.test_0_1_2_realtime_delegation_router tests.integration.test_0_1_2_conversation_provider_override tests.integration.test_0_0_9_repair4_realtime_core_delegation tests.unit.test_0_1_1_repair5_manual_response_policy tests.unit.test_0_1_1_repair7_single_pass_detail_scroll -v",
-  "focused_test_count": 68,
+  "automated_test_count": 536,
+  "focused_test_command": "python -m unittest tests.unit.test_0_1_2_repair6_parallel_shadow -v",
+  "focused_test_count": 9,
   "desktop_static_check": "npm run desktop:check",
   "desktop_run_command": "npm run desktop",
-  "testing_guide": "docs/TESTING_GUIDE_0.1.2_REPAIR5.md",
+  "testing_guide": "docs/TESTING_GUIDE_0.1.2_REPAIR6.md",
   "canonical_handoff": "Jarvis_Core_v2_Cloud_First_Master_Handoff_2026-09-15.pdf",
   "v1_reference": "Reference_jarvis_corev1/Jarvis_0.3.6_clean_checkpoint.zip",
-  "live_acceptance": "pending Repair5 conversation-trace and route-precision tests: reasoning Core route, background build must route long_task, direct Mars route, post-Core direct non-stickiness, sleep regression",
+  "live_acceptance": "pending repair6-repair7 Windows text-only tool probe live testing",
   "delegation": {
     "frontend_authority": "goal + coarse capability category only",
     "core_authority": "capability handler + backend provider/model route",
@@ -34,7 +34,10 @@
     "desktop route ownership is resolved in a forced text-only function response before any audible response; final spoken responses have tools disabled",
     "every desktop turn prints an explicit route owner; Core Call logs occur only for Core-owned routes and share the route call_id/turn correlation",
     "development terminal conversation trace is observational only; user voice transcription never drives routing or response authority",
-    "background/durable execution routes to long_task even when the work is also an external action"
+    "background/durable execution routes to long_task even when the work is also an external action",
+    "gate-free A/B is allowed only when all external tools and Core delegation are disabled",
+    "text-only tool probe never forwards function calls to execution bridge; fake outputs always indicate executed=false",
+    "tool-probe VAD speech_started/stopped use shared turn handler; provider text/tool outputs remain intercepted; real tools forbidden"
   ],
   "known_limitations": [
     "Memory 2.0 capability handler is not implemented yet",
@@ -44,10 +47,15 @@
     "strong backend model route is opt-in and requires a separately validated model ID in local configuration",
     "initial hard-reasoning routing policy is deterministic and local rather than model-classified",
     "direct desktop turns still include a silent cloud routing inference; 50-100 ms should not be assumed until a non-sequential/local fast path is validated",
-    "development voice conversation tracing uses a separate asynchronous ASR stream and should be disabled in production unless explicitly required"
+    "development voice conversation tracing uses a separate asynchronous ASR stream and should be disabled in production unless explicitly required",
+    "Repair6 parallel shadow is a measurement experiment only; it does not lower first-audio latency or output speculative audio.",
+    "Fast direct-only A/B disables actions/Core/sleep; tool-capable gate removal still needs a pre-audio publication guard",
+    "tool selection probe is text-only; Luna and real actions are intentionally not executed and voice timing is not benchmarked",
+    "live tool-capable voice without a router requires audio publication gate not built here",
+    "Tool-probe VAD regression was fixed structurally but awaits provider/WIndows live acceptance"
   ],
   "files": {
-    ".env.example": "6ce5f27c27488fdec8ec96fb8c9496e66060b9f89f3ba11b699d061e4769fbe7",
+    ".env.example": "dc074719ab7e26bf3802c489f885a1d51e2dbb1d881fa7f204be0a4a8faa9508",
     "README.md": "41d97db20260db2ee3b1ee3b10a775288f073cc150e952da2a130225d9fd60bd",
     "VERSION": "297b50f08386d3521f8fdaf2f78eb8d9d0acdf452d2e61596905fba37208c792",
     "package.json": "4d619ef2ee1e21f43bbe4821e5845589dbbd11b4f573e0c4e64473a6cc6cf96b",
@@ -57,9 +65,9 @@
     "core/intelligence/delegation.py": "a0a8ec53c12fa6a9d888696fa98f0df92ed602220995cd5e134b0c347377c53f",
     "core/runtime/providers.py": "e9bd43ccf66048201fce5c2e5b1ae2f44448739ada5f6cbd0a66906b2e3b2de6",
     "core/conversation/engine.py": "fcd4be6aedcec73379885b145cbb041692b3ec4470f807d1abdbc80842282f40",
-    "apps/desktop_alpha.py": "8cc2de51e8c5d0d772ee2c85076ca261209649462dd8e4bf1eed808055239627",
-    "providers/voice_frontend/openai_realtime/bridge.py": "8d269ffe23fbb79c2fdb51612cf05528ccc8b0065089b51952033442511f8d17",
-    "providers/voice_frontend/openai_realtime/webrtc.py": "954f7a71c1d2273c29ac45293bb22f635d9a9aed562dfa1adf84eec400fc84c1",
+    "apps/desktop_alpha.py": "c1d6b78b7f187f24abe7bcf85a371132355179fec9723b3e37afe72c584a693b",
+    "providers/voice_frontend/openai_realtime/bridge.py": "8eae359c7554aebd1f531f11234d8e1e96c966eb8ea622e61358a936f2327f3e",
+    "providers/voice_frontend/openai_realtime/webrtc.py": "4ca89e65489eee47b145477b30bd8f5e08c661ac9b27925f1fdd1196bbe1928c",
     "docs/ARCHITECTURE_DECISIONS.md": "41799f7bbc28149ffa9541597ba9199184a60061220707ae8943a1c24a467c08",
     "docs/PATCH_NOTES_0.1.2.md": "75b36cc418eb4ae0c72264e87ec0f2df6801fc0f2f6945df8da910ea866edd52",
     "docs/TESTING_GUIDE_0.1.2.md": "bb0953762f64ee3bc512d3b27c8b46da2c898ae5e78bdec95525dcf40a4dd301",
@@ -69,7 +77,7 @@
     "tests/integration/test_0_1_2_conversation_provider_override.py": "c6bbc3e26ac47da7e32c43ea0acbaf80a9331e61b9022874185fb374de59849b",
     "tests/unit/test_0_1_0_desktop_contract.py": "d1ef69b5b20beb8fa4251e00887fae3cc863fd42d0df27439ee990fb8fdf223b",
     "tests/unit/test_foundation_structure.py": "975b891cbcc3eb7c4e70a1e7547e7a80ff8f8a08f0b1c58e07162f5433e79623",
-    "apps/desktop/ui/src/App.tsx": "f6847cc59c877c5e7e2b1ea0cf4f068386fb24f2b8c25aace9103fdae27ac8f6",
+    "apps/desktop/ui/src/App.tsx": "91e8e96e9f5ea83df901456b66e9846901f20440f1eb328731bd8de552f1c96a",
     "docs/PATCH_NOTES_0.1.2_REPAIR1.md": "0477ee0a43448f17fae784f8e43ed4971372dc2464f23362bc4be5b5f96001b0",
     "docs/TESTING_GUIDE_0.1.2_REPAIR1.md": "a4f7d129b82cf668ad3455f67acd3da5cd9555bb7cd63c3976be643a17927b4a",
     "issues/ISSUE_063_0_1_2_DELEGATION_PREAMBLE_CONTRADICTION_AND_CAPTION_TRUNCATION.md": "4601806e7cbd9f545d209af35439e9668d67a9494196a6be1e480b7e4c873de3",
@@ -82,7 +90,7 @@
     "docs/TESTING_GUIDE_0.1.2_REPAIR3.md": "19976c58bf3d9b9fb031744c1ed0eb32f8ffcb5b3d4cc532452f48456b825257",
     "issues/ISSUE_065_0_1_2_PRE_TOOL_AUDIO_RACE_REQUIRES_PRE_SPEECH_ROUTING.md": "ca78c5185d29a418d753d19e7bb2900376466ca925328f1279e646ee151ff331",
     "tests/unit/test_0_1_2_repair3_pre_speech_routing_gate.py": "cddff0db324270b0bee36f58367d1cc29a06f0d0a94cdbd8fa82dd37497d7c99",
-    "tests/integration/test_0_1_2_repair3_routing_bridge.py": "6bcb2e170e79aff7c8e1d16efa6fd6c01a707076c014b4b18aa90a0719f387bb",
+    "tests/integration/test_0_1_2_repair3_routing_bridge.py": "b9932ec3ab0e3df869e3d26f95f65cb61ef363fcb67e2470451fa396ecd1301a",
     "tests/unit/test_0_1_1_repair5_manual_response_policy.py": "07aab3b7924055b86ff2f0f9f34c34c6fc0b3739097922a8bab7e8c88f9a3cfb",
     "tests/unit/test_0_1_1_repair7_single_pass_detail_scroll.py": "449e67df4e1d69c7b97a4a34d1097e5b33c538ab0badda3331e51f8ab79aa278",
     "tests/unit/test_0_1_2_repair4_route_latency_observability.py": "c489cc4dba73db0900b5c603b989165aafc6908a0f0b96185aeaab89e0ce0633",
@@ -90,11 +98,105 @@
     "docs/PATCH_NOTES_0.1.2_REPAIR4.md": "0c74779b50f145911a596366af22c44405b0b157f351b657988a53709020f6e3",
     "docs/TESTING_GUIDE_0.1.2_REPAIR4.md": "4b7a5913bfe802b7cafe3c387e5a63dac86d7c3af8ecedbf752a9f7b2d93ccc0",
     "issues/ISSUE_066_0_1_2_ROUTER_OBSERVABILITY_AND_DIRECT_TURN_LATENCY.md": "2587c6be695ec3992403661635da7358d79f318bda7ac48019336676eee5914d",
-    "providers/voice_frontend/openai_realtime/config.py": "83c0d20dfa206e31caa4f19361cb7f02b82d692c5421f251ccfcc7b83fb53a91",
+    "providers/voice_frontend/openai_realtime/config.py": "286e9c573861b23e01f17b08a5ec2b03490fbab0cbe5970284eccf1187966a3a",
     "tests/unit/test_0_1_1_desktop_wake_sleep_contract.py": "e5b54808328466b5b394fdef3e86651b11b0ffce1e06157e2c80e882d0e6052d",
     "tests/unit/test_0_1_2_repair5_conversation_trace_and_long_task.py": "cfe7521f5c98e2fa700ea1a23b90e1c518af7c89144d3ae9091ceebfe13a11a9",
     "docs/PATCH_NOTES_0.1.2_REPAIR5.md": "0712e5cc7e07295aff6c4c1bc6d60e6e73090c3c1a8600de7e7f5ab8e3925923",
     "docs/TESTING_GUIDE_0.1.2_REPAIR5.md": "2637f7c0b9e2c1b9ad02ffaca53ed5d01996b219937aecaadb9dae54554990a8",
-    "issues/ISSUE_067_0_1_2_CONVERSATION_TRACE_AND_BACKGROUND_ROUTE_CLASSIFICATION.md": "f6609adb9ee745b67e10588d9d8c9c1d8d485cea16a186f8ec0c44e35ce7de75"
+    "issues/ISSUE_067_0_1_2_CONVERSATION_TRACE_AND_BACKGROUND_ROUTE_CLASSIFICATION.md": "f6609adb9ee745b67e10588d9d8c9c1d8d485cea16a186f8ec0c44e35ce7de75",
+    "providers/voice_frontend/openai_realtime/parallel_probe.py": "a75db0b2873cd5ce1cc995c5ae1fc4203ed11db586c39793059009640652587f",
+    "tests/unit/test_0_1_2_repair6_parallel_shadow.py": "48489452dc52678d2bac7951c788168100d74542ec2aa5c86db83b5dac986490",
+    "docs/PATCH_NOTES_0.1.2_REPAIR6.md": "6b77589adcbb25402b3b2578fe0e398843bacfc7f102e36f83961fff6b82227d",
+    "docs/TESTING_GUIDE_0.1.2_REPAIR6.md": "cd905b699390afc588f38910f6be6bf6cb9686b3e2371ec31117be83fc7c74fb",
+    "issues/ISSUE_068_0_1_2_PARALLEL_SHADOW_PROBE.md": "c06616ec3043b7b4d3f071d971575a09bf85df35fca5f50a153014fdc301f1be",
+    "docs/PATCH_NOTES_0.1.2_REPAIR6_REPAIR1.md": "cdf5770cc21753abb80030229ae0b35bb584c740ac4671cea0664382d3553dcd",
+    "docs/TESTING_GUIDE_0.1.2_REPAIR6_REPAIR1.md": "0a056da30d1320fa6b5b0da9784bde596fd6afcaa3fd59f5077934648ac1f57a",
+    "issues/ISSUE_069_0_1_2_REPAIR6_TEST_PORTABILITY_AND_RACE.md": "364eb1de07bba14529aac7679a1d2274015903ba3643f67bbc996684c69197d7",
+    "tests/unit/test_0_1_2_repair6_repair2_natural_sleep.py": "f3f72bec3f447157e950ef007b93b3f19a1f5797f0bafc5dc3e405673528258d",
+    "tests/unit/test_0_1_2_repair6_repair3_sleep_evidence.py": "bd7f21f95847d1215620cd61247e5295b25afb1cdb2c6a39d4c3fb3fc4b3e9dd",
+    "docs/PATCH_NOTES_0.1.2_REPAIR6_REPAIR3.md": "cf8cd03ab6f945b011588977beb5d1bbaa8be0f6922d7d314beb9ece92a39818",
+    "docs/TESTING_GUIDE_0.1.2_REPAIR6_REPAIR3.md": "f70a16e3aea10dcdd2210f991991f133d306e2b8e4e0f8c87a6c45a598eb4485",
+    "issues/ISSUE_071_0_1_2_GRATITUDE_FALSE_SLEEP.md": "f2276eb49e2f2cb4f9599046d2125f913fdb96bd638e366fc82d6557ed75abac",
+    "providers/voice_frontend/openai_realtime/bench.py": "9318fb94f257382649e0d5c2c74b27c120f68c9beb92b30af17c00f941221344",
+    "scripts/realtime_ab.py": "67b9b510cd7f1d36cbe70376a8d3e32e777543d87734f980f4f5ea62bb144f90",
+    "tests/unit/test_0_1_2_realtime_ab_comparison.py": "d347e31ee166f8ddbca061f2159e696ce7de5663d8ec1b2b8a7c6b28912acc15",
+    "docs/TESTING_GUIDE_0.1.2_REPAIR6_REPAIR4_REALTIME_AB.md": "1fe760f56799bb6a87d361e0e68f67dea12ae3f3aada7ddd200617841c2d815b",
+    "issues/ISSUE_072_0_1_2_REALTIME_MINI_VS_FULL_AB_METRICS.md": "703cced8f35d95e99ac3f19d2551eebe2216c9ba9b48b946fc0a7b465fc76d6a",
+    "docs/PATCH_NOTES_0.1.2_REPAIR6_REPAIR4.md": "ac9ea5f9f3e83f3a1563c865c1408f88f229f5b0f0f9a403b88057fa0fc22332",
+    "tests/unit/test_0_1_2_repair6_repair5_gate_free_ab.py": "b9898b4f681d163ae08f33766b29b541f39f517b52071108a3e5dc036ed42571",
+    "docs/PATCH_NOTES_0.1.2_REPAIR6_REPAIR5.md": "2f614ec76b4b8cb5da2d278e1e339fb6b6526475913bef41d7777fe798992717",
+    "docs/TESTING_GUIDE_0.1.2_REPAIR6_REPAIR5.md": "bef90509788b27c9f8bb413b03b64d188214420dcacf1d1127ec83b1d9784b1e",
+    "issues/ISSUE_073_0_1_2_GATE_FREE_VOICE_TOOL_OWNERSHIP_TRADEOFF.md": "d0c099ecf4bca4270abd7fbf74db608de86045f3e9858c8a689ef7fb10db57b5",
+    "providers/voice_frontend/openai_realtime/tool_probe.py": "7be76483565a17def616eda3b3080910189753813a6d2d771b781ec4f046918e",
+    "tests/unit/test_0_1_2_repair6_repair6_tool_selection_probe.py": "7dfa17b6c2e2b1a3f544dd36a05460758e8cfcf0b37dbe2753ff2d05a17c8a5d",
+    "docs/PATCH_NOTES_0.1.2_REPAIR6_REPAIR6.md": "7c64819adb46ef89c0975406e1aede50ae10d665023c76c07c53ffcc760261ee",
+    "docs/TESTING_GUIDE_0.1.2_REPAIR6_REPAIR6.md": "aab94b99665565e6dbbe9672f2413f897a148b930b670f999fd39d627f55fd0a",
+    "issues/ISSUE_074_0_1_2_GATE_FREE_TOOL_SPEECH_PUBLICATION.md": "bbfca20adc5072db75e96f838121253f09e0760de06043b002de6586d4cffe3c",
+    "tests/unit/test_0_1_2_repair6_repair7_probe_vad_lifecycle.py": "63735759fb5dde7e65d2e43aafd9c3550684089115f216c1344080e44c886e23",
+    "docs/PATCH_NOTES_0.1.2_REPAIR6_REPAIR7.md": "0a0490a7cb551995c9a5faaf41c4819baf00754c8e7f5786e5a7154215a31c01",
+    "docs/TESTING_GUIDE_0.1.2_REPAIR6_REPAIR7.md": "c280671ddf92aae13fcdce52403a0b394321fe0be0b25877958e5a0ef6a38240",
+    "issues/ISSUE_075_0_1_2_REPAIR6_PROBE_DROPPED_VAD_EVENTS.md": "f87338b205d76fe7f42863bf33b0f2db85358aa3f7a8fb0b6408ea8521c8b8e3"
+  },
+  "repair6_repair1": {
+    "scope": "test-only portability and deterministic async synchronization; no runtime changes",
+    "focused_tests": 9,
+    "full_tests": 536,
+    "existing_skips": 1
+  },
+  "repair6_repair3": {
+    "scope": "sleep routing evidence guard and contrastive examples; no speculative audio changes",
+    "full_tests": 551,
+    "skips": 1
+  },
+  "repair6_repair4": {
+    "scope": "model A/B terminal trace, realtime estimated usage and Core model observation only",
+    "tests": 562,
+    "skips": 1,
+    "model_ids": [
+      "gpt-realtime-2.1-mini",
+      "gpt-realtime-2.1"
+    ],
+    "gate_policy": "unchanged",
+    "shadow": "disabled per benchmark launch"
+  },
+  "repair6_repair5": {
+    "scope": "opt-in ungated direct conversation A/B with all tools disabled; default safe routing preserved",
+    "test_count": 571,
+    "existing_skips": 1,
+    "live_acceptance": "pending",
+    "fast_launchers": [
+      "mini-fast",
+      "full-fast"
+    ],
+    "normal_launchers": [
+      "mini",
+      "full"
+    ],
+    "known_limitations": [
+      "no Core/Luna/action/memory/current-data tool in fast mode",
+      "no voice sleep in fast mode",
+      "not a production tool-enabled single-pass architecture"
+    ]
+  },
+  "repair6_repair6": {
+    "scope": "opt-in gate-free text-only tool selection with read-only dry-run ask_luna and simulated test_action; no actual Core actions or Luna calls",
+    "test_count": 581,
+    "existing_skips": 1,
+    "live_acceptance": "pending",
+    "models": [
+      "gpt-realtime-2.1-mini",
+      "gpt-realtime-2.1"
+    ],
+    "launchers": [
+      "mini-tools",
+      "full-tools"
+    ]
+  },
+  "repair6_repair7": {
+    "scope": "restore speech lifecycle events to shared desktop handler in text-only tool probe; keeps simulated tools and audio blocking intact",
+    "test_count": 585,
+    "existing_skips": 1,
+    "live_acceptance": "pending",
+    "required_previous_patch": "0.1.2-repair6-repair6 (rebased)"
   }
 }

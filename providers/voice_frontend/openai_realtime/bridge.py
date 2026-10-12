@@ -132,6 +132,21 @@ class RealtimeCoreBridge:
             route = str(arguments.get("route") or "").strip()
             request = str(arguments.get("request") or "").strip()
             if route == "sleep":
+                # A router label alone is not sufficient to close the live session.
+                # The model must give independently closing words, separate from
+                # courtesy/gratitude.  Do not build a brittle vocabulary of fixed
+                # sleep commands here; the semantic router owns classification.
+                # This additional fail-closed check prevents bare or malformed
+                # sleep calls from silently terminating an active conversation.
+                evidence = str(arguments.get("sleep_evidence") or "").strip()
+                if not evidence:
+                    print(
+                        f"[Jarvis Route Guard] turn={self._turn_for_call(call_id) or 'n/a'} | "
+                        f"decision=direct | reason=missing_sleep_evidence | call_id={call_id}",
+                        flush=True,
+                    )
+                    route = "direct"
+            if route == "sleep":
                 self.conversation.event_bus.emit(
                     "voice.presence.sleep_requested",
                     origin="openai-realtime-bridge",
@@ -234,6 +249,22 @@ class RealtimeCoreBridge:
             payload={"call_id": call_id, "mode": mode, "request_length": len(request)},
         )
         started = monotonic()
+        if self.delegation_orchestrator is not None:
+            try:
+                planned = self.delegation_orchestrator.plan(
+                    DelegationRequest(goal=request, mode=DelegationMode(mode))
+                )
+                selected_route = planned.route_name or "unavailable"
+                selected_provider = (self.delegation_orchestrator.provider_router.resolve(selected_route)
+                                     if planned.available and planned.route_name else None)
+                backend_model = getattr(getattr(selected_provider, "config", None), "model", None)
+                print(f"[Jarvis A/B Core] turn={self._turn_for_call(call_id) or 'n/a'} | "
+                      f"mode={mode} | route={selected_route} | "
+                      f"backend_model={backend_model or 'none'} | "
+                      f"available={planned.available} | call_id={call_id}", flush=True)
+            except (ValueError, KeyError):
+                print(f"[Jarvis A/B Core] turn={self._turn_for_call(call_id) or 'n/a'} | "
+                      f"mode={mode} | backend_model=unresolved | call_id={call_id}", flush=True)
         try:
             if self.delegation_orchestrator is None:
                 result = await self.conversation.submit_voice(request, reasoning_policy=self.reasoning_policy)

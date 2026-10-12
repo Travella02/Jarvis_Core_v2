@@ -86,12 +86,12 @@ class Repair3RoutingBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         return bridge, conversation, relay
 
-    async def route(self, bridge, *, route, request, call_id="route1"):
+    async def route(self, bridge, *, route, request, call_id="route1", sleep_evidence=None):
         handled = await bridge.handle_event({
             "type": "response.function_call_arguments.done",
             "name": ROUTE_TURN_TOOL_NAME,
             "call_id": call_id,
-            "arguments": json.dumps({"route": route, "request": request}),
+            "arguments": json.dumps({"route": route, "request": request, **({"sleep_evidence": sleep_evidence} if sleep_evidence is not None else {})}),
         })
         self.assertTrue(handled)
 
@@ -137,7 +137,7 @@ class Repair3RoutingBridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sleep_route_is_silent_lifecycle_transition(self):
         bridge, conversation, relay = self.make_bridge()
-        await self.route(bridge, route="sleep", request="That's all")
+        await self.route(bridge, route="sleep", request="That's all", sleep_evidence="That's all")
         self.assertEqual(conversation.calls, [])
         self.assertEqual(relay.outputs, [])
         self.assertEqual(relay.sleep_reasons, ["explicit_sleep"])

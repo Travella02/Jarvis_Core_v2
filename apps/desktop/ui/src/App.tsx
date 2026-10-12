@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
+import { StreamingPcmGate } from './streamingPcmGate';
 
 type PresenceState = 'sleeping' | 'awake';
 type JarvisState = 'sleeping' | 'waking' | 'connecting' | 'idle' | 'listening' | 'thinking' | 'speaking' | 'working' | 'error';
@@ -13,6 +14,8 @@ type RealtimeItem = {
   id?: string;
   type?: string;
   name?: string;
+  call_id?: string;
+  arguments?: string;
   role?: string;
   content?: RealtimeContent[];
 };
@@ -28,7 +31,7 @@ type RealtimeEvent = {
   call_id?: string;
   item?: RealtimeItem;
   error?: { message?: string };
-  response?: { id?: string; status?: string; output?: RealtimeItem[] };
+  response?: { id?: string; status?: string; output?: RealtimeItem[]; metadata?: Record<string, string>; usage?: { output_token_details?: { text_tokens?: number; audio_tokens?: number } } };
 };
 
 type ResponsePolicy = {
@@ -402,6 +405,7 @@ export default function App() {
   const stoppingRef = useRef(false);
   const realtimeClosingRef = useRef(false);
   const wakeClosingRef = useRef(false);
+  const wakeGenerationRef = useRef(0);
   const captionSourceRef = useRef('');
   const captionIndexRef = useRef(0);
   const captionTimerRef = useRef<number | null>(null);
@@ -416,6 +420,52 @@ export default function App() {
   const responseMessageItemIdsRef = useRef<Map<string, Set<string>>>(new Map());
   const userItemTurnsRef = useRef<Map<string, number>>(new Map());
   const conversationTraceRef = useRef(true);
+  const parallelShadowEnabledRef = useRef(false);
+  const directOnlyBenchmarkRef = useRef(false);
+  const toolProbeRef = useRef(false);
+  const bufferedToolProbeRef = useRef(false);
+  const overlapProbeRef = useRef(false);
+  const overlapGateRef = useRef<StreamingPcmGate | null>(null);
+  const overlapDecisionIdRef = useRef('');
+  const overlapCandidateIdRef = useRef('');
+  const overlapDecisionRef = useRef<'pending' | 'direct' | 'tool' | 'failed'>('pending');
+  const overlapCandidateDoneRef = useRef(false);
+  const overlapAudioDrainedRef = useRef(false);
+  const overlapAudioStartedRef = useRef(false);
+  const overlapReplyRef = useRef('');
+  const overlapEpochRef = useRef(0);
+  const overlapStartedRef = useRef(0);
+  const overlapDecisionMsRef = useRef<number | null>(null);
+  // An out-of-band response must explicitly reference the committed USER item.
+  // speech_stopped alone is too early: the model may otherwise see the prior turn.
+  const overlapCommittedItemRef = useRef('');
+  const overlapAwaitingCommitRef = useRef(false);
+  const overlapCommitTimerRef = useRef<number | null>(null);
+  const overlapActiveTurnRef = useRef(0);
+  const bufferedRemoteStreamRef = useRef<MediaStream | null>(null);
+  const bufferedCaptureRef = useRef<MediaRecorder | null>(null);
+  const bufferedChunksRef = useRef<Blob[]>([]);
+  const bufferedRecordingStartedRef = useRef(0);
+  const bufferedAudioStartedRef = useRef(0);
+  const bufferedAudioSeenRef = useRef(false);
+  const bufferedResponseIdRef = useRef('');
+  const bufferedReplyRef = useRef('');
+  const bufferedOutcomeRef = useRef<'unknown' | 'approved' | 'tool' | 'blocked'>('unknown');
+  const bufferedPendingToolRef = useRef<RealtimeItem[]>([]);
+  const bufferedWasFollowupRef = useRef(false);
+  const bufferedFollowupNextRef = useRef(false);
+  // WebRTC output-buffer drain may arrive before OR after response.done.
+  const bufferedOutputDrainedRef = useRef(false);
+  const bufferedFinalizeQueuedRef = useRef(false);
+  const bufferedPlayerRef = useRef<HTMLAudioElement | null>(null);
+  const bufferedPlaybackUrlRef = useRef('');
+  const bufferedEpochRef = useRef(0);
+  const bufferedTimeoutRef = useRef<number | null>(null);
+  const toolProbeTextRef = useRef('');
+  const toolProbePretoolTextRef = useRef('');
+  const parallelShadowIdsRef = useRef<Map<string, { turn: number; started: number; firstToken?: number }>>(new Map());
+  const parallelShadowRequestedRef = useRef<Map<number, number>>(new Map());
+  const parallelShadowPendingCancelRef = useRef<Set<number>>(new Set());
   const latencyRef = useRef<LatencyMarks>({ turn: 0 });
 
   const setStateSafely = (next: JarvisState, message?: string) => {
@@ -659,6 +709,9 @@ export default function App() {
   };
 
   const stopWakeListening = async () => {
+    // Invalidate all callbacks/timeouts from the old socket before closing it.
+    // Its asynchronous onclose event must never resurrect an obsolete listener.
+    wakeGenerationRef.current += 1;
     wakeClosingRef.current = true;
     await stopWakeAudioTap();
     try { wakeWsRef.current?.close(); } catch (_) { /* best effort */ }
@@ -696,11 +749,17 @@ export default function App() {
     source.connect(processor);
     processor.connect(gain);
     gain.connect(context.destination);
+    // Socket readiness alone is not microphone readiness. Let the local host
+    // report the distinction while investigating wake failures on Windows.
+    if (ws.readyState === WebSocket.OPEN && presenceRef.current === 'sleeping') {
+      ws.send(JSON.stringify({ kind: 'wake_audio_tap_ready' }));
+    }
   };
 
   const startWakeListening = async () => {
     if (stoppingRef.current || presenceRef.current !== 'sleeping') return;
     await stopWakeListening();
+    const generation = wakeGenerationRef.current;
     setStateSafely('sleeping', `Say “${wakePhraseRef.current}” when you need me.`);
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${scheme}://${location.host}/ws/wake`);
@@ -716,7 +775,15 @@ export default function App() {
         if (phrases.length) wakePhraseRef.current = String(phrases[phrases.length - 1] || 'Jarvis');
         if (Number(payload.idle_sleep_seconds) > 0) idleSleepSecondsRef.current = Number(payload.idle_sleep_seconds);
         setStateSafely('sleeping', `Say “${wakePhraseRef.current}” when you need me.`);
-        void startWakeAudioTap(ws);
+        void startWakeAudioTap(ws).catch((error) => {
+          const detail = error instanceof Error ? error.message : String(error);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ kind: 'wake_audio_tap_error', detail }));
+          }
+          if (wakeGenerationRef.current === generation && presenceRef.current === 'sleeping') {
+            setStateSafely('error', `Local wake microphone unavailable: ${detail}`);
+          }
+        });
       } else if (payload.kind === 'wake_detected') {
         const command = String(payload.command_text || '').trim();
         void startRealtimeSession(command, 'local_wake_phrase');
@@ -725,13 +792,194 @@ export default function App() {
       }
     };
     ws.onclose = () => {
+      if (wakeGenerationRef.current !== generation || wakeWsRef.current !== ws) return;
+      wakeWsRef.current = null;
       if (!wakeClosingRef.current && presenceRef.current === 'sleeping' && !stoppingRef.current) {
-        window.setTimeout(() => { void startWakeListening(); }, 650);
+        window.setTimeout(() => {
+          if (wakeGenerationRef.current === generation && presenceRef.current === 'sleeping' && !stoppingRef.current) {
+            void startWakeListening();
+          }
+        }, 650);
       }
     };
   };
 
+  // Repair6 experimental gated-publication recorder. Unlike muting after a
+  // function call, the *entire incoming WebRTC track* is muted from ontrack onward.
+  // A response owns no playback/captions until response.done is authoritative.
+  const stopBufferedPlayback = () => {
+    bufferedEpochRef.current += 1;
+    const player = bufferedPlayerRef.current;
+    if (player) {
+      player.pause();
+      player.removeAttribute('src');
+      player.load();
+    }
+    bufferedPlayerRef.current = null;
+    if (bufferedPlaybackUrlRef.current) URL.revokeObjectURL(bufferedPlaybackUrlRef.current);
+    bufferedPlaybackUrlRef.current = '';
+    audioPlayingRef.current = false;
+  };
+
+  const discardBufferedCapture = () => {
+    if (bufferedTimeoutRef.current !== null) window.clearTimeout(bufferedTimeoutRef.current);
+    bufferedTimeoutRef.current = null;
+    const recorder = bufferedCaptureRef.current;
+    bufferedCaptureRef.current = null;
+    bufferedChunksRef.current = [];
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      try { recorder.stop(); } catch (_) { /* release best effort */ }
+    }
+  };
+
+  const resetBufferedTurn = () => {
+    discardBufferedCapture();
+    stopBufferedPlayback();
+    bufferedOutcomeRef.current = 'blocked';
+    bufferedPendingToolRef.current = [];
+    bufferedResponseIdRef.current = '';
+    bufferedReplyRef.current = '';
+    bufferedAudioSeenRef.current = false;
+    bufferedFollowupNextRef.current = false;
+    bufferedOutputDrainedRef.current = false;
+    bufferedFinalizeQueuedRef.current = false;
+  };
+
+  const beginBufferedCapture = (responseId: string) => {
+    discardBufferedCapture();
+    bufferedResponseIdRef.current = responseId;
+    bufferedChunksRef.current = [];
+    bufferedReplyRef.current = '';
+    bufferedOutcomeRef.current = 'unknown';
+    bufferedAudioSeenRef.current = false;
+    bufferedAudioStartedRef.current = 0;
+    bufferedOutputDrainedRef.current = false;
+    bufferedFinalizeQueuedRef.current = false;
+    bufferedWasFollowupRef.current = bufferedFollowupNextRef.current;
+    bufferedFollowupNextRef.current = false;
+    const stream = bufferedRemoteStreamRef.current;
+    if (!stream || typeof MediaRecorder === 'undefined') {
+      bufferedOutcomeRef.current = 'blocked';
+      sendControlMessage({kind:'desktop_buffered_audio',turn:latencyRef.current.turn,phase:'capture_unavailable',reason:'missing_media_recorder_or_remote_stream'});
+      return;
+    }
+    try {
+      const preferred = 'audio/webm;codecs=opus';
+      const options = MediaRecorder.isTypeSupported(preferred) ? { mimeType: preferred } : undefined;
+      const recorder = new MediaRecorder(stream, options);
+      bufferedCaptureRef.current = recorder;
+      bufferedRecordingStartedRef.current = performance.now();
+      recorder.ondataavailable = (evt: BlobEvent) => {
+        if (bufferedCaptureRef.current === recorder && evt.data.size > 0) bufferedChunksRef.current.push(evt.data);
+      };
+      recorder.start(200);
+      // Bound private audio retention; fail closed rather than silently play an
+      // arbitrarily long speculative response or retain it indefinitely.
+      bufferedTimeoutRef.current = window.setTimeout(() => {
+        if (bufferedCaptureRef.current !== recorder) return;
+        bufferedOutcomeRef.current = 'blocked';
+        discardBufferedCapture();
+        sendControlMessage({kind:'desktop_buffered_audio',turn:latencyRef.current.turn,phase:'capture_timeout',reason:'30_second_bound'});
+      }, 30000);
+    } catch (error) {
+      bufferedOutcomeRef.current = 'blocked';
+      sendControlMessage({kind:'desktop_buffered_audio',turn:latencyRef.current.turn,phase:'capture_error',reason:String(error)});
+    }
+  };
+
+  const completeBufferedCapture = (approved: boolean) => {
+    if (bufferedTimeoutRef.current !== null) window.clearTimeout(bufferedTimeoutRef.current);
+    bufferedTimeoutRef.current = null;
+    const recorder = bufferedCaptureRef.current;
+    const id = bufferedResponseIdRef.current;
+    const epoch = bufferedEpochRef.current;
+    if (!recorder || recorder.state === 'inactive') {
+      discardBufferedCapture();
+      return;
+    }
+    const turn = latencyRef.current.turn;
+    const reply = bufferedReplyRef.current;
+    const wasFollowup = bufferedWasFollowupRef.current;
+    const audioOffset = bufferedAudioStartedRef.current > bufferedRecordingStartedRef.current
+      ? Math.max(0, (bufferedAudioStartedRef.current - bufferedRecordingStartedRef.current) / 1000 - 0.1)
+      : 0;
+    recorder.onstop = () => {
+      if (bufferedCaptureRef.current !== recorder) return;
+      const chunks = bufferedChunksRef.current;
+      bufferedCaptureRef.current = null;
+      bufferedChunksRef.current = [];
+      if (!approved || !chunks.length || epoch !== bufferedEpochRef.current || id !== bufferedResponseIdRef.current) return;
+      const blob = new Blob(chunks, {type:recorder.mimeType || 'audio/webm'});
+      if (!blob.size) return;
+      const url = URL.createObjectURL(blob);
+      bufferedPlaybackUrlRef.current = url;
+      const player = new Audio(url);
+      bufferedPlayerRef.current = player;
+      player.onloadedmetadata = () => {
+        if (epoch !== bufferedEpochRef.current) return;
+        if (Number.isFinite(player.duration) && player.duration > audioOffset + 0.05) {
+          try { player.currentTime = audioOffset; } catch (_) { /* seek optional */ }
+        }
+        void player.play().catch(() => setStateSafely('error', 'Buffered audio playback unavailable'));
+      };
+      player.onplaying = () => {
+        if (epoch !== bufferedEpochRef.current) return;
+        latencyRef.current.firstAudio ??= performance.now();
+        if (!latencyRef.current.reported) { latencyRef.current.reported = true; sendLatencySummary(); }
+        audioPlayingRef.current = true;
+        setStateSafely('speaking', 'Speaking');
+        sendControlMessage({kind:'desktop_buffered_audio',turn,phase:'released',selected:wasFollowup?'verified_followup':'direct',
+          capture_ms:Math.round(performance.now()-bufferedRecordingStartedRef.current),
+          first_playback_ms:latencyRef.current.speechStopped===undefined?null:Math.round(performance.now()-latencyRef.current.speechStopped)});
+        if (reply) {
+          setCaption(reply);
+          sendControlMessage({kind:'desktop_reply',turn,source:wasFollowup?'simulated_tool_result':'realtime',text:reply});
+        }
+      };
+      player.onended = () => {
+        if (epoch !== bufferedEpochRef.current) return;
+        stopBufferedPlayback();
+        scheduleIdle(180);
+      };
+    };
+    try { recorder.stop(); } catch (_) { discardBufferedCapture(); }
+  };
+
+  const cancelOverlap = () => {
+    overlapEpochRef.current += 1;
+    if (overlapCommitTimerRef.current !== null) window.clearTimeout(overlapCommitTimerRef.current);
+    overlapCommitTimerRef.current = null;
+    overlapAwaitingCommitRef.current = false;
+    overlapCommittedItemRef.current = '';
+    overlapActiveTurnRef.current = 0;
+    overlapGateRef.current?.abort();
+    overlapGateRef.current = null;
+    const oldCandidate = overlapCandidateIdRef.current;
+    const oldDone = overlapCandidateDoneRef.current;
+    overlapDecisionIdRef.current = '';
+    overlapCandidateIdRef.current = '';
+    overlapDecisionRef.current = 'pending';
+    overlapCandidateDoneRef.current = false;
+    overlapAudioDrainedRef.current = false;
+    overlapAudioStartedRef.current = false;
+    overlapReplyRef.current = '';
+    const dc = dcRef.current;
+    if (dc?.readyState === 'open') {
+      // Response-scoped cancellation is required: never let a previous turn publish.
+      // Browser audio remains muted even if cancellation is delayed.
+      // Do not cancel a shared/default response from another mode.
+      if (oldCandidate && !oldDone) {
+        dc.send(JSON.stringify({type:'response.cancel',response_id:oldCandidate}));
+      }
+      if (oldCandidate) dc.send(JSON.stringify({type:'output_audio_buffer.clear'}));
+    }
+  };
+
   const silenceRealtimeOutput = () => {
+    resetBufferedTurn();
+    cancelOverlap();
     const dc = dcRef.current;
     if (dc?.readyState === 'open') {
       try { dc.send(JSON.stringify({ type: 'response.cancel' })); } catch (_) { /* best effort */ }
@@ -759,6 +1007,12 @@ export default function App() {
     activeResponseIdRef.current = '';
     suppressedResponseIdsRef.current.clear();
     responseMessageItemIdsRef.current.clear();
+    parallelShadowIdsRef.current.clear();
+    parallelShadowRequestedRef.current.clear();
+    parallelShadowPendingCancelRef.current.clear();
+    parallelShadowEnabledRef.current = false;
+    bufferedToolProbeRef.current = false;
+    bufferedRemoteStreamRef.current = null;
     if (notifyServer) {
       try { await fetch('/api/realtime/end', { method: 'POST' }); } catch (_) { /* best effort */ }
     }
@@ -800,10 +1054,117 @@ export default function App() {
     return true;
   };
 
+  const requestOverlapResponses = (
+    dc: RTCDataChannel | null = dcRef.current,
+    committedItemId = '',
+    typedText = '',
+  ) => {
+    if (!dc || dc.readyState !== 'open') return;
+    // Constrain BOTH speculative responses to the identical current-turn input.
+    // Out-of-band output isolation does not constrain the response input context.
+    const input = committedItemId
+      ? [{type:'item_reference',id:committedItemId}]
+      : typedText.trim()
+        ? [{type:'message',role:'user',content:[{type:'input_text',text:typedText.trim()}]}]
+        : [];
+    if (!input.length || (committedItemId && !/^item_[A-Za-z0-9_-]+$/.test(committedItemId))) {
+      sendControlMessage({kind:'desktop_overlap_audio',turn:latencyRef.current.turn,phase:'error',reason:'missing_confirmed_user_item'});
+      setStateSafely('error','Could not confirm the current voice turn');
+      return;
+    }
+    if (overlapCommitTimerRef.current !== null) window.clearTimeout(overlapCommitTimerRef.current);
+    overlapCommitTimerRef.current = null;
+    overlapAwaitingCommitRef.current = false;
+    overlapActiveTurnRef.current = latencyRef.current.turn;
+    overlapDecisionRef.current = 'pending';
+    overlapDecisionIdRef.current = '';
+    overlapCandidateIdRef.current = '';
+    overlapReplyRef.current = '';
+    overlapCandidateDoneRef.current = false;
+    overlapAudioDrainedRef.current = false;
+    overlapAudioStartedRef.current = false;
+    overlapStartedRef.current = performance.now();
+    overlapDecisionMsRef.current = null;
+    latencyRef.current.route = 'overlap_stream_probe';
+    latencyRef.current.routeDecided = undefined;
+    setStateSafely('thinking', 'Preparing response');
+    const turn = String(latencyRef.current.turn);
+    const tools = responsePolicyRef.current?.tools || [];
+    // Both responses are OUT OF BAND; neither can mutate the default history.
+    // The silent decision is the only response allowed to request probe tools.
+    dc.send(JSON.stringify({type:'response.create',response:{conversation:'none',
+      metadata:{jarvis_stage:'overlap_decision',jarvis_turn:turn},
+      input,
+      output_modalities:['text'],max_output_tokens:512,tools,tool_choice:'auto',
+      instructions:'Select sleep_jarvis with sleep_evidence quoting the exact user closing words when the user clearly asks to sleep or end the conversation. Never select sleep for gratitude alone or a continuing question. Sleep is silent, with no farewell. Otherwise decide direct versus ask_luna for complex reasoning or test_action for external actions. Both expert/action tools are dry runs. Never claim any action succeeded.'}}));
+    dc.send(JSON.stringify({type:'response.create',response:{conversation:'none',
+      metadata:{jarvis_stage:'overlap_candidate',jarvis_turn:turn},
+      input,
+      output_modalities:['audio'],max_output_tokens:1024,tools:[],tool_choice:'none',
+      instructions:'Generate one natural conversational answer without tools. Do not claim external actions or research were performed. No action is executable in this response.'}}));
+    sendControlMessage({kind:'desktop_overlap_audio',turn:latencyRef.current.turn,phase:'started',
+      input_binding:committedItemId ? 'committed_audio_item' : 'typed_text',
+      commit_wait_ms:latencyRef.current.speechStopped === undefined ? null : Math.round(performance.now()-latencyRef.current.speechStopped)});
+  };
+
+  const awaitOverlapAudioCommit = () => {
+    overlapAwaitingCommitRef.current = true;
+    if (overlapCommittedItemRef.current) {
+      requestOverlapResponses(dcRef.current, overlapCommittedItemRef.current);
+      return;
+    }
+    const epoch = overlapEpochRef.current;
+    const turn = latencyRef.current.turn;
+    overlapCommitTimerRef.current = window.setTimeout(() => {
+      if (epoch !== overlapEpochRef.current || !overlapAwaitingCommitRef.current) return;
+      overlapAwaitingCommitRef.current = false;
+      overlapCommitTimerRef.current = null;
+      sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'error',reason:'input_commit_timeout'});
+      setStateSafely('error','Speech input was not committed');
+    }, 2000);
+  };
+
+  const requestParallelShadow = (dc: RTCDataChannel | null = dcRef.current) => {
+    if (!parallelShadowEnabledRef.current || dc?.readyState !== 'open') return;
+    const turn = latencyRef.current.turn || turnCounterRef.current;
+    // Response is *text only*, side-effect free and outside conversation.
+    // This first experiment deliberately never generates unplayable/unbuffered
+    // audio. We only want to validate response overlap and token costs.
+    parallelShadowRequestedRef.current.set(turn, performance.now());
+    dc.send(JSON.stringify({
+      type: 'response.create',
+      response: {
+        conversation: 'none',
+        metadata: { jarvis_stage: 'parallel_shadow', jarvis_turn: String(turn) },
+        output_modalities: ['text'],
+        max_output_tokens: 96,
+        tools: [],
+        tool_choice: 'none',
+        instructions: 'Privately prepare one very short informational answer to the latest user utterance. Never call tools, execute actions, or claim actions succeeded. This is a hidden speculative test. Do not mention routing or backend systems.',
+      },
+    }));
+  };
+
+  const cancelParallelShadows = (turn: number) => {
+    parallelShadowPendingCancelRef.current.add(turn);
+    if (parallelShadowPendingCancelRef.current.size > 24) {
+      parallelShadowPendingCancelRef.current = new Set(Array.from(parallelShadowPendingCancelRef.current).slice(-12));
+    }
+    const dc = dcRef.current;
+    if (!dc || dc.readyState !== 'open') return;
+    for (const [id, candidate] of parallelShadowIdsRef.current) {
+      if (candidate.turn === turn) {
+        // Response-specific cancellation, never cancel the main router.
+        dc.send(JSON.stringify({ type: 'response.cancel', response_id: id }));
+      }
+    }
+  };
+
   const dispatchTextToRealtime = (text: string, source = 'typed') => {
     const dc = dcRef.current;
     const clean = text.trim();
     if (!clean || !dc || dc.readyState !== 'open') return false;
+    if (overlapProbeRef.current) cancelOverlap(); // A typed turn replaces any in-flight speculative speech.
     turnCounterRef.current += 1;
     const now = performance.now();
     latencyRef.current = { turn: turnCounterRef.current, speechStarted: now, speechStopped: now };
@@ -821,14 +1182,89 @@ export default function App() {
       type: 'conversation.item.create',
       item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: clean }] },
     }));
-    requestNormalRealtimeResponse(dc);
+    if (toolProbeRef.current) {
+      latencyRef.current.route = 'tool_probe';
+      latencyRef.current.routeDecided = now;
+    } else if (bufferedToolProbeRef.current) {
+      latencyRef.current.route = 'buffered_tool_probe';
+      latencyRef.current.routeDecided = now;
+    }
+    if (directOnlyBenchmarkRef.current) {
+      latencyRef.current.route = 'direct_no_gate';
+      latencyRef.current.routeDecided = now;
+      sendControlMessage({ kind: 'desktop_fast_direct', turn: turnCounterRef.current });
+    }
+    if (overlapProbeRef.current) requestOverlapResponses(dc, '', clean);
+    else requestNormalRealtimeResponse(dc);
+    if (overlapProbeRef.current || toolProbeRef.current || bufferedToolProbeRef.current) { /* Neither probe spawns shadows. */ }
+    else if (!directOnlyBenchmarkRef.current) requestParallelShadow(dc);
     noteActivity();
     return true;
+  };
+
+  const launchBufferedFollowup = () => {
+    if (bufferedOutcomeRef.current !== 'tool') return;
+    const dc = dcRef.current;
+    if (dc?.readyState !== 'open') return;
+    const calls = bufferedPendingToolRef.current;
+    bufferedPendingToolRef.current = [];
+    bufferedOutcomeRef.current = 'blocked'; // One-shot: never dispatch twice.
+    for (const call of calls) {
+      const name = String(call.name || 'unknown');
+      const permitted = name === 'ask_luna' || name === 'test_action';
+      sendControlMessage({kind:'desktop_tool_probe',turn:latencyRef.current.turn,tool:name,phase:'selection',
+        pretool_text_chars:bufferedReplyRef.current.length,
+        decision_ms:latencyRef.current.speechStopped===undefined?null:Math.round(performance.now()-latencyRef.current.speechStopped)});
+      const result = !permitted
+        ? {status:'blocked',executed:false,message:'Unrecognized tool in isolated audio test.'}
+        : name === 'ask_luna'
+          ? {status:'not_executed',executed:false,message:'Luna was selected but not executed in this dry-run.'}
+          : {status:'unavailable',executed:false,message:'The simulated background action did not start.'};
+      if (call.call_id) dc.send(JSON.stringify({type:'conversation.item.create',item:{type:'function_call_output',call_id:call.call_id,output:JSON.stringify(result)}}));
+    }
+    bufferedFollowupNextRef.current = true;
+    dc.send(JSON.stringify({type:'response.create',response:{max_output_tokens:1024,output_modalities:['audio'],tools:[],tool_choice:'none',
+      instructions:'Speak a single short sentence (maximum 25 words) reporting the simulated result. No task was started and Luna did not actually run. Never claim success or execution.',
+      metadata:{jarvis_stage:'buffered_tool_followup',jarvis_turn:String(latencyRef.current.turn)}}}));
+  };
+
+  const finalizeBufferedIfReady = () => {
+    if (!bufferedOutputDrainedRef.current) return;
+    if (bufferedOutcomeRef.current === 'tool') {
+      // No pre-tool audio is ever authorized, including when the drain event
+      // arrived before response.done. Launch the dry-run follow-up once.
+      launchBufferedFollowup();
+      return;
+    }
+    if (bufferedOutcomeRef.current === 'approved') {
+      if (bufferedFinalizeQueuedRef.current) return;
+      bufferedFinalizeQueuedRef.current = true;
+      const epoch = bufferedEpochRef.current;
+      window.setTimeout(() => {
+        if (epoch === bufferedEpochRef.current && bufferedOutcomeRef.current === 'approved') {
+          completeBufferedCapture(true);
+        }
+      }, 120);
+    }
   };
 
   const handleRealtimeEvent = (event: RealtimeEvent) => {
     const type = event.type || '';
     const now = performance.now();
+    // VAD speech_stopped may precede committed audio-item creation. Never run
+    // either parallel model on an implicit 'latest' context during that window.
+    if (overlapProbeRef.current && type === 'input_audio_buffer.committed') {
+      const itemId = String(event.item_id || '');
+      if (itemId) {
+        overlapCommittedItemRef.current = itemId;
+        if (overlapAwaitingCommitRef.current) requestOverlapResponses(dcRef.current, itemId);
+      } else if (overlapAwaitingCommitRef.current) {
+        sendControlMessage({kind:'desktop_overlap_audio',turn:latencyRef.current.turn,phase:'error',reason:'commit_missing_item_id'});
+        overlapAwaitingCommitRef.current = false;
+        setStateSafely('error','Speech input commit missing ID');
+      }
+      return;
+    }
     if (
       (type === 'conversation.item.created' || type === 'conversation.item.added' || type === 'conversation.item.done')
       && event.item?.role === 'user'
@@ -852,9 +1288,323 @@ export default function App() {
           turn,
           source: 'voice',
           text: transcript,
+          transcript_ms: latencyRef.current.speechStopped === undefined ? null : Math.round(now - latencyRef.current.speechStopped),
         });
       }
       if (itemId) userItemTurnsRef.current.delete(itemId);
+    }
+    // Experimental parallel text authority + continuous PRIVATE WebRTC audio.
+    // The actual provider track remains muted for the WHOLE session. Only the
+    // AudioWorklet PCM gate alone can produce authorized speech, never pre-tool audio.
+    if (overlapProbeRef.current && type !== 'input_audio_buffer.speech_started' && type !== 'input_audio_buffer.speech_stopped') {
+      if (audioRef.current) audioRef.current.muted = true;
+      const responseId = String(event.response?.id || event.response_id || '');
+      const stage = String(event.response?.metadata?.jarvis_stage || '');
+      const turn = latencyRef.current.turn;
+      if (type === 'response.created') {
+        // Response events from a cancelled older turn must never claim ownership.
+        if (Number(event.response?.metadata?.jarvis_turn || 0) !== overlapActiveTurnRef.current || !overlapActiveTurnRef.current) return;
+        if (stage === 'overlap_decision') overlapDecisionIdRef.current = responseId;
+        if (stage === 'overlap_candidate') {
+          overlapCandidateIdRef.current = responseId;
+          const stream = bufferedRemoteStreamRef.current;
+          const epoch = overlapEpochRef.current;
+          if (!stream) {
+            overlapDecisionRef.current = 'failed';
+            sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'error',reason:'remote_stream_unavailable'});
+            setStateSafely('error','Private audio stream unavailable');
+          } else try {
+            void StreamingPcmGate.create(stream, () => {
+              if (epoch !== overlapEpochRef.current || overlapDecisionRef.current !== 'direct') return;
+              latencyRef.current.firstAudio ??= performance.now();
+              if (!latencyRef.current.reported) {latencyRef.current.reported=true;sendLatencySummary();}
+              setStateSafely('speaking','Speaking');
+              audioPlayingRef.current = true;
+              sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'released',
+                decision_ms:overlapDecisionMsRef.current,
+                first_playback_ms:latencyRef.current.speechStopped===undefined?null:Math.round(performance.now()-latencyRef.current.speechStopped)});
+            }, () => {
+              if (epoch !== overlapEpochRef.current) return;
+              overlapGateRef.current?.abort();
+              overlapGateRef.current = null;
+              audioPlayingRef.current = false;
+              scheduleIdle(120);
+            }, (reason) => {
+              if (epoch !== overlapEpochRef.current) return;
+              sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'error',reason});
+              setStateSafely('error','Streaming audio failed: '+reason);
+            }).then((gate) => {
+              if (epoch !== overlapEpochRef.current || overlapDecisionRef.current === 'tool' || overlapDecisionRef.current === 'failed') {
+                gate.abort();
+                return;
+              }
+              overlapGateRef.current = gate;
+              if (overlapDecisionRef.current === 'direct') gate.authorize();
+              if (overlapCandidateDoneRef.current && overlapAudioDrainedRef.current) gate.finish();
+            }).catch((error) => {
+              if (epoch !== overlapEpochRef.current) return;
+              overlapDecisionRef.current = 'failed';
+              sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'error',reason:String(error)});
+              setStateSafely('error','Private PCM audio unavailable');
+            });
+          } catch (error) {
+            overlapDecisionRef.current = 'failed';
+            sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'error',reason:String(error)});
+            setStateSafely('error','Private PCM audio unavailable');
+          }
+        }
+        return;
+      }
+      if (type === 'output_audio_buffer.started') {
+        if (overlapCandidateIdRef.current) overlapAudioStartedRef.current = true;
+        return;
+      }
+      if (type === 'response.output_audio_transcript.delta' && responseId === overlapCandidateIdRef.current) {
+        overlapReplyRef.current += String(event.delta || '');
+        if (overlapReplyRef.current.length > 20000) overlapReplyRef.current = overlapReplyRef.current.slice(0, 20000);
+        if (overlapDecisionRef.current === 'direct') setCaption(overlapReplyRef.current);
+        return;
+      }
+      if (type === 'response.done') {
+        sendControlMessage({kind:'realtime_event',event}); // Billing only. Never dispatch tools in this probe.
+        if (Number(event.response?.metadata?.jarvis_turn || 0) !== overlapActiveTurnRef.current || !overlapActiveTurnRef.current) return;
+        if (responseId === overlapDecisionIdRef.current && stage === 'overlap_decision') {
+          overlapDecisionMsRef.current = Math.round(performance.now()-overlapStartedRef.current);
+          latencyRef.current.routeDecided = performance.now();
+          const completed = event.response?.status === 'completed';
+          const calls = (event.response?.output || []).filter(item => item?.type === 'function_call');
+          if (!completed) overlapDecisionRef.current = 'failed';
+          else overlapDecisionRef.current = calls.length ? 'tool' : 'direct';
+          const tool = calls.length ? String(calls[0].name || 'unknown') : 'none';
+          // The local sleep lifecycle is not a dry-run tool. Evidence is required
+          // to prevent a bare tool label from terminating a conversation.
+          if (tool === 'sleep_jarvis') {
+            let evidence = '';
+            try { evidence = String(JSON.parse(calls[0].arguments || '{}').sleep_evidence || '').trim(); } catch (_) { /* fail closed */ }
+            if (completed && calls.length === 1 && evidence.length > 0 && evidence.length <= 160) {
+              sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'sleep',decision_ms:overlapDecisionMsRef.current,reason:'explicit_sleep'});
+              // enterSleep owns the one-way state transition, cancels private
+              // audio, clears captions and restarts local-only wake listening.
+              void enterSleep('voice_command');
+            } else {
+              overlapDecisionRef.current = 'failed';
+              overlapGateRef.current?.abort();
+              overlapGateRef.current = null;
+              if (overlapCandidateIdRef.current && dcRef.current?.readyState === 'open') {
+                dcRef.current.send(JSON.stringify({type:'response.cancel',response_id:overlapCandidateIdRef.current}));
+              }
+              setCaption('I could not confirm the sleep request.');
+              sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'sleep_rejected',reason:'missing_or_invalid_sleep_evidence'});
+              setStateSafely('idle','Ready');
+            }
+            return;
+          }
+          sendControlMessage({kind:'desktop_tool_probe',turn,tool,phase:'selection',dry_run:true,executed:false,
+            decision_ms:overlapDecisionMsRef.current});
+          sendControlMessage({kind:'desktop_overlap_audio',turn,phase:overlapDecisionRef.current,decision_ms:overlapDecisionMsRef.current});
+          if (overlapDecisionRef.current === 'direct') {
+            overlapGateRef.current?.authorize();
+            if (overlapReplyRef.current) setCaption(overlapReplyRef.current);
+            if (overlapCandidateDoneRef.current) {
+              sendControlMessage({kind:'desktop_reply',turn,source:'overlap_realtime',text:overlapReplyRef.current});
+            }
+          } else {
+            overlapGateRef.current?.abort();
+            overlapGateRef.current = null;
+            if (overlapCandidateIdRef.current && dcRef.current?.readyState === 'open') {
+              dcRef.current.send(JSON.stringify({type:'response.cancel',response_id:overlapCandidateIdRef.current}));
+              dcRef.current.send(JSON.stringify({type:'output_audio_buffer.clear'}));
+            }
+            const message = overlapDecisionRef.current === 'tool'
+              ? `${tool} was selected, but this is a dry-run. No tool or action was executed.`
+              : 'I could not verify which system should answer. Nothing was executed.';
+            setCaption(message);
+            sendControlMessage({kind:'desktop_reply',turn,source:'overlap_safe_text',text:message});
+            setStateSafely('idle','Ready');
+          }
+          return;
+        }
+        if (responseId === overlapCandidateIdRef.current && stage === 'overlap_candidate') {
+          overlapCandidateDoneRef.current = true;
+          if (event.response?.status !== 'completed') {
+            if (overlapDecisionRef.current === 'direct') {
+              overlapGateRef.current?.abort('candidate_incomplete');
+              setStateSafely('error','Candidate answer incomplete');
+            }
+          } else {
+            overlapReplyRef.current = overlapReplyRef.current.trim() || responseTranscript(event.response);
+            if (overlapDecisionRef.current === 'direct') {
+              setCaption(overlapReplyRef.current);
+              sendControlMessage({kind:'desktop_reply',turn,source:'overlap_realtime',text:overlapReplyRef.current});
+            }
+            if (overlapAudioDrainedRef.current) overlapGateRef.current?.finish();
+          }
+          return;
+        }
+        return;
+      }
+      if (type === 'output_audio_buffer.stopped' || type === 'output_audio_buffer.cleared') {
+        if (!overlapAudioStartedRef.current) return;
+        overlapAudioDrainedRef.current = true;
+        if (overlapCandidateDoneRef.current) overlapGateRef.current?.finish();
+        return;
+      }
+      if (type === 'error') {
+        overlapGateRef.current?.abort('provider_error');
+        setStateSafely('error',event.error?.message || 'Parallel probe error');
+      }
+      return;
+    }
+    // Experimental audio publication gate. The remote WebRTC HTMLAudioElement
+    // stays muted throughout this mode. MediaRecorder holds audio privately until
+    // the model's COMPLETE response proves no tool was called. On a tool call,
+    // every pre-tool syllable is discarded; only the simulated post-tool result
+    // can become audible. This deliberately trades direct latency for safety.
+    if (bufferedToolProbeRef.current && type !== 'input_audio_buffer.speech_started' && type !== 'input_audio_buffer.speech_stopped') {
+      const responseId = String(event.response?.id || event.response_id || '');
+      if (type === 'response.created') {
+        if (bufferedCaptureRef.current) discardBufferedCapture();
+        beginBufferedCapture(responseId);
+        setStateSafely('thinking', 'Waiting for safe audio decision');
+        return;
+      }
+      if (responseId && responseId !== bufferedResponseIdRef.current) return;
+      if (type === 'response.output_audio_transcript.delta') {
+        bufferedReplyRef.current += String(event.delta || '');
+        if (bufferedReplyRef.current.length > 20000) bufferedReplyRef.current = bufferedReplyRef.current.slice(0,20000);
+        return;
+      }
+      if (type === 'output_audio_buffer.started') {
+        bufferedAudioSeenRef.current = true;
+        bufferedAudioStartedRef.current ||= performance.now();
+        return;
+      }
+      if (type === 'response.done') {
+        sendControlMessage({kind:'realtime_event',event}); // Billing only; no bridge execution in this mode.
+        if (event.response?.status !== 'completed' || bufferedOutcomeRef.current === 'blocked') {
+          const status = String(event.response?.status || 'unknown');
+          const isFollowup = bufferedWasFollowupRef.current;
+          bufferedOutcomeRef.current = 'blocked';
+          discardBufferedCapture();
+          sendControlMessage({kind:'desktop_buffered_audio',turn:latencyRef.current.turn,phase:'discarded',reason:'response_incomplete_or_capture_unavailable',status});
+          // Fail closed: truncated audio is NEVER played. But don't strand the
+          // UI in Thinking. This text only reports a verified dry-run failure.
+          if (isFollowup) {
+            const safe = 'I couldn’t finish that simulated reply. No action or Luna call was executed.';
+            setCaption(safe);
+            sendControlMessage({kind:'desktop_reply',turn:latencyRef.current.turn,source:'simulated_tool_failure',text:safe});
+          }
+          setStateSafely('idle', 'Ready');
+          scheduleIdle(160);
+          return;
+        }
+        const calls = (event.response?.output || []).filter(item => item?.type === 'function_call');
+        if (calls.length) {
+          bufferedOutcomeRef.current = 'tool';
+          bufferedPendingToolRef.current = calls;
+          discardBufferedCapture();
+          sendControlMessage({kind:'desktop_buffered_audio',turn:latencyRef.current.turn,phase:'discarded',selected:'tool',reason:'pretool_audio_not_authorized'});
+          // Wait for the provider output buffer to drain/clear so no tool preamble
+          // can be intermixed with the next post-tool voice recording.
+          if (!bufferedAudioSeenRef.current || bufferedOutputDrainedRef.current) launchBufferedFollowup();
+        } else {
+          bufferedOutcomeRef.current = 'approved';
+          bufferedReplyRef.current = bufferedReplyRef.current.trim() || responseTranscript(event.response);
+          if (bufferedAudioSeenRef.current) finalizeBufferedIfReady();
+          if (!bufferedAudioSeenRef.current) {
+            // Provider returned a text-only response despite audio mode. Safe to
+            // display the confirmed result, but never claim speech happened.
+            discardBufferedCapture();
+            setCaption(bufferedReplyRef.current);
+            sendControlMessage({kind:'desktop_reply',turn:latencyRef.current.turn,source:'realtime_text_fallback',text:bufferedReplyRef.current});
+            scheduleIdle(130);
+          }
+        }
+        return;
+      }
+      if (type === 'output_audio_buffer.stopped' || type === 'output_audio_buffer.cleared') {
+        bufferedOutputDrainedRef.current = true;
+        // No decision yet? Preserve the private recording until response.done.
+        // There is no authority to discard or play it at this point.
+        finalizeBufferedIfReady();
+        return;
+      }
+      if (type === 'error') {
+        discardBufferedCapture();
+        bufferedOutcomeRef.current = 'blocked';
+        setStateSafely('error',event.error?.message || 'Buffered audio failed');
+      }
+      return;
+    }
+    // Probe-specific interception must NEVER swallow VAD lifecycle events.
+    // Shared speech_started increments the turn, and speech_stopped schedules
+    // the one text-only response. Previously both were discarded here, leaving
+    // a valid STT transcript with turn=n/a and no response.create at all.
+    if (toolProbeRef.current && type !== 'input_audio_buffer.speech_started' && type !== 'input_audio_buffer.speech_stopped') {
+      // The response is always text-only. No audio can escape before a tool call.
+      // Tool results are deterministic simulations, never real Core/Luna actions.
+      if (type === 'response.output_text.delta') {
+        toolProbeTextRef.current += String(event.delta || '');
+        if (toolProbeTextRef.current.length > 30000) toolProbeTextRef.current = toolProbeTextRef.current.slice(0, 30000);
+        return;
+      }
+      if (type === 'response.output_audio.delta' || type === 'output_audio_buffer.started') {
+        // Defense-in-depth if provider violates output_modalities=['text'].
+        if (audioRef.current) audioRef.current.muted = true;
+        if (dcRef.current?.readyState === 'open') dcRef.current.send(JSON.stringify({ type: 'output_audio_buffer.clear' }));
+        sendControlMessage({ kind:'desktop_tool_probe', turn:latencyRef.current.turn, tool:'unexpected_audio', phase:'blocked' });
+        return;
+      }
+      if (type === 'response.done') {
+        // A cancelled/interrupted speculative tool call has no authority to post even a simulation.
+        if (event.response?.status !== 'completed') {
+          toolProbeTextRef.current = '';
+          return;
+        }
+        const outputs = event.response?.output || [];
+        const calls = outputs.filter((item) => item?.type === 'function_call');
+        const turn = latencyRef.current.turn || turnCounterRef.current;
+        if (calls.length) {
+          const pretool = toolProbeTextRef.current.length;
+          for (const call of calls) {
+            const name = String(call.name || 'unknown');
+            const cid = String(call.call_id || '');
+            const allowed = name === 'ask_luna' || name === 'test_action';
+            sendControlMessage({ kind:'desktop_tool_probe', turn, tool:name, phase:'selection', pretool_text_chars:pretool, decision_ms:latencyRef.current.speechStopped === undefined ? null : Math.round(performance.now()-latencyRef.current.speechStopped) });
+            const result = !allowed
+              ? { status:'blocked', executed:false, message:'This tool is not allowed in the dry-run.' }
+              : name === 'ask_luna'
+                ? { status:'not_executed', executed:false, message:'Luna was selected, but this dry-run did not call Luna.' }
+                : { status:'unavailable', executed:false, message:'This simulated action did not start any real work.' };
+            if (cid && dcRef.current?.readyState === 'open') {
+              dcRef.current.send(JSON.stringify({ type:'conversation.item.create', item:{ type:'function_call_output',call_id:cid,output:JSON.stringify(result) } }));
+            }
+          }
+          toolProbeTextRef.current = '';
+          if (dcRef.current?.readyState === 'open') {
+            dcRef.current.send(JSON.stringify({type:'response.create',response:{max_output_tokens:256,output_modalities:['text'],tools:[],tool_choice:'none',instructions:'Give one concise truthful text-only summary of the simulated result. Do not claim Luna or actions actually ran.',metadata:{jarvis_stage:'tool_probe_followup',jarvis_turn:String(turn)}}}));
+          }
+        } else if (String(event.response?.status) === 'completed') {
+          sendControlMessage({ kind:'desktop_tool_probe', turn, tool:'none', phase:'direct', pretool_text_chars:0, decision_ms:latencyRef.current.speechStopped === undefined ? null : Math.round(performance.now()-latencyRef.current.speechStopped) });
+          const answer = (toolProbeTextRef.current || responseTranscript(event.response)).trim();
+          if (answer) {
+            setCaption(answer);
+            sendControlMessage({ kind:'desktop_reply', turn, source:'tool_probe_text_only', text:answer });
+          }
+          toolProbeTextRef.current = '';
+          scheduleIdle(150);
+        } else {
+          toolProbeTextRef.current = '';
+        }
+        return;
+      }
+      if (type === 'response.created') {
+        toolProbeTextRef.current = '';
+        setStateSafely('thinking', 'Text-only tool selection');
+        return;
+      }
+      if (type === 'error') setStateSafely('error', event.error?.message || 'Tool probe error');
+      return;
     }
     if (type === 'response.function_call_arguments.done' && event.name === 'route_jarvis_turn') {
       try {
@@ -862,6 +1612,7 @@ export default function App() {
         const route = String(routed?.route || 'unknown');
         latencyRef.current.routeDecided ??= now;
         latencyRef.current.route = route;
+        cancelParallelShadows(latencyRef.current.turn);
         sendControlMessage({
           kind: 'desktop_route',
           turn: latencyRef.current.turn,
@@ -874,10 +1625,48 @@ export default function App() {
         });
       } catch (_) { /* malformed routing telemetry still flows to Core for fail-closed handling */ }
     }
+    // Out-of-band shadow events are never allowed to change captions, routing,
+    // current response ID, audio playback, memory, or turn lifecycle.
+    if (type === 'response.created' && event.response?.metadata?.jarvis_stage === 'parallel_shadow') {
+      const id = String(event.response?.id || '');
+      const turn = Number(event.response?.metadata?.jarvis_turn || 0);
+      if (id) {
+        parallelShadowIdsRef.current.set(id, { turn, started: parallelShadowRequestedRef.current.get(turn) ?? now });
+        if (parallelShadowPendingCancelRef.current.has(turn) && dcRef.current?.readyState === 'open') {
+          dcRef.current.send(JSON.stringify({ type: 'response.cancel', response_id: id }));
+        }
+      }
+      return;
+    }
+    const shadowId = String(event.response_id || event.response?.id || '');
+    if (shadowId && parallelShadowIdsRef.current.has(shadowId)) {
+      if (type === 'response.output_text.delta') {
+        const candidate = parallelShadowIdsRef.current.get(shadowId)!;
+        candidate.firstToken ??= now;
+      }
+      if (type === 'response.done') {
+        const candidate = parallelShadowIdsRef.current.get(shadowId)!;
+        const usage = event.response?.usage || {};
+        sendControlMessage({
+          kind: 'desktop_parallel_realtime', turn: candidate.turn,
+          status: event.response?.status || 'unknown',
+          elapsed_ms: Math.round(now - candidate.started),
+          first_token_ms: candidate.firstToken === undefined ? null : Math.round(candidate.firstToken - candidate.started),
+          text_tokens: usage?.output_token_details?.text_tokens ?? null,
+          audio_tokens: usage?.output_token_details?.audio_tokens ?? null,
+        });
+        parallelShadowIdsRef.current.delete(shadowId);
+        parallelShadowRequestedRef.current.delete(candidate.turn);
+        parallelShadowPendingCancelRef.current.delete(candidate.turn);
+      }
+      return;
+    }
     // Route telemetry is intentionally sent first so Core can bind this call_id
     // to the visible turn before the matching function-call event starts work.
     forwardToCore(event);
     if (type === 'input_audio_buffer.speech_started') {
+      if (bufferedToolProbeRef.current) resetBufferedTurn();
+      if (overlapProbeRef.current) cancelOverlap();
       clearIdleTimer();
       turnCounterRef.current += 1;
       latencyRef.current = { turn: turnCounterRef.current, speechStarted: now };
@@ -887,7 +1676,22 @@ export default function App() {
       setStateSafely('thinking', 'Thinking');
       // Keep Semantic VAD for natural endpointing, but Jarvis owns response
       // creation so Core can attach a turn-specific compact response policy.
-      requestNormalRealtimeResponse();
+      if (toolProbeRef.current) {
+        latencyRef.current.route = 'tool_probe';
+        latencyRef.current.routeDecided = now;
+      } else if (bufferedToolProbeRef.current) {
+        latencyRef.current.route = 'buffered_tool_probe';
+        latencyRef.current.routeDecided = now;
+      }
+      if (directOnlyBenchmarkRef.current) {
+        latencyRef.current.route = 'direct_no_gate';
+        latencyRef.current.routeDecided = now;
+        sendControlMessage({ kind: 'desktop_fast_direct', turn: latencyRef.current.turn });
+      }
+      if (overlapProbeRef.current) awaitOverlapAudioCommit();
+      else requestNormalRealtimeResponse();
+      if (overlapProbeRef.current || toolProbeRef.current || bufferedToolProbeRef.current) { /* Neither probe spawns shadows. */ }
+      else if (!directOnlyBenchmarkRef.current) requestParallelShadow();
     } else if (type === 'response.created') {
       latencyRef.current.responseCreated ??= now;
       const responseId = responseIdForEvent(event);
@@ -988,7 +1792,7 @@ export default function App() {
             sendControlMessage({
               kind: 'desktop_reply',
               turn: latencyRef.current.turn || turnCounterRef.current || 0,
-              source: latencyRef.current.route === 'direct' ? 'realtime' : 'core',
+              source: ['direct', 'direct_no_gate'].includes(String(latencyRef.current.route || '')) ? 'realtime' : 'core',
               text,
             });
           }
@@ -1020,7 +1824,10 @@ export default function App() {
   const startRealtimeSession = async (preservedCommand = '', reason = 'client_wake') => {
     if (stoppingRef.current) return;
     if (presenceRef.current === 'awake' && dcRef.current?.readyState === 'open') {
-      if (preservedCommand) dispatchTextToRealtime(preservedCommand, 'wake_transcript');
+      if (preservedCommand) {
+        if (reason === 'typed_wake') dispatchTextToRealtime(preservedCommand, 'typed');
+        else dispatchTextToRealtime(preservedCommand);
+      }
       return;
     }
     await stopWakeListening();
@@ -1045,6 +1852,11 @@ export default function App() {
         try { payload = JSON.parse(message.data); } catch { return; }
         if (payload.kind === 'response_policy' && payload.response && typeof payload.response === 'object') {
           responsePolicyRef.current = payload.response as ResponsePolicy;
+          parallelShadowEnabledRef.current = payload.parallel_shadow_probe === true;
+          directOnlyBenchmarkRef.current = payload.direct_only_benchmark === true;
+          toolProbeRef.current = payload.tool_selection_probe === true;
+          bufferedToolProbeRef.current = payload.buffered_tool_probe === true;
+          overlapProbeRef.current = payload.overlap_probe === true;
         } else if (payload.kind === 'realtime_send' && dcRef.current?.readyState === 'open') {
           dcRef.current.send(JSON.stringify(payload.event));
         } else if (payload.kind === 'lifecycle_command' && payload.command === 'sleep') {
@@ -1064,8 +1876,10 @@ export default function App() {
       mic.getTracks().forEach((track) => pc.addTrack(track, mic));
       pc.ontrack = async (event) => {
         const remote = event.streams[0] || new MediaStream([event.track]);
+        bufferedRemoteStreamRef.current = remote;
         if (audioRef.current) {
-          audioRef.current.muted = false;
+          // Probe mode is unconditionally text-only, even before a response ID exists.
+          audioRef.current.muted = true; // Fail closed until an authorized normal response explicitly unmutes.
           audioRef.current.srcObject = remote;
           try { await audioRef.current.play(); } catch (_) { /* autoplay enabled by Electron */ }
         }
@@ -1103,7 +1917,9 @@ export default function App() {
         dc.onopen = () => { window.clearTimeout(timeout); resolve(); };
       });
       if (preservedCommand.trim()) {
-        dispatchTextToRealtime(preservedCommand, 'wake_transcript');
+        // Distinguish user-typed wake from a command preserved by local STT.
+        if (reason === 'typed_wake') dispatchTextToRealtime(preservedCommand, 'typed');
+        else dispatchTextToRealtime(preservedCommand, 'wake_transcript');
       } else {
         setStateSafely('idle', 'Ready');
         noteActivity();

@@ -20,6 +20,15 @@ _ALLOWED_TRUE = {"1", "true", "yes", "on"}
 _ALLOWED_FALSE = {"0", "false", "no", "off"}
 
 
+def _env_bool(value: str) -> bool:
+    value = value.strip().lower()
+    if value in _ALLOWED_TRUE:
+        return True
+    if value in _ALLOWED_FALSE:
+        return False
+    raise ValueError("JARVIS_PARALLEL_SHADOW_PROBE must be a boolean value")
+
+
 @dataclass(frozen=True, slots=True)
 class OpenAIRealtimeConfig:
     api_key: str | None
@@ -30,6 +39,11 @@ class OpenAIRealtimeConfig:
     open_timeout_seconds: float = 20.0
     input_transcription_model: str = DEFAULT_INPUT_TRANSCRIPTION_MODEL
     desktop_conversation_trace: bool = DEFAULT_DESKTOP_CONVERSATION_TRACE
+    parallel_shadow_probe: bool = False
+    direct_only_benchmark: bool = False
+    tool_selection_probe: bool = False
+    buffered_tool_probe: bool = False
+    overlap_probe: bool = False
 
     @classmethod
     def from_env(
@@ -74,4 +88,9 @@ class OpenAIRealtimeConfig:
             open_timeout_seconds=timeout,
             input_transcription_model=transcription_model,
             desktop_conversation_trace=desktop_conversation_trace,
+            parallel_shadow_probe=_env_bool(source.get("JARVIS_PARALLEL_SHADOW_PROBE", "0")),
+            direct_only_benchmark=_env_bool(source.get("JARVIS_REALTIME_DIRECT_ONLY_BENCHMARK", "0")),
+            tool_selection_probe=_env_bool(source.get("JARVIS_REALTIME_TOOL_SELECTION_PROBE", "0")),
+            buffered_tool_probe=_env_bool(source.get("JARVIS_REALTIME_BUFFERED_TOOL_PROBE", "0")),
+            overlap_probe=_env_bool(source.get("JARVIS_REALTIME_OVERLAP_PROBE", "0")),
         )

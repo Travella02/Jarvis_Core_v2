@@ -36,12 +36,16 @@ from providers.voice_frontend.openai_realtime import (
     create_realtime_webrtc_call,
     hangup_realtime_call,
 )
+from providers.voice_frontend.openai_realtime.parallel_probe import ParallelShadowProbe
+from providers.voice_frontend.openai_realtime.bench import RealtimeBenchmark
+from providers.voice_frontend.openai_realtime.tool_probe import probe_response_policy, overlap_probe_response_policy, ALLOWED_PROBE_TOOLS
 from providers.voice_frontend.openai_realtime.webrtc import (
     ROUTER_REALTIME_MAX_OUTPUT_TOKENS,
     ROUTER_REALTIME_REASONING_EFFORT,
     ROUTE_TURN_TOOL,
     ROUTE_TURN_TOOL_NAME,
     TURN_ROUTER_INSTRUCTIONS,
+    DIRECT_ONLY_BENCHMARK_INSTRUCTIONS,
 )
 
 
@@ -139,6 +143,10 @@ class DesktopWakeService:
     def __init__(self, *, runtime: JarvisRuntime, listener: LocalWakeListener) -> None:
         self.runtime = runtime
         self.listener = listener
+        # Wake utterances remain local. Show their transcript only when the
+        # existing development conversation trace is explicitly enabled.
+        env = merged_environment(PROJECT_ROOT / ".env")
+        self.trace_enabled = str(env.get("JARVIS_DESKTOP_CONVERSATION_TRACE", "0")).lower() in {"1", "true", "yes", "on"}
         self._prepare_lock = asyncio.Lock()
         self._prepared = False
 
@@ -157,9 +165,11 @@ class DesktopWakeService:
     async def listen(self, websocket: WebSocket) -> None:
         await websocket.accept()
         try:
+            print("[Jarvis Wake] phase=preparing | engine=local_whisper_silero", flush=True)
             await websocket.send_json({"kind": "wake_preparing"})
             await self.prepare()
             self.listener.reset()
+            print("[Jarvis Wake] phase=ready | waiting_for=audio_tap", flush=True)
             await websocket.send_json(
                 {
                     "kind": "wake_ready",
@@ -173,13 +183,38 @@ class DesktopWakeService:
                     return
                 payload = message.get("bytes")
                 if payload is None:
+                    # Renderer acknowledgement proves that microphone capture
+                    # has actually started, rather than just socket readiness.
+                    raw = message.get("text")
+                    if raw:
+                        try:
+                            control = json.loads(raw)
+                        except (ValueError, TypeError):
+                            control = {}
+                        if control.get("kind") == "wake_audio_tap_ready":
+                            print("[Jarvis Wake] phase=listening | microphone=active", flush=True)
+                        elif control.get("kind") == "wake_audio_tap_error":
+                            detail = _terminal_chat_text(control.get("detail", "unknown"), limit=180)
+                            print(f"[Jarvis Wake] phase=mic_error | detail={detail}", flush=True)
                     continue
                 result = await self.listener.feed_pcm(bytes(payload))
                 if result is None:
                     continue
                 if not result.woke or result.match is None:
+                    if self.trace_enabled:
+                        print(
+                            f"[Jarvis Wake] phase=ignored | transcript={_terminal_chat_text(result.transcript, limit=250)}",
+                            flush=True,
+                        )
+                    else:
+                        print("[Jarvis Wake] phase=ignored | transcript=hidden", flush=True)
                     await websocket.send_json({"kind": "wake_ignored"})
                     continue
+                print(
+                    f"[Jarvis Wake] phase=detected | phrase={_terminal_chat_text(result.match.phrase, limit=80)} "
+                    f"| command_present={bool(result.match.command_text)}",
+                    flush=True,
+                )
                 _emit_presence(self.runtime, "awake", "local_wake_phrase")
                 await websocket.send_json(
                     {
@@ -192,6 +227,8 @@ class DesktopWakeService:
         except WebSocketDisconnect:
             return
         except Exception as exc:
+            print(f"[Jarvis Wake] phase=unavailable | error={type(exc).__name__} "
+                  f"| detail={_terminal_chat_text(str(exc), limit=250)}", flush=True)
             with suppress(Exception):
                 await websocket.send_json(
                     {"kind": "wake_unavailable", "detail": f"{type(exc).__name__}: {exc}"}
@@ -238,6 +275,8 @@ class DesktopRealtimeSession:
         self._bridge: RealtimeCoreBridge | None = None
         self._event_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self._parallel_probe: ParallelShadowProbe | None = None
+        self._bench = RealtimeBenchmark(config.model)
 
     @property
     def active(self) -> bool:
@@ -261,27 +300,60 @@ class DesktopRealtimeSession:
             )
             self._relay = relay
             self._bridge = bridge
+            if self.config.parallel_shadow_probe and not self.config.direct_only_benchmark:
+                provider = self.runtime.provider_router.resolve()
+                if not isinstance(provider, OpenAIProvider):
+                    raise RuntimeError("Parallel shadow requires an OpenAI intelligence provider for this prototype")
+                # Isolate speculative inference from the authoritative provider's
+                # stateful voice WebSocket, conversation, and tool permissions.
+                shadow_config = replace(provider.config, voice_transport="http", max_output_tokens=96, store_responses=False)
+                self._parallel_probe = ParallelShadowProbe(OpenAIProvider(shadow_config))
             self._event_task = asyncio.create_task(
                 self._bridge_events(relay, bridge),
                 name="desktop-realtime-core-bridge",
             )
 
-        # Jarvis Core owns response policy. The renderer only forwards these
-        # per-turn overrides when it manually creates a Realtime response.
+        # The standard safe router is unchanged. The opt-in fast A/B mode
+        # removes routing only when all tools are blocked for the entire turn.
+        direct_only = self.config.direct_only_benchmark
+        tool_probe = self.config.tool_selection_probe
+        buffered_probe = self.config.buffered_tool_probe
+        overlap_probe = self.config.overlap_probe
+        direct_only = direct_only and not (tool_probe or buffered_probe or overlap_probe)
+        policy = (overlap_probe_response_policy() if overlap_probe else probe_response_policy() if tool_probe else {
+            **probe_response_policy(),
+            "output_modalities": ["audio"],
+            "max_output_tokens": 512,
+            "instructions": "You are Jarvis in an experimental audio tool-selection session. Basic conversation: respond directly. For deep architecture/coding reasoning call ask_luna; for external actions call test_action. These are DRY RUN tools and cannot actually execute. Do not say any action was completed. Do not announce a tool before selecting it. Your audio is held privately until the entire response is evaluated. If a tool result says not executed, say so clearly.",
+            "metadata": {"jarvis_stage": "buffered_tool_probe"},
+        } if buffered_probe else {
+            "max_output_tokens": 1024,
+            "instructions": DIRECT_ONLY_BENCHMARK_INSTRUCTIONS,
+            "output_modalities": ["audio"],
+            "tools": [],
+            "tool_choice": "none",
+            "metadata": {"jarvis_stage": "direct_no_gate"},
+        } if direct_only else {
+            "max_output_tokens": ROUTER_REALTIME_MAX_OUTPUT_TOKENS,
+            "instructions": TURN_ROUTER_INSTRUCTIONS,
+            "output_modalities": ["text"],
+            "reasoning": {"effort": ROUTER_REALTIME_REASONING_EFFORT},
+            "tools": [ROUTE_TURN_TOOL],
+            "tool_choice": {"type": "function", "name": ROUTE_TURN_TOOL_NAME},
+            "metadata": {"jarvis_stage": "route"},
+        })
+        print(f"[Jarvis A/B Start] model={self.config.model} | reasoning={self.config.reasoning_effort} | "
+              f"mode={'overlap_probe' if overlap_probe else ('buffered_tool_probe' if buffered_probe else ('tool_probe_text_only' if tool_probe else ('direct_no_gate_tools_disabled' if direct_only else 'safe_routed')))} | "
+              f"shadow={self.config.parallel_shadow_probe and not direct_only} | "
+              "pricing=estimates_only | core_cost=excluded", flush=True)
         await websocket.send_json({
             "kind": "response_policy",
-            "response": {
-                # Repair4 keeps V1-style pre-speech ownership, but makes the gate
-                # intentionally tiny: minimal reasoning, router-only instructions,
-                # and a bounded tool-call budget instead of the normal answer prompt.
-                "max_output_tokens": ROUTER_REALTIME_MAX_OUTPUT_TOKENS,
-                "instructions": TURN_ROUTER_INSTRUCTIONS,
-                "output_modalities": ["text"],
-                "reasoning": {"effort": ROUTER_REALTIME_REASONING_EFFORT},
-                "tools": [ROUTE_TURN_TOOL],
-                "tool_choice": {"type": "function", "name": ROUTE_TURN_TOOL_NAME},
-                "metadata": {"jarvis_stage": "route"},
-            },
+            "parallel_shadow_probe": self.config.parallel_shadow_probe and not direct_only,
+            "direct_only_benchmark": direct_only,
+            "tool_selection_probe": tool_probe,
+            "buffered_tool_probe": buffered_probe,
+            "overlap_probe": overlap_probe,
+            "response": policy,
         })
 
         async def sender() -> None:
@@ -301,17 +373,68 @@ class DesktopRealtimeSession:
                     turn = int(message.get("turn") or 0)
                     source = str(message.get("source") or "unknown")
                     print(
-                        f"[USER SPEECH] turn={turn or 'n/a'} | source={source} | text={_terminal_chat_text(message.get('text'))}",
+                        f"[USER SPEECH] turn={turn or 'n/a'} | realtime_model={self.config.model} | source={source} | text={_terminal_chat_text(message.get('text'))}",
                         flush=True,
                     )
+                    self._bench.on_user(turn, str(message.get("text") or ""))
+                    if self._parallel_probe is not None and source in {"voice", "typed", "wake_transcript"}:
+                        print(
+                            f"[Jarvis Parallel] turn={turn or 'n/a'} | candidate=luna | transcript_ms={message.get('transcript_ms', 'n/a')}",
+                            flush=True,
+                        )
+                        self._parallel_probe.on_transcript(turn, str(message.get("text") or ""))
+                    continue
+                if kind == "desktop_parallel_realtime":
+                    if self.config.parallel_shadow_probe:
+                        print(
+                            f"[Jarvis Parallel] turn={int(message.get('turn') or 0)} | candidate=realtime_text | "
+                            f"status={str(message.get('status') or 'unknown')} | "
+                            f"elapsed_ms={message.get('elapsed_ms', 'n/a')} | "
+                            f"first_token_ms={message.get('first_token_ms', 'n/a')} | "
+                            f"text_tokens={message.get('text_tokens', 'n/a')} | "
+                            f"audio_tokens={message.get('audio_tokens', 'n/a')}",
+                            flush=True,
+                        )
                     continue
                 if kind == "desktop_reply":
                     turn = int(message.get("turn") or 0)
                     source = str(message.get("source") or "unknown")
                     print(
-                        f"[JARVIS REPLY] turn={turn or 'n/a'} | source={source} | text={_terminal_chat_text(message.get('text'))}",
+                        f"[JARVIS REPLY] turn={turn or 'n/a'} | realtime_model={self.config.model} | source={source} | text={_terminal_chat_text(message.get('text'))}",
                         flush=True,
                     )
+                    print(self._bench.on_reply(turn, str(message.get("text") or "")), flush=True)
+                    continue
+                if kind == "desktop_overlap_audio":
+                    print(f"[Jarvis Overlap] turn={message.get('turn','n/a')} | phase={message.get('phase','n/a')} | "
+                          f"decision_ms={message.get('decision_ms','n/a')} | "
+                          f"first_playback_ms={message.get('first_playback_ms','n/a')} | "
+                          f"commit_wait_ms={message.get('commit_wait_ms','n/a')} | "
+                          f"input_binding={message.get('input_binding','n/a')} | "
+                          f"reason={message.get('reason','n/a')}", flush=True)
+                    continue
+                if kind == "desktop_buffered_audio":
+                    print(f"[Jarvis Buffered Audio] turn={message.get('turn','n/a')} | phase={message.get('phase','n/a')} | "
+                          f"selected={message.get('selected','n/a')} | capture_ms={message.get('capture_ms','n/a')} | "
+                          f"first_playback_ms={message.get('first_playback_ms','n/a')} | reason={message.get('reason','n/a')}", flush=True)
+                    continue
+                if kind == "desktop_tool_probe":
+                    turn = int(message.get("turn") or 0)
+                    tool = str(message.get("tool") or "unknown")
+                    phase = str(message.get("phase") or "unknown")
+                    approved = tool in ALLOWED_PROBE_TOOLS
+                    print(f"[Jarvis Tool Probe] turn={turn or 'n/a'} | tool={tool} | "
+                          f"phase={phase} | dry_run=True | executed=False | permitted={approved} | "
+                          f"pretool_text_chars={message.get('pretool_text_chars', 'n/a')} | "
+                          f"decision_ms={message.get('decision_ms', 'n/a')}", flush=True)
+                    if phase == 'selection' and approved:
+                        self._bench.on_core(turn, f"dry_run:{tool}")
+                    continue
+                if kind == "desktop_fast_direct":
+                    turn = int(message.get("turn") or 0)
+                    self._bench.on_route(turn, "direct_no_gate")
+                    print(f"[Jarvis Fast A/B] turn={turn} | model={self.config.model} | "
+                          "route=none | owner=realtime | tools=disabled | core=disabled", flush=True)
                     continue
                 if kind == "desktop_route":
                     turn = int(message.get("turn") or 0)
@@ -319,8 +442,13 @@ class DesktopRealtimeSession:
                     call_id = str(message.get("call_id") or "").strip()
                     route_ms = message.get("speech_end_to_route_ms")
                     route_metric = "n/a" if route_ms is None else f"{route_ms} ms"
+                    self._bench.on_route(turn, route)
+                    if route not in {"direct", "sleep"}:
+                        self._bench.on_core(turn, f"core:{route}")
                     if call_id and turn > 0:
                         bridge.note_route_telemetry(call_id=call_id, turn=turn)
+                    if self._parallel_probe is not None:
+                        self._parallel_probe.on_route(turn, route)
                     owner = "realtime" if route == "direct" else ("lifecycle" if route == "sleep" else "core")
                     print(
                         f"[Jarvis Route] turn={turn or 'n/a'} | route={route} | owner={owner} | route_ms={route_metric} | call_id={call_id or 'n/a'}",
@@ -337,6 +465,7 @@ class DesktopRealtimeSession:
                     def metric(name: str) -> str:
                         value = message.get(name)
                         return "n/a" if value is None else f"{value} ms"
+                    self._bench.on_latency(int(turn or 0), message.get("speech_end_to_first_audio_ms"))
                     print(
                         "[Desktop latency] "
                         f"turn={turn} | "
@@ -353,12 +482,29 @@ class DesktopRealtimeSession:
                 if kind != "realtime_event" or not isinstance(message.get("event"), dict):
                     continue
                 event = message["event"]
+                if self.config.direct_only_benchmark and str(event.get("type") or "") == "response.function_call_arguments.done":
+                    print(f"[Jarvis Fast A/B Guard] blocked unexpected function call: "
+                          f"{str(event.get('name') or 'unknown')}", flush=True)
+                    # Defense in depth: do not forward forbidden tool execution.
+                    continue
+                if str(event.get("type") or "") == "response.function_call_arguments.done":
+                    tool_name = str(event.get("name") or "unknown")
+                    call_id = str(event.get("call_id") or "n/a")
+                    print(f"[Jarvis A/B Tool] turn={self._bench.active_turn or 'n/a'} | "
+                          f"model={self.config.model} | tool={tool_name} | call_id={call_id}", flush=True)
+                    if tool_name == "delegate_to_jarvis_core":
+                        self._bench.on_core(self._bench.active_turn, tool_name)
                 if str(event.get("type") or "") == "response.done" and isinstance(event.get("response"), dict):
                     response = event["response"]
                     details = response.get("status_details")
                     reason = None
                     if isinstance(details, dict):
                         reason = details.get("reason") or details.get("type")
+                    metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+                    stage = str(metadata.get("jarvis_stage") or "answer_or_tool")
+                    model_turn = int(metadata.get("jarvis_turn") or self._bench.active_turn or 0)
+                    usage_line = self._bench.on_response(response, turn=model_turn, stage=stage)
+                    if usage_line: print(usage_line, flush=True)
                     usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
                     output_details = usage.get("output_token_details") if isinstance(usage.get("output_token_details"), dict) else {}
                     print(
@@ -371,13 +517,19 @@ class DesktopRealtimeSession:
                         f"reason={reason or 'natural'}",
                         flush=True,
                     )
-                await relay.feed_event(event)
+                if not self.config.tool_selection_probe:
+                    if not self.config.buffered_tool_probe:
+                        if not self.config.overlap_probe:
+                            await relay.feed_event(event)
+                # Tool-selection probe never forwards calls to the trusted bridge.
+                # Its simulated outputs are produced locally in the renderer.
         except WebSocketDisconnect:
             pass
         finally:
             if not sender_task.done():
                 sender_task.cancel()
             await asyncio.gather(sender_task, return_exceptions=True)
+            print(self._bench.summary(), flush=True)
             await self.stop(expected_relay=relay)
 
     async def _bridge_events(self, relay: BrowserRealtimeRelay, bridge: RealtimeCoreBridge) -> None:
@@ -414,6 +566,8 @@ class DesktopRealtimeSession:
             bridge = self._bridge
             event_task = self._event_task
             call_id = relay.call_id
+            parallel_probe = self._parallel_probe
+            self._parallel_probe = None
             self._relay = None
             self._bridge = None
             self._event_task = None
@@ -421,6 +575,9 @@ class DesktopRealtimeSession:
         if call_id:
             with suppress(Exception):
                 await hangup_realtime_call(self.config, call_id)
+        if parallel_probe is not None:
+            with suppress(Exception):
+                await parallel_probe.close()
         if bridge is not None:
             with suppress(Exception):
                 await bridge.close()

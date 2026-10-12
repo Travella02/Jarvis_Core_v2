@@ -261,49 +261,60 @@ class WhisperCppProvider(SpeechToTextProvider):
             raise ValueError("whisper.cpp Voice Lab adapter expects PCM_S16LE")
 
     async def _ensure_server(self) -> None:
-        if self._process is not None and self._process.poll() is None:
+        """Reuse a responsive local server; own only processes we actually launch.
+
+        The desktop wake service can reconnect while another whisper-server
+        instance is still listening. Starting another process against that
+        same port is a race (and can reset in-flight warm-up requests).
+        Probe before spawning, then probe again under the instance lock.
+        """
+
+        if await asyncio.to_thread(self._probe_server):
+            return
+        async with self._process_lock:
             if await asyncio.to_thread(self._probe_server):
                 return
-        async with self._process_lock:
-            if self._process is not None and self._process.poll() is None:
-                if await asyncio.to_thread(self._probe_server):
-                    return
             exe = self.config.server_executable
             model = self.config.model_path
             if not exe.is_file():
                 raise FileNotFoundError(exe)
             if not model.is_file():
                 raise FileNotFoundError(model)
-            creationflags = 0
-            if os.name == "nt":  # keep the lab server from opening a second console window
-                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            command = [
-                str(exe),
-                "-m",
-                str(model),
-                "--host",
-                self.config.host,
-                "--port",
-                str(self.config.port),
-                "-t",
-                str(self.config.threads),
-                "--language",
-                self.config.language,
-            ]
-            if not self.config.use_gpu:
-                command.append("--no-gpu")
-            self._process = subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creationflags,
-            )
+
+            # A previous startup may still be warming up. Wait for that child
+            # instead of launching a second server from the same provider.
+            if self._process is None or self._process.poll() is not None:
+                creationflags = 0
+                if os.name == "nt":  # avoid a second console window
+                    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                command = [
+                    str(exe),
+                    "-m",
+                    str(model),
+                    "--host",
+                    self.config.host,
+                    "--port",
+                    str(self.config.port),
+                    "-t",
+                    str(self.config.threads),
+                    "--language",
+                    self.config.language,
+                ]
+                if not self.config.use_gpu:
+                    command.append("--no-gpu")
+                self._process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creationflags,
+                )
+
             deadline = asyncio.get_running_loop().time() + self.config.startup_timeout_s
             while asyncio.get_running_loop().time() < deadline:
-                if self._process.poll() is not None:
-                    raise RuntimeError(f"whisper-server exited with code {self._process.returncode}")
                 if await asyncio.to_thread(self._probe_server):
                     return
+                if self._process.poll() is not None:
+                    raise RuntimeError(f"whisper-server exited with code {self._process.returncode}")
                 await asyncio.sleep(0.2)
             raise TimeoutError("timed out waiting for local whisper-server")
 

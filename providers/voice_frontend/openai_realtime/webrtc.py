@@ -94,6 +94,18 @@ Always finish the sentence you start. Do not trail off.
 """
 
 
+# Conversation-only ungated speed experiment. No tools or lifecycle actions.
+DIRECT_ONLY_BENCHMARK_INSTRUCTIONS = f"""You are Jarvis, a fast natural conversational voice assistant.
+{JARVIS_PERSONALITY_INSTRUCTIONS}
+This is a voice-only benchmark with no tools. Never pretend to read files, look up
+current data, access private memory, perform actions, or call a stronger model.
+If asked to do an action, clearly say you cannot execute it in this benchmark.
+Do not fabricate success, progress, current information, or capabilities.
+Answer informational questions immediately, accurately, and concisely.
+Avoid 'let me think' filler and keep a warm, lively, consistent personality.
+Voice sleep commands are unavailable in this mode; reply to farewells normally.
+"""
+
 TURN_ROUTER_INSTRUCTIONS = """Internal routing only. Call route_jarvis_turn exactly once; emit no user-facing prose.
 direct = ordinary conversation/general knowledge you can answer immediately.
 reasoning = the user explicitly requests Core or deeper backend reasoning is needed.
@@ -101,7 +113,17 @@ memory = durable/private memory.
 action = external/device/tool work intended to execute and finish in the current interaction.
 current_data = fresh external information.
 long_task = durable, autonomous, queued, background, or extended work that must continue beyond the immediate interaction, including work the user expects to keep running while they are away.
-sleep = clear end-of-interaction request.
+sleep = a definite user instruction to end this Jarvis interaction (or explicitly enter sleep/standby), NOT a social sign-off inferred from kindness alone.
+Critical distinction: thanks, appreciation, politeness, and Jarvis's name are NOT instructions to end the interaction. A casual "Thanks Jarvis" is direct: reply naturally and remain awake. A simple "thanks" (without closure) must not trigger sleep. Do not infer sleep from a period, farewell tone, or the absence of a question.
+When independent closure language is ALSO present, sleep is appropriate: "Thanks Jarvis, that's all", "That's everything, thank you", "I'm done for now", "You can rest now", or "Goodnight Jarvis" should route to sleep, with no audible reply. The words expressing thanks do not count as the closure evidence; the additional request to end does.
+When routing sleep, include sleep_evidence quoting ONLY the specific words spoken by the user that independently establish a request to end or sleep, not their thanks or Jarvis's name. Omit sleep_evidence for non-sleep routes. If you cannot quote distinct, unambiguous end-of-interaction language, route direct rather than sleep. Never invent closure words that were not spoken. A new/follow-up request must take precedence over incidental gratitude; when the user is still asking for help, use the non-sleep route.
+Contrast:
+- "Thanks, Jarvis." -> direct (gratitude alone).
+- "Thanks, Jarvis, that's all." -> sleep; sleep_evidence="that's all".
+- "Thanks, Jarvis, can I ask another question?" -> direct (ongoing request).
+- "Thank you, that helps." -> direct (gratitude, not a dismissal).
+- "Thank you, I'm done for now." -> sleep; sleep_evidence="I'm done for now".
+- "Good night, Jarvis." -> sleep; sleep_evidence="Good night".
 If a request is both an action and background/durable work, choose long_task. The execution lifetime wins over the generic action label.
 For direct or sleep, omit request. For every Core-owned route, include one concise faithful request preserving the user's constraints.
 """
@@ -143,12 +165,24 @@ ROUTE_TURN_TOOL = {
                 "enum": ["direct", "reasoning", "memory", "action", "current_data", "long_task", "sleep"],
                 "description": (
                     "The single route that should own this turn before any user-facing speech. "
+                    "Choose sleep ONLY for an unmistakable request to end the interaction, including a closing phrase paired with thanks. "
+                    "Bare gratitude ('Thanks Jarvis') is direct, not sleep, even when there is no follow-up question. "
+                    "Sleep requires separate, verbatim sleep_evidence of explicit closing words; do not invent evidence. "
                     "Use long_task rather than action whenever the defining requirement is durable/background execution."
                 ),
             },
             "request": {
                 "type": "string",
                 "description": "Core routes only: one concise faithful statement of the user's request and constraints. Omit for direct or sleep.",
+            },
+            "sleep_evidence": {
+                "type": "string",
+                "description": (
+                    "Only when route=sleep: quote the user's actual spoken words that independently and explicitly request "
+                    "ending the interaction or entering sleep, excluding mere thanks, appreciation, or Jarvis's name. "
+                    "For 'Thanks Jarvis, that's all', use 'that's all'. For 'Thanks Jarvis' choose direct and omit this field. "
+                    "Never fabricate evidence."
+                ),
             },
         },
         "required": ["route"],
@@ -256,11 +290,17 @@ def build_realtime_session(
             "model": config.input_transcription_model,
             "delay": "minimal",
         }
+    # A tool-selection probe may never publish audio, even if a response-level
+    # override is malformed or a model unexpectedly emits an output message.
+    if config.tool_selection_probe or config.buffered_tool_probe or config.overlap_probe:
+        from .tool_probe import (TOOL_PROBE_INSTRUCTIONS, BUFFERED_TOOL_INSTRUCTIONS,
+                                 OVERLAP_PROBE_INSTRUCTIONS, TOOL_PROBE_TOOLS, OVERLAP_PROBE_TOOLS)
+        tools = OVERLAP_PROBE_TOOLS if config.overlap_probe else TOOL_PROBE_TOOLS
     return {
         "type": "realtime",
         "model": config.model,
-        "instructions": REALTIME_CONVERSATION_INSTRUCTIONS,
-        "output_modalities": ["audio"],
+        "instructions": (TOOL_PROBE_INSTRUCTIONS if config.tool_selection_probe else BUFFERED_TOOL_INSTRUCTIONS if config.buffered_tool_probe else OVERLAP_PROBE_INSTRUCTIONS if config.overlap_probe else REALTIME_CONVERSATION_INSTRUCTIONS),
+        "output_modalities": ["text"] if config.tool_selection_probe or config.overlap_probe else ["audio"],
         "max_output_tokens": DEFAULT_REALTIME_MAX_OUTPUT_TOKENS,
         "audio": {
             "input": input_audio,
