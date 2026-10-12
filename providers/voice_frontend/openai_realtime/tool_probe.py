@@ -35,15 +35,15 @@ TOOL_PROBE_TOOLS = [
 # a dry-run operation; it is handled exclusively by the Electron lifecycle owner.
 OVERLAP_SLEEP_TOOL = {
  "type":"function", "name":"sleep_jarvis",
- "description":"Select only for an explicit request to end this conversation or put Jarvis to sleep. A mere thank-you or an ongoing question is not an ending. Never speak before selecting this lifecycle tool.",
+ "description":"Choose for a clear request to end this conversation or put Jarvis to sleep, including a polite thank-you followed by an explicit closing. Gratitude alone, a quoted closing phrase, a negated sleep request, or an ongoing question is NOT an ending. Never speak before selecting this lifecycle tool.",
  "parameters":{"type":"object","properties":{
      "sleep_evidence":{"type":"string","description":"Quote the user's exact words establishing a clear request to sleep/end the conversation. Do not invent evidence; do not use simple gratitude."}
  },"required":["sleep_evidence"],"additionalProperties":False},
 }
 OVERLAP_PROBE_TOOLS = [*TOOL_PROBE_TOOLS, OVERLAP_SLEEP_TOOL]
 OVERLAP_PROBE_INSTRUCTIONS = """You are Jarvis in a silent parallel authorization experiment.
-For a clear request to end the interaction, go to sleep, or sign off, call sleep_jarvis with the user's exact closing words as sleep_evidence. Do not produce conversational text or a farewell before or after it.
-Gratitude alone (e.g. 'thanks, Jarvis') must NOT put Jarvis to sleep; continue normal conversation. If the user asks another question, handle that question instead of sleeping.
+For a clear request to end the interaction, go to sleep, or sign off, call sleep_jarvis with the user's exact closing words as sleep_evidence. This remains true when gratitude comes BEFORE the dismissal, as in 'Thanks Jarvis, that is all'. Do not produce conversational text or a farewell before or after it.
+Gratitude alone (e.g. 'thanks, Jarvis') must NOT put Jarvis to sleep; continue normal conversation. If the user asks another question, handle that question instead of sleeping. A quoted dismissal or a negated sleep request is not an instruction to sleep.
 For complex coding/architecture/analysis use ask_luna (dry run). For external actions use test_action (dry run). For simple facts, arithmetic and ordinary conversation, answer directly.
 Never claim that Luna or an action ran. No real external tools execute in this experiment.
 """

@@ -14,6 +14,7 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 import json
+import sys
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -22,12 +23,14 @@ from fastapi.responses import FileResponse, HTMLResponse
 import uvicorn
 
 from apps.runtime_api import create_app as create_runtime_api
+from apps.desktop_luna import DesktopLunaDelegator
 from core.intelligence import DelegationOrchestrator
 from core.runtime import IntelligenceProviderRouter, JarvisRuntime, RuntimeSettings
 from core.voice import LocalWakeListener, WakeSleepConfig
 from providers.stt.whisper_cpp import WhisperCppConfig, WhisperCppProvider
 from providers.vad import WhisperCppSileroVadDetector
 from providers.intelligence.openai import OpenAIProvider, OpenAIProviderConfig
+from providers.intelligence.openai.decisions_shadow import DecisionsShadowProbe
 from providers.intelligence.openai.config import merged_environment
 from providers.voice_frontend.openai_realtime import (
     BrowserRealtimeRelay,
@@ -54,11 +57,41 @@ DEFAULT_STATIC_DIR = PROJECT_ROOT / "apps" / "desktop" / "dist"
 
 
 def _terminal_chat_text(value: object, *, limit: int = 8000) -> str:
-    """Render one safe, single-line conversation trace entry for the dev terminal."""
+    """Safely print user/assistant text in Windows terminals with legacy encodings.
+
+    This affects only the *debug representation*, never the actual transcript
+    passed to Core or Realtime. Modern UTF-8 consoles retain readable Unicode;
+    legacy Windows cp1252 consoles see JSON escapes for unsupported glyphs.
+    """
     clean = " ".join(str(value or "").replace("\x1b", "").split())
     if len(clean) > limit:
         clean = clean[: max(0, limit - 1)] + "…"
-    return json.dumps(clean, ensure_ascii=False)
+    rendered = json.dumps(clean, ensure_ascii=False)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        rendered.encode(encoding)
+    except (UnicodeError, LookupError):
+        return json.dumps(clean, ensure_ascii=True)
+    return rendered
+
+
+def _configure_terminal_output() -> None:
+    """A logging failure must never disconnect Jarvis's control WebSocket.
+
+    The host shares stdout/stderr with npm on Windows; cp1252 often cannot
+    represent transcripts, provider error text or exceptions. Keep the active
+    encoding, but escape otherwise unencodable glyphs in *all* log messages.
+    Do not change voice, provider requests, transcripts, or runtime settings.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (OSError, ValueError, TypeError):
+            # Embedded or captured streams may not support reconfiguration.
+            pass
 
 
 def parser() -> argparse.ArgumentParser:
@@ -276,6 +309,8 @@ class DesktopRealtimeSession:
         self._event_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._parallel_probe: ParallelShadowProbe | None = None
+        self._decisions_shadow: DecisionsShadowProbe | None = None
+        self._luna: DesktopLunaDelegator | None = None
         self._bench = RealtimeBenchmark(config.model)
 
     @property
@@ -300,6 +335,22 @@ class DesktopRealtimeSession:
             )
             self._relay = relay
             self._bridge = bridge
+            if self.config.core_luna_probe:
+                if not self.config.overlap_probe or self.delegation_orchestrator is None:
+                    raise RuntimeError("Core Luna mode requires overlap and Core delegation orchestration")
+                self._luna = DesktopLunaDelegator(
+                    orchestrator=self.delegation_orchestrator,
+                    conversation=self.runtime.conversation,
+                    notify=relay.notify_desktop,
+                    result_hold_seconds=self.config.luna_result_hold_seconds,
+                )
+                print("[Jarvis Luna] mode=real_core_reasoning | actions=dry_run | audio=private_pcm | authority=core", flush=True)
+            if self.config.decisions_shadow_probe:
+                if not self.config.overlap_probe or not self.config.api_key:
+                    raise RuntimeError("Decisions shadow requires mini-overlap and a backend OpenAI key")
+                self._decisions_shadow = DecisionsShadowProbe(self.config.api_key)
+                print("[Jarvis Decisions Shadow] mode=read_only | billing=extra_input_tokens "
+                      "| transcript=dev_only | audio=unchanged | routing=mini", flush=True)
             if self.config.parallel_shadow_probe and not self.config.direct_only_benchmark:
                 provider = self.runtime.provider_router.resolve()
                 if not isinstance(provider, OpenAIProvider):
@@ -342,6 +393,20 @@ class DesktopRealtimeSession:
             "tool_choice": {"type": "function", "name": ROUTE_TURN_TOOL_NAME},
             "metadata": {"jarvis_stage": "route"},
         })
+        if self.config.core_luna_probe:
+            # Only this opt-in mode changes the probe policy. Core still owns
+            # provider choice, and external actions remain in dry-run mode.
+            policy = json.loads(json.dumps(policy))
+            for tool in policy.get("tools", []):
+                if tool.get("name") == "ask_luna":
+                    tool["description"] = "Request real, Core-authorized backend reasoning for complex analysis, software design, or coding. The tool selects reasoning only; no computer actions or background tasks are executed."
+            policy["instructions"] = str(policy.get("instructions", "")).replace(
+                "For complex coding/architecture/analysis use ask_luna (dry run).",
+                "For complex coding/architecture/analysis use ask_luna, which invokes Core's real intelligence provider.",
+            ).replace(
+                "Never claim that Luna or an action ran. No real external tools execute in this experiment.",
+                "Do not claim external actions were completed. Luna runs only after Core authorizes the reasoning request; external actions remain dry-run.",
+            )
         print(f"[Jarvis A/B Start] model={self.config.model} | reasoning={self.config.reasoning_effort} | "
               f"mode={'overlap_probe' if overlap_probe else ('buffered_tool_probe' if buffered_probe else ('tool_probe_text_only' if tool_probe else ('direct_no_gate_tools_disabled' if direct_only else 'safe_routed')))} | "
               f"shadow={self.config.parallel_shadow_probe and not direct_only} | "
@@ -353,6 +418,7 @@ class DesktopRealtimeSession:
             "tool_selection_probe": tool_probe,
             "buffered_tool_probe": buffered_probe,
             "overlap_probe": overlap_probe,
+            "core_luna_probe": self.config.core_luna_probe,
             "response": policy,
         })
 
@@ -377,6 +443,10 @@ class DesktopRealtimeSession:
                         flush=True,
                     )
                     self._bench.on_user(turn, str(message.get("text") or ""))
+                    if self._luna is not None and source in {"voice", "typed", "wake_transcript"}:
+                        self._luna.transcript(turn, str(message.get("text") or ""))
+                    if self._decisions_shadow is not None and source in {"voice", "typed", "wake_transcript"}:
+                        self._decisions_shadow.observe_transcript(turn, str(message.get("text") or ""), transcript_ms=message.get("transcript_ms"))
                     if self._parallel_probe is not None and source in {"voice", "typed", "wake_transcript"}:
                         print(
                             f"[Jarvis Parallel] turn={turn or 'n/a'} | candidate=luna | transcript_ms={message.get('transcript_ms', 'n/a')}",
@@ -403,9 +473,40 @@ class DesktopRealtimeSession:
                         f"[JARVIS REPLY] turn={turn or 'n/a'} | realtime_model={self.config.model} | source={source} | text={_terminal_chat_text(message.get('text'))}",
                         flush=True,
                     )
+                    if self._decisions_shadow is not None:
+                        self._decisions_shadow.observe_reply(turn, str(message.get("text") or ""))
                     print(self._bench.on_reply(turn, str(message.get("text") or "")), flush=True)
                     continue
+                if kind == "desktop_luna_voice":
+                    if self._luna is not None:
+                        print(f"[Jarvis Luna Voice] turn={message.get('turn','n/a')} | "
+                              f"phase={message.get('phase','n/a')} | "
+                              f"reason={message.get('reason','n/a')} | "
+                              f"core_text_chars={message.get('core_text_chars','n/a')} | "
+                              f"voice_delivered={message.get('voice_delivered','n/a')}", flush=True)
+                    continue
+                if kind == "desktop_luna_cancel":
+                    if self._luna is not None:
+                        await self._luna.cancel()
+                    continue
                 if kind == "desktop_overlap_audio":
+                    if self._luna is not None:
+                        turn = int(message.get("turn") or 0)
+                        phase = str(message.get("phase") or "")
+                        if phase == "started":
+                            self._luna.new_turn(turn)
+                        elif phase == "sleep":
+                            await self._luna.cancel()
+                    if self._decisions_shadow is not None:
+                        phase = str(message.get("phase") or "")
+                        if phase in {"direct", "sleep"}:
+                            self._decisions_shadow.observe_mini_route(int(message.get("turn") or 0), phase)
+                    if message.get("phase") == "latency_breakdown":
+                        fields = ("commit_ms", "transcript_ms", "route_ms", "candidate_created_ms",
+                                  "pcm_ready_ms", "gate_authorized_ms", "first_audio_ms")
+                        details = " | ".join(f"{key}={message.get(key, 'n/a')}" for key in fields)
+                        print(f"[Jarvis Latency Detail] turn={message.get('turn','n/a')} | {details}", flush=True)
+                        continue
                     print(f"[Jarvis Overlap] turn={message.get('turn','n/a')} | phase={message.get('phase','n/a')} | "
                           f"decision_ms={message.get('decision_ms','n/a')} | "
                           f"first_playback_ms={message.get('first_playback_ms','n/a')} | "
@@ -423,12 +524,19 @@ class DesktopRealtimeSession:
                     tool = str(message.get("tool") or "unknown")
                     phase = str(message.get("phase") or "unknown")
                     approved = tool in ALLOWED_PROBE_TOOLS
+                    if self._decisions_shadow is not None and phase == "selection" and approved:
+                        self._decisions_shadow.observe_mini_route(turn, tool)
+                    live_luna = self._luna is not None and phase == "selection" and tool == "ask_luna"
+                    delegated = self._luna.selected(turn) if live_luna else False
+                    if live_luna:
+                        print(f"[Jarvis Luna] turn={turn} | phase=selection | queued={delegated} "
+                              "| request_source=confirmed_user_transcript | other_tools=dry_run", flush=True)
                     print(f"[Jarvis Tool Probe] turn={turn or 'n/a'} | tool={tool} | "
-                          f"phase={phase} | dry_run=True | executed=False | permitted={approved} | "
+                          f"phase={phase} | dry_run={not delegated} | executed=False | permitted={approved} | "
                           f"pretool_text_chars={message.get('pretool_text_chars', 'n/a')} | "
                           f"decision_ms={message.get('decision_ms', 'n/a')}", flush=True)
                     if phase == 'selection' and approved:
-                        self._bench.on_core(turn, f"dry_run:{tool}")
+                        self._bench.on_core(turn, "core_luna" if delegated else f"dry_run:{tool}")
                     continue
                 if kind == "desktop_fast_direct":
                     turn = int(message.get("turn") or 0)
@@ -466,6 +574,12 @@ class DesktopRealtimeSession:
                         value = message.get(name)
                         return "n/a" if value is None else f"{value} ms"
                     self._bench.on_latency(int(turn or 0), message.get("speech_end_to_first_audio_ms"))
+                    if self._decisions_shadow is not None:
+                        self._decisions_shadow.observe_voice_timing(
+                            int(turn or 0),
+                            speech_end_to_route_ms=message.get("speech_end_to_route_ms"),
+                            speech_end_to_first_audio_ms=message.get("speech_end_to_first_audio_ms"),
+                        )
                     print(
                         "[Desktop latency] "
                         f"turn={turn} | "
@@ -568,6 +682,10 @@ class DesktopRealtimeSession:
             call_id = relay.call_id
             parallel_probe = self._parallel_probe
             self._parallel_probe = None
+            decisions_shadow = self._decisions_shadow
+            self._decisions_shadow = None
+            luna = self._luna
+            self._luna = None
             self._relay = None
             self._bridge = None
             self._event_task = None
@@ -578,6 +696,12 @@ class DesktopRealtimeSession:
         if parallel_probe is not None:
             with suppress(Exception):
                 await parallel_probe.close()
+        if decisions_shadow is not None:
+            with suppress(Exception):
+                await decisions_shadow.close()
+        if luna is not None:
+            with suppress(Exception):
+                await luna.close()
         if bridge is not None:
             with suppress(Exception):
                 await bridge.close()
@@ -747,6 +871,7 @@ def create_desktop_app(
 
 
 def main() -> int:
+    _configure_terminal_output()
     args = parser().parse_args()
     if args.host not in {"127.0.0.1", "localhost"}:
         raise SystemExit("[FAIL] 0.1.1 Desktop Alpha host is loopback-only")

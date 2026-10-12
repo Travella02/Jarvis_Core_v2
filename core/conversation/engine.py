@@ -76,6 +76,20 @@ class ConversationCore:
         self._active_trace: CorrelationContext | None = None
         self._active_provider: IntelligenceProvider | None = None
 
+    def recover_idle_after_terminal_failure(self) -> bool:
+        """Allow a *new* authorized request after a finished terminal failure.
+
+        Terminal errors remain visible as ERROR/DEGRADED until a new request
+        explicitly calls this method. Never recover an active turn, sleeping
+        Core, or a Core instance that's still working. This is not an API retry.
+        """
+        if self._active_trace is not None:
+            return False
+        if self.state.state not in {CoreState.ERROR, CoreState.DEGRADED}:
+            return False
+        self.state.transition(CoreState.LISTENING, reason="new turn after terminal provider failure")
+        return True
+
     @property
     def active_trace(self) -> CorrelationContext | None:
         return self._active_trace

@@ -48,8 +48,8 @@ class OverlapSleepContractTests(unittest.TestCase):
         self.assertIn('if not self.config.overlap_probe:', HOST)
 
     def test_decision_model_knows_sleep_without_hardcoded_keyword_routing(self):
-        self.assertIn('Select sleep_jarvis with sleep_evidence', APP)
-        self.assertIn('Never select sleep for gratitude alone', APP)
+        self.assertIn('Set sleep_evidence to the exact contiguous closing words', APP)
+        self.assertIn('Mere gratitude does not authorize sleep', APP)
         self.assertIn("tools,tool_choice:'auto'", APP)
         self.assertIn("metadata:{jarvis_stage:'overlap_decision'", APP)
 

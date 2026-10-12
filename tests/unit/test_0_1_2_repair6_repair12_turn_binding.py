@@ -42,7 +42,7 @@ class OverlapTurnBindingTests(unittest.TestCase):
     def test_pcm_path_untouched_and_tools_are_still_dry_run(self):
         self.assertIn("StreamingPcmGate.create(stream", APP)
         self.assertIn("tools:[],tool_choice:'none'", APP)
-        self.assertIn("dry_run:true,executed:false", APP)
+        self.assertIn("dry_run:!realLuna,executed:false", APP)
         self.assertIn("No tool or action was executed.", APP)
 
 if __name__ == '__main__':

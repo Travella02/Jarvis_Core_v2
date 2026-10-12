@@ -4,7 +4,19 @@ Jarvis Core v2 is a clean rebuild of Jarvis with provider-independent intelligen
 
 ## Current milestone
 
-**0.1.2 - Intelligence Router & Core Delegation Orchestrator**
+**0.1.3 candidate - Decisions API read-only shadow comparison**
+
+0.1.2 is the accepted voice architecture baseline. The 0.1.3 candidate adds only an opt-in, backend-owned Decisions classifier observation path. Existing `mini-overlap` stays unchanged; a new `mini-overlap-decisions-shadow` mode makes extra billed API calls on available transcripts, compares its suggested route with Mini, and never authorizes audio, sleep, tools, or Luna. API failures cannot authorize work. The renderer, original-audio WebRTC connection, PCM output gate, and wake listener remain unchanged.
+
+For opt-in testing (additional API cost and transcript disclosure to OpenAI):
+
+```powershell
+python .\scripts\realtime_ab.py mini-overlap-decisions-shadow
+```
+
+Inspect `[Jarvis Decisions Shadow] phase=result` and `phase=compare` lines. Note that the shadow only begins after a transcript is available, so speed is not directly interchangeable with Mini's audio-native decision timing.
+
+**Accepted 0.1.2 - Intelligence Router & Core Delegation Orchestrator**
 
 0.1.2 moves backend model/capability choice fully behind Jarvis Core. Realtime Mini may request help by describing the goal and a coarse capability category, but it never chooses Luna, a stronger model, a tool provider, memory implementation, or task worker. Core plans the delegation and emits an observable route decision.
 
@@ -165,3 +177,7 @@ Voice Lab can now A/B Luna over a persistent Responses WebSocket (`--luna-transp
 
 ## 0.0.4-repair20 — Whisper Warmup Runtime Fix
 Repair20 fixes the hidden first-turn Whisper inference warmup introduced in repair19 by restoring the missing `CorrelationContext` import and adding executable regression coverage for that path.
+
+### 0.1.3 Repair2 candidate — real Luna reasoning (opt-in)
+
+After 0.1.3 Repair1 is applied, use `python scripts/realtime_ab.py mini-overlap-luna` to test **real** Luna reasoning for `ask_luna` turns. Mini still decides when to delegate, Core owns the provider/route, and Realtime voices Core's result using the existing private PCM path. Direct turns and sleep keep their previous routing. Computer actions remain dry-run; Decisions remains an **independent observational mode** (`mini-overlap-decisions-shadow`), not a live gate. The new mode incurs additional OpenAI model usage and requires the normal local `.env` key. Do not clean up or commit until full live voice and interruption acceptance. Details: `issues/ISSUE_079_0_1_3_REAL_CORE_LUNA_VOICE_HANDOFF.md`.

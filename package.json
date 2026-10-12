@@ -1,8 +1,8 @@
 {
   "name": "jarvis-core-v2",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
-  "description": "Jarvis Core v2 0.1.2: Core-owned intelligence routing and delegated backend orchestration behind Realtime Mini.",
+  "description": "Jarvis Core v2 0.1.3 candidate: read-only Decisions API comparison alongside the accepted Mini overlap voice architecture.",
   "main": "apps/desktop/electron/main.cjs",
   "scripts": {
     "desktop:build": "vite build --config apps/desktop/vite.config.mjs",

@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { StreamingPcmGate } from './streamingPcmGate';
+import { isVerifiedSleepEvidence, hasSubstantiveUserWords, type SleepTurnInput } from './sleepAuthorization';
 
 type PresenceState = 'sleeping' | 'awake';
 type JarvisState = 'sleeping' | 'waking' | 'connecting' | 'idle' | 'listening' | 'thinking' | 'speaking' | 'working' | 'error';
@@ -30,8 +31,8 @@ type RealtimeEvent = {
   arguments?: string;
   call_id?: string;
   item?: RealtimeItem;
-  error?: { message?: string };
-  response?: { id?: string; status?: string; output?: RealtimeItem[]; metadata?: Record<string, string>; usage?: { output_token_details?: { text_tokens?: number; audio_tokens?: number } } };
+  error?: { message?: string; code?: string };
+  response?: { id?: string; status?: string; status_details?: {reason?: string}; output?: RealtimeItem[]; metadata?: Record<string, string>; usage?: { output_token_details?: { text_tokens?: number; audio_tokens?: number } } };
 };
 
 type ResponsePolicy = {
@@ -425,6 +426,8 @@ export default function App() {
   const toolProbeRef = useRef(false);
   const bufferedToolProbeRef = useRef(false);
   const overlapProbeRef = useRef(false);
+  const coreLunaProbeRef = useRef(false);
+  const overlapCandidateStageRef = useRef('overlap_candidate');
   const overlapGateRef = useRef<StreamingPcmGate | null>(null);
   const overlapDecisionIdRef = useRef('');
   const overlapCandidateIdRef = useRef('');
@@ -433,15 +436,29 @@ export default function App() {
   const overlapAudioDrainedRef = useRef(false);
   const overlapAudioStartedRef = useRef(false);
   const overlapReplyRef = useRef('');
+  // The Core-verified text remains available if Realtime speech synthesis fails.
+  const coreLunaVerifiedTextRef = useRef('');
   const overlapEpochRef = useRef(0);
   const overlapStartedRef = useRef(0);
   const overlapDecisionMsRef = useRef<number | null>(null);
+  const overlapPerfRef = useRef<{turn:number;commit:number|null;transcript:number|null;
+    route:number|null;candidate:number|null;pcmReady:number|null;gateAuthorized:number|null}>({
+      turn:0,commit:null,transcript:null,route:null,candidate:null,pcmReady:null,gateAuthorized:null});
   // An out-of-band response must explicitly reference the committed USER item.
   // speech_stopped alone is too early: the model may otherwise see the prior turn.
   const overlapCommittedItemRef = useRef('');
   const overlapAwaitingCommitRef = useRef(false);
   const overlapCommitTimerRef = useRef<number | null>(null);
   const overlapActiveTurnRef = useRef(0);
+  // Sleep evidence is authorized only from a confirmed transcript tied to the
+  // same committed Realtime audio item (or from explicitly submitted text).
+  const overlapInputBindingRef = useRef('');
+  const overlapSleepInputRef = useRef<SleepTurnInput | null>(null);
+  const overlapTranscriptsRef = useRef<Map<string, string>>(new Map());
+  const overlapPendingSleepRef = useRef<{turn:number;epoch:number;evidence:string} | null>(null);
+  const overlapSleepTimerRef = useRef<number | null>(null);
+  const overlapDirectVerifiedRef = useRef(false);
+  const overlapDirectTimerRef = useRef<number | null>(null);
   const bufferedRemoteStreamRef = useRef<MediaStream | null>(null);
   const bufferedCaptureRef = useRef<MediaRecorder | null>(null);
   const bufferedChunksRef = useRef<Blob[]>([]);
@@ -948,6 +965,18 @@ export default function App() {
   };
 
   const cancelOverlap = () => {
+    if (overlapDirectTimerRef.current !== null) window.clearTimeout(overlapDirectTimerRef.current);
+    overlapDirectTimerRef.current = null;
+    overlapDirectVerifiedRef.current = false;
+    if (overlapSleepTimerRef.current !== null) window.clearTimeout(overlapSleepTimerRef.current);
+    overlapSleepTimerRef.current = null;
+    overlapPendingSleepRef.current = null;
+    overlapInputBindingRef.current = '';
+    overlapSleepInputRef.current = null;
+    if (coreLunaProbeRef.current && overlapActiveTurnRef.current) {
+      sendControlMessage({kind:'desktop_luna_cancel',turn:overlapActiveTurnRef.current});
+    }
+
     overlapEpochRef.current += 1;
     if (overlapCommitTimerRef.current !== null) window.clearTimeout(overlapCommitTimerRef.current);
     overlapCommitTimerRef.current = null;
@@ -961,10 +990,15 @@ export default function App() {
     overlapDecisionIdRef.current = '';
     overlapCandidateIdRef.current = '';
     overlapDecisionRef.current = 'pending';
+    overlapDirectVerifiedRef.current = false;
+    if (overlapDirectTimerRef.current !== null) window.clearTimeout(overlapDirectTimerRef.current);
+    overlapDirectTimerRef.current = null;
+    overlapCandidateStageRef.current = 'overlap_candidate';
     overlapCandidateDoneRef.current = false;
     overlapAudioDrainedRef.current = false;
     overlapAudioStartedRef.current = false;
     overlapReplyRef.current = '';
+    coreLunaVerifiedTextRef.current = '';
     const dc = dcRef.current;
     if (dc?.readyState === 'open') {
       // Response-scoped cancellation is required: never let a previous turn publish.
@@ -1076,7 +1110,15 @@ export default function App() {
     overlapCommitTimerRef.current = null;
     overlapAwaitingCommitRef.current = false;
     overlapActiveTurnRef.current = latencyRef.current.turn;
+    overlapInputBindingRef.current = committedItemId || `typed:${latencyRef.current.turn}`;
+    const cachedTranscript = committedItemId ? overlapTranscriptsRef.current.get(committedItemId) : null;
+    overlapSleepInputRef.current = typedText.trim()
+      ? {turn:latencyRef.current.turn,binding:overlapInputBindingRef.current,source:'typed',text:typedText.trim()}
+      : cachedTranscript
+        ? {turn:latencyRef.current.turn,binding:overlapInputBindingRef.current,source:'voice',text:cachedTranscript}
+        : null;
     overlapDecisionRef.current = 'pending';
+    overlapCandidateStageRef.current = 'overlap_candidate';
     overlapDecisionIdRef.current = '';
     overlapCandidateIdRef.current = '';
     overlapReplyRef.current = '';
@@ -1084,6 +1126,9 @@ export default function App() {
     overlapAudioDrainedRef.current = false;
     overlapAudioStartedRef.current = false;
     overlapStartedRef.current = performance.now();
+    overlapPerfRef.current = {turn:latencyRef.current.turn,
+      commit:overlapStartedRef.current,transcript:overlapSleepInputRef.current ? overlapStartedRef.current : null,
+      route:null,candidate:null,pcmReady:null,gateAuthorized:null};
     overlapDecisionMsRef.current = null;
     latencyRef.current.route = 'overlap_stream_probe';
     latencyRef.current.routeDecided = undefined;
@@ -1096,7 +1141,9 @@ export default function App() {
       metadata:{jarvis_stage:'overlap_decision',jarvis_turn:turn},
       input,
       output_modalities:['text'],max_output_tokens:512,tools,tool_choice:'auto',
-      instructions:'Select sleep_jarvis with sleep_evidence quoting the exact user closing words when the user clearly asks to sleep or end the conversation. Never select sleep for gratitude alone or a continuing question. Sleep is silent, with no farewell. Otherwise decide direct versus ask_luna for complex reasoning or test_action for external actions. Both expert/action tools are dry runs. Never claim any action succeeded.'}}));
+      instructions:coreLunaProbeRef.current
+        ? `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. For complex reasoning or coding use ask_luna, which may invoke real Core reasoning after authorization. Actual external actions use test_action and remain dry runs. Never claim work was executed prematurely.`
+        : `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. Otherwise decide direct versus ask_luna for complex reasoning or test_action for external actions. Both expert/action tools are dry runs. Never claim any action succeeded.`}}));
     dc.send(JSON.stringify({type:'response.create',response:{conversation:'none',
       metadata:{jarvis_stage:'overlap_candidate',jarvis_turn:turn},
       input,
@@ -1248,6 +1295,173 @@ export default function App() {
     }
   };
 
+  const recoverIncompleteDirectResponse = (turn: number, reason: string) => {
+    // Direct speech is optional output, not a connectivity health check.
+    // A max_output_tokens limit (or transient renderer failure) must never
+    // disable a still-connected, awake Jarvis desktop session.
+    if (!overlapProbeRef.current || turn !== overlapActiveTurnRef.current ||
+        overlapCandidateStageRef.current !== 'overlap_candidate' ||
+        overlapDecisionRef.current !== 'direct' || presenceRef.current !== 'awake') return false;
+    overlapDecisionRef.current = 'failed';
+    // Abort privately, WITHOUT a reason. A reason calls the PCM error callback
+    // and could convert this recoverable response failure back into OFFLINE.
+    overlapGateRef.current?.abort();
+    overlapGateRef.current = null;
+    audioPlayingRef.current = false;
+    if (!overlapDirectVerifiedRef.current) {
+      if (overlapDirectTimerRef.current !== null) window.clearTimeout(overlapDirectTimerRef.current);
+      overlapDirectTimerRef.current = null;
+      setCaption('');
+      setStateSafely('idle','Ready');
+      sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'unconfirmed_direct_discarded',
+        reason:'unconfirmed_incomplete_response'});
+      return true;
+    }
+    const partial = normalizeCaptionForDisplay(overlapReplyRef.current).trim();
+    const note = 'I couldn’t finish that response. Ask me to continue or try again.';
+    setCaption(partial ? `${partial}\n\n${note}` : note);
+    setStateSafely('idle','Ready');
+    sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'recoverable_incomplete',
+      reason,had_partial_transcript:Boolean(partial),completed_voice_delivered:false,
+      partial_playback_possible:Boolean(latencyRef.current.firstAudio)});
+    return true;
+  };
+
+  const fallbackCoreLunaVoice = (turn: number, reason: string) => {
+    // A voice renderer failure does NOT mean Core/Luna failed or that the
+    // desktop session went offline. Fail audio closed, but keep the verified
+    // result readable and leave the same awake session available for retry.
+    if (!coreLunaProbeRef.current || overlapCandidateStageRef.current !== 'core_luna_voice' ||
+        turn !== overlapActiveTurnRef.current || presenceRef.current !== 'awake' ||
+        overlapDecisionRef.current !== 'direct') return false;
+    overlapDecisionRef.current = 'failed';
+    overlapGateRef.current?.abort(); // a normal abort must not invoke the PCM error callback
+    overlapGateRef.current = null;
+    audioPlayingRef.current = false;
+    const verifiedText = coreLunaVerifiedTextRef.current;
+    setCaption(verifiedText || 'Core completed the request, but I could not play its answer.');
+    setStateSafely('idle','Core result available as text; speech synthesis interrupted');
+    sendControlMessage({kind:'desktop_luna_voice',turn,phase:'text_fallback',reason,
+      core_text_chars:verifiedText.length,voice_delivered:false});
+    return true;
+  };
+
+  const speakCoreLunaResult = (payload: {turn?: number; status?: string; text?: string}) => {
+    const turn = Number(payload.turn || 0);
+    if (!coreLunaProbeRef.current || turn <= 0 || turn !== overlapActiveTurnRef.current ||
+        overlapDecisionRef.current !== 'tool' || presenceRef.current !== 'awake') return;
+    const dc = dcRef.current;
+    if (dc?.readyState !== 'open') return;
+    const resultText = String(payload.text || '').trim().slice(0, 3000);
+    if (!resultText) { setStateSafely('idle','Luna returned no usable result'); return; }
+    coreLunaVerifiedTextRef.current = resultText;
+    // Original candidate was cancelled and *never* authorized. Reuse the same
+    // private PCM gate only for a NEW response owned by this exact turn.
+    overlapGateRef.current?.abort();
+    overlapGateRef.current = null;
+    overlapCandidateStageRef.current = 'core_luna_voice';
+    overlapCandidateIdRef.current = '';
+    overlapCandidateDoneRef.current = false;
+    overlapAudioStartedRef.current = false;
+    overlapAudioDrainedRef.current = false;
+    overlapReplyRef.current = '';
+    overlapDecisionRef.current = 'direct';
+    overlapDirectVerifiedRef.current = true; // Core text already authorized by the verified tool result.
+    setCaption('');
+    setStateSafely('thinking','Speaking Core result');
+    const originalItem = overlapCommittedItemRef.current;
+    const input: any[] = [];
+    if (/^item_[A-Za-z0-9_-]+$/.test(originalItem)) input.push({type:'item_reference',id:originalItem});
+    input.push({type:'message',role:'user',content:[{type:'input_text',
+      text:`Jarvis Core returned this ${payload.status === 'completed' ? 'verified reasoning answer' : 'verified failure'} for your most recent request. Speak this faithfully without new factual claims or actions:\n${resultText}`}]});
+    dc.send(JSON.stringify({type:'response.create',response:{conversation:'none',
+      metadata:{jarvis_stage:'core_luna_voice',jarvis_turn:String(turn)},
+      // Audio tokens and transcript tokens share this limit. Unlike the short
+      // speculative candidate, a bounded 3000-character Core answer must not
+      // be truncated by a 1024-token voice-synthesis budget.
+      input,output_modalities:['audio'],max_output_tokens:'inf',tools:[],tool_choice:'none',
+      instructions:'You are Jarvis speaking an already obtained Core result. Give the answer naturally and faithfully, without claiming any additional research, external actions, or capabilities. Never announce internal routing or say that you are about to check something. If Core reported a failure, communicate that failure accurately. Do not run tools.'}}));
+    sendControlMessage({kind:'desktop_luna_voice',turn,phase:'started',status:String(payload.status || '')});
+  };
+
+  // An audio item is not proof that a user spoke actual words: semantic VAD
+  // can commit a mic bump or audio feedback. Keep direct PCM private until the
+  // SAME item receives a usable transcript. Typed requests are already confirmed.
+  const settlePendingOverlapDirect = () => {
+    if (!overlapProbeRef.current || overlapDecisionRef.current !== 'direct' ||
+        overlapCandidateStageRef.current !== 'overlap_candidate' ||
+        overlapDirectVerifiedRef.current || presenceRef.current !== 'awake') return;
+    const input = overlapSleepInputRef.current;
+    if (!input || input.turn !== overlapActiveTurnRef.current ||
+        input.binding !== overlapInputBindingRef.current ||
+        !hasSubstantiveUserWords(input.text)) return;
+    overlapDirectVerifiedRef.current = true;
+    if (overlapPerfRef.current.turn === input.turn) overlapPerfRef.current.gateAuthorized = performance.now();
+    if (overlapDirectTimerRef.current !== null) window.clearTimeout(overlapDirectTimerRef.current);
+    overlapDirectTimerRef.current = null;
+    overlapGateRef.current?.authorize();
+    sendControlMessage({kind:'desktop_overlap_audio',turn:input.turn,phase:'direct_input_confirmed',
+      source:input.source,confirmed_chars:input.text.length});
+    if (overlapCandidateDoneRef.current && overlapReplyRef.current) {
+      setCaption(overlapReplyRef.current);
+      sendControlMessage({kind:'desktop_reply',turn:input.turn,source:'overlap_realtime',text:overlapReplyRef.current});
+    }
+  };
+
+  const rejectUnconfirmedDirect = (turn: number, epoch: number) => {
+    if (epoch !== overlapEpochRef.current || turn !== overlapActiveTurnRef.current ||
+        overlapDecisionRef.current !== 'direct' || overlapDirectVerifiedRef.current ||
+        overlapCandidateStageRef.current !== 'overlap_candidate') return;
+    overlapDirectTimerRef.current = null;
+    overlapDecisionRef.current = 'failed';
+    overlapGateRef.current?.abort();
+    overlapGateRef.current = null;
+    if (overlapCandidateIdRef.current && dcRef.current?.readyState === 'open') {
+      dcRef.current.send(JSON.stringify({type:'response.cancel',response_id:overlapCandidateIdRef.current}));
+      dcRef.current.send(JSON.stringify({type:'output_audio_buffer.clear'}));
+    }
+    sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'unconfirmed_direct_discarded',
+      reason:overlapSleepInputRef.current ? 'insufficient_speech_evidence' : 'transcript_timeout'});
+    setStateSafely('idle','Ready');
+  };
+
+  // A tool decision may arrive before Realtime finishes transcribing the
+  // committed item. Do not sleep or release private speech until evidence is
+  // corroborated by that exact current-turn item. A timeout fails closed.
+  const settlePendingOverlapSleep = (timeout = false) => {
+    const pending = overlapPendingSleepRef.current;
+    if (!pending) return;
+    if (pending.turn !== overlapActiveTurnRef.current || pending.epoch !== overlapEpochRef.current ||
+        presenceRef.current !== 'awake') {
+      overlapPendingSleepRef.current = null;
+      if (overlapSleepTimerRef.current !== null) window.clearTimeout(overlapSleepTimerRef.current);
+      overlapSleepTimerRef.current = null;
+      return;
+    }
+    const confirmed = overlapSleepInputRef.current;
+    if (!confirmed && !timeout) return;
+    const approved = isVerifiedSleepEvidence(pending.evidence,confirmed,pending.turn,
+      overlapInputBindingRef.current,wakePhraseRef.current);
+    sendControlMessage({kind:'desktop_overlap_audio',turn:pending.turn,phase:'sleep_evidence_check',
+      evidence:pending.evidence.slice(0,160),confirmed_text:confirmed?.text?.slice(0,160) || '',
+      source:confirmed?.source || 'missing',same_binding:confirmed?.binding === overlapInputBindingRef.current,
+      approved});
+    overlapPendingSleepRef.current = null;
+    if (overlapSleepTimerRef.current !== null) window.clearTimeout(overlapSleepTimerRef.current);
+    overlapSleepTimerRef.current = null;
+    if (approved) {
+      sendControlMessage({kind:'desktop_overlap_audio',turn:pending.turn,phase:'sleep',
+        decision_ms:overlapDecisionMsRef.current,reason:'verified_user_sleep_request'});
+      void enterSleep('voice_command');
+    } else {
+      overlapDecisionRef.current = 'failed'; // Late candidate cancellation is not a fatal error.
+      sendControlMessage({kind:'desktop_overlap_audio',turn:pending.turn,phase:'sleep_rejected',
+        reason:timeout && !confirmed ? 'sleep_transcript_timeout' : 'sleep_evidence_mismatch'});
+      setCaption('I could not confirm the sleep request.');
+      setStateSafely('idle','Ready');
+    }
+  };
+
   const handleRealtimeEvent = (event: RealtimeEvent) => {
     const type = event.type || '';
     const now = performance.now();
@@ -1282,6 +1496,21 @@ export default function App() {
       const itemId = String(event.item_id || '');
       const turn = userItemTurnsRef.current.get(itemId) || latencyRef.current.turn || turnCounterRef.current || 0;
       const transcript = normalizeCaptionForDisplay(String(event.transcript || '')).trim();
+      if (overlapProbeRef.current && itemId && transcript) {
+        overlapTranscriptsRef.current.set(itemId,transcript);
+        while (overlapTranscriptsRef.current.size > 64) {
+          overlapTranscriptsRef.current.delete(overlapTranscriptsRef.current.keys().next().value || '');
+        }
+        // Item identity is stronger than event ordering or inferred turn number.
+        if (itemId === overlapInputBindingRef.current && overlapActiveTurnRef.current > 0) {
+          overlapSleepInputRef.current = {turn:overlapActiveTurnRef.current,
+            binding:itemId,source:'voice',text:transcript};
+          if (overlapPerfRef.current.turn === overlapActiveTurnRef.current)
+            overlapPerfRef.current.transcript = now;
+          settlePendingOverlapSleep();
+          settlePendingOverlapDirect();
+        }
+      }
       if (conversationTraceRef.current && transcript) {
         sendControlMessage({
           kind: 'desktop_user',
@@ -1305,19 +1534,33 @@ export default function App() {
         // Response events from a cancelled older turn must never claim ownership.
         if (Number(event.response?.metadata?.jarvis_turn || 0) !== overlapActiveTurnRef.current || !overlapActiveTurnRef.current) return;
         if (stage === 'overlap_decision') overlapDecisionIdRef.current = responseId;
-        if (stage === 'overlap_candidate') {
+        if (stage === overlapCandidateStageRef.current) {
+          if (overlapPerfRef.current.turn === turn) overlapPerfRef.current.candidate = now;
           overlapCandidateIdRef.current = responseId;
           const stream = bufferedRemoteStreamRef.current;
           const epoch = overlapEpochRef.current;
           if (!stream) {
-            overlapDecisionRef.current = 'failed';
             sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'error',reason:'remote_stream_unavailable'});
-            setStateSafely('error','Private audio stream unavailable');
+            if (!fallbackCoreLunaVoice(turn,'remote_stream_unavailable') &&
+                !recoverIncompleteDirectResponse(turn,'remote_stream_unavailable')) {
+              overlapDecisionRef.current = 'failed';
+              setStateSafely('error','Private audio stream unavailable');
+            }
           } else try {
             void StreamingPcmGate.create(stream, () => {
               if (epoch !== overlapEpochRef.current || overlapDecisionRef.current !== 'direct') return;
               latencyRef.current.firstAudio ??= performance.now();
               if (!latencyRef.current.reported) {latencyRef.current.reported=true;sendLatencySummary();}
+              const p = overlapPerfRef.current;
+              if (p.turn === turn && latencyRef.current.speechStopped !== undefined) {
+                const start = latencyRef.current.speechStopped;
+                const ms = (t:number|null) => t === null ? null : Math.round(t-start);
+                sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'latency_breakdown',
+                  commit_ms:ms(p.commit),transcript_ms:ms(p.transcript),route_ms:ms(p.route),
+                  candidate_created_ms:ms(p.candidate),pcm_ready_ms:ms(p.pcmReady),
+                  gate_authorized_ms:ms(p.gateAuthorized),first_audio_ms:Math.round(performance.now()-start),
+                  model_route_before_transcript:p.route!==null&&p.transcript!==null&&p.route<p.transcript});
+              }
               setStateSafely('speaking','Speaking');
               audioPlayingRef.current = true;
               sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'released',
@@ -1332,25 +1575,36 @@ export default function App() {
             }, (reason) => {
               if (epoch !== overlapEpochRef.current) return;
               sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'error',reason});
-              setStateSafely('error','Streaming audio failed: '+reason);
+              if (!fallbackCoreLunaVoice(turn,'pcm_'+reason) &&
+                  !recoverIncompleteDirectResponse(turn,'pcm_'+reason) && overlapDecisionRef.current !== 'failed')
+                setStateSafely('error','Streaming audio failed: '+reason);
             }).then((gate) => {
               if (epoch !== overlapEpochRef.current || overlapDecisionRef.current === 'tool' || overlapDecisionRef.current === 'failed') {
                 gate.abort();
                 return;
               }
               overlapGateRef.current = gate;
-              if (overlapDecisionRef.current === 'direct') gate.authorize();
+              if (overlapPerfRef.current.turn === turn) overlapPerfRef.current.pcmReady = performance.now();
+              if (overlapDecisionRef.current === 'direct' && overlapDirectVerifiedRef.current) gate.authorize();
               if (overlapCandidateDoneRef.current && overlapAudioDrainedRef.current) gate.finish();
             }).catch((error) => {
               if (epoch !== overlapEpochRef.current) return;
-              overlapDecisionRef.current = 'failed';
               sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'error',reason:String(error)});
-              setStateSafely('error','Private PCM audio unavailable');
+              if (!fallbackCoreLunaVoice(turn,'pcm_unavailable') &&
+                  !recoverIncompleteDirectResponse(turn,'pcm_unavailable') &&
+                  !(overlapCandidateStageRef.current === 'core_luna_voice' && overlapDecisionRef.current === 'failed')) {
+                overlapDecisionRef.current = 'failed';
+                setStateSafely('error','Private PCM audio unavailable');
+              }
             });
           } catch (error) {
-            overlapDecisionRef.current = 'failed';
             sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'error',reason:String(error)});
-            setStateSafely('error','Private PCM audio unavailable');
+            if (!fallbackCoreLunaVoice(turn,'pcm_unavailable') &&
+                !recoverIncompleteDirectResponse(turn,'pcm_unavailable') &&
+                !(overlapCandidateStageRef.current === 'core_luna_voice' && overlapDecisionRef.current === 'failed')) {
+                overlapDecisionRef.current = 'failed';
+                setStateSafely('error','Private PCM audio unavailable');
+              }
           }
         }
         return;
@@ -1362,7 +1616,8 @@ export default function App() {
       if (type === 'response.output_audio_transcript.delta' && responseId === overlapCandidateIdRef.current) {
         overlapReplyRef.current += String(event.delta || '');
         if (overlapReplyRef.current.length > 20000) overlapReplyRef.current = overlapReplyRef.current.slice(0, 20000);
-        if (overlapDecisionRef.current === 'direct') setCaption(overlapReplyRef.current);
+        if (overlapDecisionRef.current === 'direct' && overlapDirectVerifiedRef.current && overlapCandidateStageRef.current !== 'core_luna_voice')
+          setCaption(overlapReplyRef.current);
         return;
       }
       if (type === 'response.done') {
@@ -1370,6 +1625,7 @@ export default function App() {
         if (Number(event.response?.metadata?.jarvis_turn || 0) !== overlapActiveTurnRef.current || !overlapActiveTurnRef.current) return;
         if (responseId === overlapDecisionIdRef.current && stage === 'overlap_decision') {
           overlapDecisionMsRef.current = Math.round(performance.now()-overlapStartedRef.current);
+          if (overlapPerfRef.current.turn === turn) overlapPerfRef.current.route = performance.now();
           latencyRef.current.routeDecided = performance.now();
           const completed = event.response?.status === 'completed';
           const calls = (event.response?.output || []).filter(item => item?.type === 'function_call');
@@ -1381,31 +1637,41 @@ export default function App() {
           if (tool === 'sleep_jarvis') {
             let evidence = '';
             try { evidence = String(JSON.parse(calls[0].arguments || '{}').sleep_evidence || '').trim(); } catch (_) { /* fail closed */ }
+            // A tool label is not authorization. Abort unapproved private PCM,
+            // including if the model decision beat its STT transcription.
+            overlapGateRef.current?.abort();
+            overlapGateRef.current = null;
+            if (overlapCandidateIdRef.current && dcRef.current?.readyState === 'open') {
+              dcRef.current.send(JSON.stringify({type:'response.cancel',response_id:overlapCandidateIdRef.current}));
+              dcRef.current.send(JSON.stringify({type:'output_audio_buffer.clear'}));
+            }
             if (completed && calls.length === 1 && evidence.length > 0 && evidence.length <= 160) {
-              sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'sleep',decision_ms:overlapDecisionMsRef.current,reason:'explicit_sleep'});
-              // enterSleep owns the one-way state transition, cancels private
-              // audio, clears captions and restarts local-only wake listening.
-              void enterSleep('voice_command');
+              overlapPendingSleepRef.current = {turn,epoch:overlapEpochRef.current,evidence};
+              sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'sleep_pending_confirmation',
+                reason:overlapSleepInputRef.current ? 'input_available' : 'awaiting_transcript'});
+              if (overlapSleepInputRef.current) settlePendingOverlapSleep();
+              else overlapSleepTimerRef.current = window.setTimeout(() => settlePendingOverlapSleep(true),2500);
             } else {
               overlapDecisionRef.current = 'failed';
-              overlapGateRef.current?.abort();
-              overlapGateRef.current = null;
-              if (overlapCandidateIdRef.current && dcRef.current?.readyState === 'open') {
-                dcRef.current.send(JSON.stringify({type:'response.cancel',response_id:overlapCandidateIdRef.current}));
-              }
               setCaption('I could not confirm the sleep request.');
               sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'sleep_rejected',reason:'missing_or_invalid_sleep_evidence'});
               setStateSafely('idle','Ready');
             }
             return;
           }
-          sendControlMessage({kind:'desktop_tool_probe',turn,tool,phase:'selection',dry_run:true,executed:false,
+          const realLuna = coreLunaProbeRef.current && completed && calls.length === 1 && tool === 'ask_luna';
+          sendControlMessage({kind:'desktop_tool_probe',turn,tool,phase:'selection',dry_run:!realLuna,executed:false,
             decision_ms:overlapDecisionMsRef.current});
           sendControlMessage({kind:'desktop_overlap_audio',turn,phase:overlapDecisionRef.current,decision_ms:overlapDecisionMsRef.current});
           if (overlapDecisionRef.current === 'direct') {
-            overlapGateRef.current?.authorize();
-            if (overlapReplyRef.current) setCaption(overlapReplyRef.current);
-            if (overlapCandidateDoneRef.current) {
+            settlePendingOverlapDirect();
+            if (!overlapDirectVerifiedRef.current) {
+              const epoch = overlapEpochRef.current;
+              overlapDirectTimerRef.current = window.setTimeout(() => rejectUnconfirmedDirect(turn,epoch),2500);
+              sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'direct_pending_transcription'});
+            }
+            if (overlapDirectVerifiedRef.current && overlapReplyRef.current) setCaption(overlapReplyRef.current);
+            if (overlapDirectVerifiedRef.current && overlapCandidateDoneRef.current) {
               sendControlMessage({kind:'desktop_reply',turn,source:'overlap_realtime',text:overlapReplyRef.current});
             }
           } else {
@@ -1415,27 +1681,41 @@ export default function App() {
               dcRef.current.send(JSON.stringify({type:'response.cancel',response_id:overlapCandidateIdRef.current}));
               dcRef.current.send(JSON.stringify({type:'output_audio_buffer.clear'}));
             }
-            const message = overlapDecisionRef.current === 'tool'
-              ? `${tool} was selected, but this is a dry-run. No tool or action was executed.`
-              : 'I could not verify which system should answer. Nothing was executed.';
-            setCaption(message);
-            sendControlMessage({kind:'desktop_reply',turn,source:'overlap_safe_text',text:message});
-            setStateSafely('idle','Ready');
+            if (realLuna) {
+              // Core will separately return the only approved turn's result.
+              // No speculative audio or misleading success is released here.
+              setStateSafely('working','Core reasoning');
+            } else {
+              const message = overlapDecisionRef.current === 'tool'
+                ? `${tool} was selected, but this is a dry-run. No tool or action was executed.`
+                : 'I could not verify which system should answer. Nothing was executed.';
+              setCaption(message);
+              sendControlMessage({kind:'desktop_reply',turn,source:'overlap_safe_text',text:message});
+              setStateSafely('idle','Ready');
+            }
           }
           return;
         }
-        if (responseId === overlapCandidateIdRef.current && stage === 'overlap_candidate') {
+        if (responseId === overlapCandidateIdRef.current && stage === overlapCandidateStageRef.current) {
           overlapCandidateDoneRef.current = true;
           if (event.response?.status !== 'completed') {
             if (overlapDecisionRef.current === 'direct') {
-              overlapGateRef.current?.abort('candidate_incomplete');
-              setStateSafely('error','Candidate answer incomplete');
+              const reason = String(event.response?.status_details?.reason || event.response?.status || 'incomplete');
+              if (!fallbackCoreLunaVoice(turn,reason)) {
+                if (!recoverIncompleteDirectResponse(turn,reason)) {
+                  overlapGateRef.current?.abort();
+                  overlapGateRef.current = null;
+                  // Stale or superseded responses do not affect the current UI.
+                }
+              }
             }
           } else {
             overlapReplyRef.current = overlapReplyRef.current.trim() || responseTranscript(event.response);
-            if (overlapDecisionRef.current === 'direct') {
+            if (overlapDecisionRef.current === 'direct' && overlapDirectVerifiedRef.current) {
               setCaption(overlapReplyRef.current);
               sendControlMessage({kind:'desktop_reply',turn,source:'overlap_realtime',text:overlapReplyRef.current});
+              if (overlapCandidateStageRef.current === 'core_luna_voice')
+                sendControlMessage({kind:'desktop_luna_voice',turn,phase:'synthesis_completed',status:'completed'});
             }
             if (overlapAudioDrainedRef.current) overlapGateRef.current?.finish();
           }
@@ -1450,8 +1730,24 @@ export default function App() {
         return;
       }
       if (type === 'error') {
-        overlapGateRef.current?.abort('provider_error');
-        setStateSafely('error',event.error?.message || 'Parallel probe error');
+        // A cancelled private candidate may report an error after a sleep
+        // tool was chosen. It must not convert a safely pending/rejected sleep
+        // (or an already-sleeping session) into OFFLINE.
+        if (overlapPendingSleepRef.current || !overlapActiveTurnRef.current ||
+            presenceRef.current !== 'awake' || overlapDecisionRef.current === 'failed') {
+          sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'cancellation_error_ignored',
+            reason:String(event.error?.code || event.error?.message || 'provider_error')});
+          return;
+        }
+        const reason = String(event.error?.code || event.error?.message || 'provider_error');
+        if (!fallbackCoreLunaVoice(turn,reason) && !recoverIncompleteDirectResponse(turn,reason)) {
+          // A decision-stage or transport error is distinct from an incomplete
+          // authorized direct reply and still requires explicit investigation.
+          overlapGateRef.current?.abort();
+          overlapGateRef.current = null;
+          if (overlapDecisionRef.current !== 'failed')
+            setStateSafely('error',event.error?.message || 'Parallel probe error');
+        }
       }
       return;
     }
@@ -1857,6 +2153,9 @@ export default function App() {
           toolProbeRef.current = payload.tool_selection_probe === true;
           bufferedToolProbeRef.current = payload.buffered_tool_probe === true;
           overlapProbeRef.current = payload.overlap_probe === true;
+          coreLunaProbeRef.current = payload.core_luna_probe === true;
+        } else if (payload.kind === 'core_luna_result') {
+          speakCoreLunaResult(payload);
         } else if (payload.kind === 'realtime_send' && dcRef.current?.readyState === 'open') {
           dcRef.current.send(JSON.stringify(payload.event));
         } else if (payload.kind === 'lifecycle_command' && payload.command === 'sleep') {
@@ -1877,6 +2176,15 @@ export default function App() {
       pc.ontrack = async (event) => {
         const remote = event.streams[0] || new MediaStream([event.track]);
         bufferedRemoteStreamRef.current = remote;
+        if (overlapProbeRef.current) {
+          // Preload the SILENT worklet before the user asks a question. This
+          // never attaches the remote stream or authorizes any audio.
+          void StreamingPcmGate.prewarm().then(() => {
+            sendControlMessage({kind:'desktop_overlap_audio',phase:'pcm_prewarm_ready'});
+          }).catch(error => {
+            sendControlMessage({kind:'desktop_overlap_audio',phase:'pcm_prewarm_failed',reason:String(error)});
+          });
+        }
         if (audioRef.current) {
           // Probe mode is unconditionally text-only, even before a response ID exists.
           audioRef.current.muted = true; // Fail closed until an authorized normal response explicitly unmutes.

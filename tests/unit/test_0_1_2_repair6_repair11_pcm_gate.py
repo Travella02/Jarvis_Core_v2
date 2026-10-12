@@ -22,7 +22,7 @@ class Repair11PcmTests(unittest.TestCase):
 
     def test_audio_only_after_trusted_decision(self):
         self.assertIn("overlapDecisionRef.current = calls.length ? 'tool' : 'direct'", APP)
-        self.assertIn("if (overlapDecisionRef.current === 'direct') gate.authorize()", APP)
+        self.assertIn("if (overlapDecisionRef.current === 'direct' && overlapDirectVerifiedRef.current) gate.authorize()", APP)
         self.assertIn('overlapGateRef.current?.abort()', APP)
         self.assertIn('audioRef.current.muted = true', APP)
         self.assertIn("tools:[],tool_choice:'none'", APP)

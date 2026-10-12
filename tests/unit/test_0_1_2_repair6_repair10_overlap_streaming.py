@@ -27,7 +27,7 @@ class ParallelStreamTests(unittest.TestCase):
         self.assertIn('config.tool_selection_probe or config.overlap_probe else ["audio"]', WEBRTC)
 
     def test_parallel_response_scope_and_tools(self):
-        self.assertEqual(APP.count("conversation:'none'"), 2)
+        self.assertEqual(APP.count("conversation:'none'"), 3)  # opt-in real-Core voice follow-up is isolated too
         self.assertIn("metadata:{jarvis_stage:'overlap_decision'", APP)
         self.assertIn("metadata:{jarvis_stage:'overlap_candidate'", APP)
         self.assertIn("output_modalities:['text'],max_output_tokens:512,tools,tool_choice:'auto'", APP)
@@ -41,7 +41,7 @@ class ParallelStreamTests(unittest.TestCase):
         self.assertIn("audioRef.current.muted = true", APP)
 
     def test_no_tool_execution_or_fake_success(self):
-        self.assertIn('dry_run:true,executed:false', APP)
+        self.assertIn('dry_run:!realLuna,executed:false', APP)  # original probe is dry-run; opt-in Luna differs
         self.assertIn('No tool or action was executed.', APP)
         self.assertIn('Never execute provider calls', (ROOT/'providers/voice_frontend/openai_realtime/tool_probe.py').read_text(encoding='utf-8'))
 

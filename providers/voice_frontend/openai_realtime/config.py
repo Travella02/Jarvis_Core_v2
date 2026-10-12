@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Mapping
 
@@ -44,6 +45,9 @@ class OpenAIRealtimeConfig:
     tool_selection_probe: bool = False
     buffered_tool_probe: bool = False
     overlap_probe: bool = False
+    decisions_shadow_probe: bool = False
+    core_luna_probe: bool = False
+    luna_result_hold_seconds: float = 0.0  # Only explicit cancellation-test mode.
 
     @classmethod
     def from_env(
@@ -79,6 +83,11 @@ class OpenAIRealtimeConfig:
             desktop_conversation_trace = False
         else:
             raise ValueError("JARVIS_DESKTOP_CONVERSATION_TRACE must be a boolean value")
+        hold_seconds = float(source.get("JARVIS_LUNA_RESULT_HOLD_SECONDS", "0"))
+        if not math.isfinite(hold_seconds) or not 0 <= hold_seconds <= 20:
+            raise ValueError("JARVIS_LUNA_RESULT_HOLD_SECONDS must be within 0..20")
+        if hold_seconds and not _env_bool(source.get("JARVIS_CORE_LUNA_PROBE", "0")):
+            raise ValueError("Luna test result hold requires JARVIS_CORE_LUNA_PROBE=1")
         return cls(
             api_key=key,
             model=model,
@@ -93,4 +102,7 @@ class OpenAIRealtimeConfig:
             tool_selection_probe=_env_bool(source.get("JARVIS_REALTIME_TOOL_SELECTION_PROBE", "0")),
             buffered_tool_probe=_env_bool(source.get("JARVIS_REALTIME_BUFFERED_TOOL_PROBE", "0")),
             overlap_probe=_env_bool(source.get("JARVIS_REALTIME_OVERLAP_PROBE", "0")),
+            decisions_shadow_probe=_env_bool(source.get("JARVIS_DECISIONS_SHADOW_PROBE", "0")),
+            core_luna_probe=_env_bool(source.get("JARVIS_CORE_LUNA_PROBE", "0")),
+            luna_result_hold_seconds=hold_seconds,
         )

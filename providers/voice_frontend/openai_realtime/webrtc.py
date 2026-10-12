@@ -470,6 +470,11 @@ class BrowserRealtimeRelay:
                 event["response"] = dict(response_overrides)
             await self._outgoing.put({"kind": "realtime_send", "event": event})
 
+    async def notify_desktop(self, payload: Mapping[str, Any]) -> None:
+        """Send trusted Core results over the existing local control channel."""
+        if not self._closed and payload.get("kind") == "core_luna_result":
+            await self._outgoing.put(dict(payload))
+
     async def request_browser_sleep(self, *, reason: str = "explicit_sleep") -> None:
         if not self._closed:
             await self._outgoing.put({"kind": "lifecycle_command", "command": "sleep", "reason": reason})

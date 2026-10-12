@@ -8,6 +8,11 @@
  * invalidates this object and silences the worklet before freeing resources.
  */
 export class StreamingPcmGate {
+  // Prewarm a single silent audio context/worklet for the desktop session. Each
+  // response still receives its own isolated node, buffer and authorization.
+  // Reusing the module removes per-turn AudioContext/addModule startup waits.
+  private static warmContext: AudioContext | null = null;
+  private static warmPromise: Promise<AudioContext> | null = null;
   private context: AudioContext | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private gate: AudioWorkletNode | null = null;
@@ -27,15 +32,42 @@ export class StreamingPcmGate {
       typeof MediaStream !== 'undefined';
   }
 
+  static async prewarm(): Promise<void> {
+    await StreamingPcmGate.readyContext();
+  }
+
+  private static readyContext(): Promise<AudioContext> {
+    if (this.warmContext && this.warmContext.state !== 'closed')
+      return Promise.resolve(this.warmContext);
+    if (this.warmPromise) return this.warmPromise;
+    this.warmPromise = (async () => {
+      const context = new AudioContext({latencyHint:'interactive'});
+      try {
+        await context.audioWorklet.addModule(new URL('./pcmGateProcessor.js', import.meta.url).href);
+        // Loading the module does not require playback authorization. Resume
+        // when a real gated response is created, not during silent prewarm.
+        this.warmContext = context;
+        return context;
+      } catch (err) {
+        void context.close().catch(() => {});
+        throw err;
+      }
+    })();
+    this.warmPromise = this.warmPromise.catch(err => {
+      this.warmPromise = null;
+      throw err;
+    });
+    return this.warmPromise;
+  }
+
   static async create(stream: MediaStream, played: () => void, ended: () => void,
     fail: (reason: string) => void, underflow: (count: number) => void): Promise<StreamingPcmGate> {
     if (!StreamingPcmGate.supported()) throw new Error('AudioWorklet PCM playback unsupported');
     const self = new StreamingPcmGate(played, ended, fail, underflow);
     try {
       // Never connect the remote audio element directly to speaker output.
-      const context = new AudioContext({latencyHint:'interactive'});
+      const context = await StreamingPcmGate.readyContext();
       self.context = context;
-      await context.audioWorklet.addModule(new URL('./pcmGateProcessor.js', import.meta.url).href);
       if (self.disposed) return self;
       self.source = context.createMediaStreamSource(stream);
       self.gate = new AudioWorkletNode(context, 'jarvis-pcm-gate', {
@@ -92,7 +124,9 @@ export class StreamingPcmGate {
     this.gate = null;
     const context = this.context;
     this.context = null;
-    if (context) void context.close().catch(() => { /* best effort */ });
+    // Shared context stays warm, but the aborted gate is disconnected and
+    // cannot emit future audio. No provider stream is connected when idle.
+    void context;
     if (reason !== 'cancelled') this.fail(reason);
   }
 }
