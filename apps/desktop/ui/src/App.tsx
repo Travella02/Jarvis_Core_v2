@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { StreamingPcmGate } from './streamingPcmGate';
+import { playLunaHoldCue } from './lunaCancelCue';
 import { isVerifiedSleepEvidence, hasSubstantiveUserWords, type SleepTurnInput } from './sleepAuthorization';
 
 type PresenceState = 'sleeping' | 'awake';
@@ -385,6 +386,16 @@ export default function App() {
   const [transcriptExpanded, setTranscriptExpanded] = useState(false);
   const [captionOverflow, setCaptionOverflow] = useState(false);
   const [captionBrowsing, setCaptionBrowsing] = useState(false);
+  const [cancelHoldTurn, setCancelHoldTurn] = useState<number | null>(null);
+  const cancelHoldTurnRef = useRef<number | null>(null);
+  useEffect(() => { cancelHoldTurnRef.current = cancelHoldTurn; }, [cancelHoldTurn]);
+  useEffect(() => {
+    if (cancelHoldTurn === null) return;
+    // The same eight-second diagnostic hold used by the host; don't leave
+    // a stale banner in the event of a disconnected WebSocket.
+    const timeout = window.setTimeout(() => setCancelHoldTurn(null), 10500);
+    return () => window.clearTimeout(timeout);
+  }, [cancelHoldTurn]);
 
   const presenceRef = useRef<PresenceState>('sleeping');
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -1043,6 +1054,7 @@ export default function App() {
   };
 
   const stopRealtimeSession = async ({ notifyServer = true }: { notifyServer?: boolean } = {}) => {
+    setCancelHoldTurn(null);
     realtimeClosingRef.current = true;
     clearIdleTimer();
     silenceRealtimeOutput();
@@ -2190,7 +2202,33 @@ export default function App() {
           overlapProbeRef.current = payload.overlap_probe === true;
           coreLunaProbeRef.current = payload.core_luna_probe === true;
           pcmTrimRef.current = payload.pcm_trim_leading_silence === true;
+        } else if (payload.kind === 'core_luna_cancel_hold') {
+          // Cancellation-test mode only. Never voices the held Core result.
+          const heldTurn = Number(payload.turn);
+          if (Number.isSafeInteger(heldTurn) && heldTurn > 0) {
+            setCancelHoldTurn(heldTurn);
+            cancelHoldTurnRef.current = heldTurn;
+            // Windows host plays a native WAV through the default output;
+            // do not start another browser AudioContext from this WS handler.
+            if (payload.cue_route !== 'native_windows') {
+              void playLunaHoldCue().then((audible) => {
+                sendControlMessage({kind:'desktop_luna_cancel_cue',turn:heldTurn,audible});
+              });
+            }
+          }
+        } else if (payload.kind === 'core_luna_cancel_cue_fallback') {
+          const heldTurn = Number(payload.turn);
+          if (heldTurn > 0 && heldTurn === cancelHoldTurnRef.current) {
+            void playLunaHoldCue().then((audible) => {
+              sendControlMessage({kind:'desktop_luna_cancel_cue',turn:heldTurn,audible});
+            });
+          }
+        } else if (payload.kind === 'core_luna_cancel_hold_ended') {
+          if (cancelHoldTurnRef.current === Number(payload.turn)) cancelHoldTurnRef.current = null;
+          setCancelHoldTurn(current => current === Number(payload.turn) ? null : current);
         } else if (payload.kind === 'core_luna_result') {
+          cancelHoldTurnRef.current = null;
+          setCancelHoldTurn(null);
           speakCoreLunaResult(payload);
         } else if (payload.kind === 'realtime_send' && dcRef.current?.readyState === 'open') {
           dcRef.current.send(JSON.stringify(payload.event));
@@ -2389,6 +2427,9 @@ export default function App() {
         <ParticleOrb state={jarvisState} />
 
         <div className="state-label">{stateLabels[jarvisState]}</div>
+        {cancelHoldTurn !== null ? (
+          <div className="luna-cancel-test-cue" role="status">TEST MODE · INTERRUPT NOW (8 SEC)</div>
+        ) : null}
         <div className={`caption-frame ${captionOverflow ? 'caption-frame--overflow' : ''} ${captionBrowsing ? 'caption-frame--browsing' : ''}`}>
           <div ref={captionViewportRef} className="caption__viewport" aria-live="polite" onScroll={handleCaptionScroll}>
             <div className={`caption ${caption ? 'caption--active' : ''}`}>

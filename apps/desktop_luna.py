@@ -7,11 +7,87 @@ Computer actions, current-data tools, and memory retrieval are not enabled here.
 from __future__ import annotations
 
 import asyncio
+import re
+import sys
 from collections.abc import Awaitable, Callable
 from time import monotonic
 from typing import Any
 
 from core.intelligence import DelegationMode, DelegationOrchestrator, DelegationRequest, DelegationStatus
+from apps.desktop_cancel_cue import play_native_hold_cue
+
+
+def _safe_core_failure_fields(detail: str | None) -> dict[str, str]:
+    """Recognize ONLY sanitized provider markers. Never print raw API error text.
+
+    Provider messages, traceback text, user prompts and credentials are never
+    included. Unknown details deliberately become ``unclassified``.
+    """
+    message = str(detail or "")
+    http = re.search(r"\bHTTP ([1-5][0-9]{2})\b", message)
+    error = re.search(r"\(([A-Za-z][A-Za-z0-9_]{0,79})(?:;|\))", message)
+    code = re.search(r"(?:\bcode=)([A-Za-z0-9_.-]{1,64})(?:[;) ]|$)", message)
+    param = re.search(r"(?:\bparam=)([A-Za-z0-9_.\[\]-]{1,80})(?:[;) ]|$)", message)
+    fields = {
+        "http_status": http.group(1) if http else "n/a",
+        "error_type": error.group(1) if error else "n/a",
+        "error_code": code.group(1) if code else "n/a",
+        "error_param": param.group(1) if param else "n/a",
+    }
+    if not http and not error and not code and not param:
+        fields["detail_class"] = (
+            "incomplete_response" if message == "OpenAI response ended incomplete" else
+            "provider_stream_ended" if message == "provider stream ended without a terminal event" else
+            "unclassified"
+        )
+    else:
+        fields["detail_class"] = "structured_provider_error"
+    return fields
+
+
+def _safe_core_budget_fields(orchestrator: Any, result: Any) -> dict[str, str]:
+    """Server-side, response-ID matched, non-sensitive Core provider diagnostics.
+
+    Never print arbitrary model names, response text, raw provider errors, IDs,
+    context data, or account details. Unknown/mismatched responses show n/a.
+    """
+    output = {key: "n/a" for key in (
+        "model", "output_limit", "reason", "input_tokens", "output_tokens",
+        "reasoning_tokens", "response_status",
+    )}
+    output["diagnostic_match"] = "false"
+    response_id = getattr(result, "provider_response_id", None)
+    decision = getattr(result, "decision", None)
+    route = getattr(decision, "route_name", None)
+    router = getattr(orchestrator, "provider_router", None)
+    if not isinstance(response_id, str) or not response_id or not isinstance(route, str) or not router:
+        return output
+    try:
+        provider = router.resolve(route)
+        lookup = getattr(provider, "response_diagnostics", None)
+        data = lookup(response_id) if callable(lookup) else None
+    except (KeyError, ValueError, AttributeError):
+        return output
+    if not isinstance(data, dict) or data.get("provider_response_id") != response_id:
+        return output
+    output["diagnostic_match"] = "true"
+    model = data.get("requested_model")
+    if isinstance(model, str) and re.fullmatch(r"gpt-[A-Za-z0-9_.-]{1,72}", model):
+        output["model"] = model
+    for dest, source in (
+        ("output_limit", "requested_output_limit"),
+        ("input_tokens", "input_tokens"),
+        ("output_tokens", "output_tokens"),
+        ("reasoning_tokens", "reasoning_tokens"),
+    ):
+        number = data.get(source)
+        if type(number) is int and 0 <= number <= 10_000_000:
+            output[dest] = str(number)
+    if data.get("incomplete_reason") in ("max_output_tokens", "content_filter", "unknown"):
+        output["reason"] = data["incomplete_reason"]
+    if data.get("response_status") in ("completed", "incomplete", "failed", "cancelled"):
+        output["response_status"] = data["response_status"]
+    return output
 
 
 class DesktopLunaDelegator:
@@ -41,10 +117,12 @@ class DesktopLunaDelegator:
         self._provider_lock = asyncio.Lock()
         self._executing_turn = 0
         self._closed = False
+        self._held_turn: int | None = None
 
     def new_turn(self, turn: int) -> None:
         if self._closed or turn <= self.current_turn or turn <= 0:
             return
+        self._discard_held_result(reason="new_turn")
         self.current_turn = turn
         self._texts = {turn: self._texts[turn]} if turn in self._texts else {}
         self._events = {turn: self._events[turn]} if turn in self._events else {}
@@ -78,7 +156,32 @@ class DesktopLunaDelegator:
         except Exception:
             pass
 
+    async def _notify_test_hold_end(self, turn: int) -> None:
+        try:
+            await self.notify({"kind": "core_luna_cancel_hold_ended", "turn": turn})
+        except Exception:
+            # A test-only UI notification must never affect Core authority.
+            pass
+
+    def _discard_held_result(self, *, reason: str) -> None:
+        """Finalize an opt-in hold before any result notification can cross turns.
+
+        No async gap exists between invalidating this hold and changing the
+        active turn. Normal (non-test) sessions never enter this method.
+        """
+        if self._held_turn is None:
+            return
+        held = self._held_turn
+        self._held_turn = None
+        # Clear the desktop test banner. This contains only a turn ID.
+        asyncio.create_task(self._notify_test_hold_end(held))
+        print(f"[Jarvis Luna Cancel Test] turn={held} | phase=stale_result_discarded "
+              f"| reason={reason} | voice_delivered=false", flush=True)
+        print(f"[Jarvis Luna Cancel Test] turn={held} | phase=test_summary "
+              f"| outcome=PASS | reason={reason} | result_released=false", flush=True)
+
     async def cancel(self) -> None:
+        self._discard_held_result(reason="sleep_or_cancel")
         self.current_turn += 1
         self._texts.clear()
         for event in self._events.values():
@@ -137,19 +240,74 @@ class DesktopLunaDelegator:
             # or sleep can supersede it before ANY audio is authorized.
             # Never enable in the ordinary Luna launch mode.
             if self.result_hold_seconds:
+                self._held_turn = turn
                 print(f"[Jarvis Luna Cancel Test] turn={turn} | phase=holding_result "
                       f"| seconds={self.result_hold_seconds:g} | authority=none", flush=True)
-                await asyncio.sleep(self.result_hold_seconds)
-                if self._closed or turn != self.current_turn:
-                    print(f"[Jarvis Luna Cancel Test] turn={turn} | phase=stale_result_discarded "
-                          "| voice_delivered=false", flush=True)
+                # The renderer updates the test banner. On Windows, play a
+                # *native* WAV rather than depending on an AudioContext resumed
+                # from an unsolicited WebSocket event (which may remain suspended).
+                native_cue = sys.platform == "win32"
+                try:
+                    await self.notify({"kind": "core_luna_cancel_hold", "turn": turn,
+                                       "seconds": self.result_hold_seconds,
+                                       "cue_route": "native_windows" if native_cue else "renderer"})
+                except Exception:
+                    print(f"[Jarvis Luna Cancel Test] turn={turn} | phase=cue_ui_unavailable", flush=True)
+                if native_cue:
+                    print(f"[Jarvis Luna Cancel Test] turn={turn} | phase=cue_playback | route=windows_default_audio | state=starting", flush=True)
+                    try:
+                        # Short bounded cue on the default Windows audio output;
+                        # no event-loop blocking and no output-device assumptions.
+                        cue_status = await asyncio.wait_for(
+                            asyncio.to_thread(play_native_hold_cue), timeout=1.75)
+                    except Exception:
+                        cue_status = "playback_api_failed"
+                    print(f"[Jarvis Luna Cancel Test] turn={turn} | phase=cue_playback | route=windows_default_audio | state={cue_status}", flush=True)
+                    if cue_status != "playback_api_completed" and self._held_turn == turn:
+                        try:
+                            await self.notify({"kind": "core_luna_cancel_cue_fallback", "turn": turn})
+                        except Exception:
+                            pass
+                if self._closed or turn != self.current_turn or self._held_turn != turn:
                     return
+                # The full eight seconds start AFTER the cue completes.
+                print(f"[Jarvis Luna Cancel Test] turn={turn} | phase=interrupt_window_open | seconds={self.result_hold_seconds:g}", flush=True)
+                await asyncio.sleep(self.result_hold_seconds)
+                if self._closed or turn != self.current_turn or self._held_turn != turn:
+                    if self._held_turn == turn:
+                        self._discard_held_result(reason="stale_at_expiry")
+                    return
+                self._held_turn = None
                 print(f"[Jarvis Luna Cancel Test] turn={turn} | phase=releasing_current_result", flush=True)
+                print(f"[Jarvis Luna Cancel Test] turn={turn} | phase=test_summary "
+                      "| outcome=NOT_TESTED | reason=hold_expired | result_released=true", flush=True)
+                await self._notify_test_hold_end(turn)
+            budget = _safe_core_budget_fields(self.orchestrator, result)
+            print(f"[Jarvis Luna Budget] turn={turn} | phase=provider_terminal "
+                  f"| diagnostic_match={budget['diagnostic_match']} | model={budget['model']} "
+                  f"| output_limit={budget['output_limit']} | response_status={budget['response_status']} "
+                  f"| incomplete_reason={budget['reason']} | input_tokens={budget['input_tokens']} "
+                  f"| output_tokens={budget['output_tokens']} | reasoning_tokens={budget['reasoning_tokens']}", flush=True)
             if result.status is DelegationStatus.COMPLETED and result.text.strip():
                 await self._result(turn, "completed", result.text.strip(), started,
                                    route=result.decision.route_name or "unknown")
             else:
-                await self._result(turn, str(result.status.value),
+                status = str(result.status.value)
+                fields = _safe_core_failure_fields(getattr(result, "detail", None))
+                # Status-only logs concealed HTTP 400/429/5xx and provider faults.
+                # This metadata is all non-sensitive; raw detail is NOT logged.
+                route_name = str(getattr(result.decision, "route_name", "") or "unknown")
+                route_name = route_name if route_name in {"strong", "default", "primary", "luna"} else "redacted"
+                print(f"[Jarvis Luna Diagnostic] turn={turn} | phase=core_failed "
+                      f"| status={status} | route={route_name} "
+                      f"| http_status={fields['http_status']} "
+                      f"| error_type={fields['error_type']} "
+                      f"| error_code={fields['error_code']} "
+                      f"| error_param={fields['error_param']} "
+                      f"| detail_class={fields['detail_class']} "
+                      f"| response_id_present={bool(getattr(result, 'provider_response_id', None))} "
+                      f"| partial_text_present={bool(str(getattr(result, 'text', '') or '').strip())}", flush=True)
+                await self._result(turn, status,
                                    "I couldn't complete that request with Luna. Please try again.", started)
         except asyncio.TimeoutError:
             if not self._closed and turn == self.current_turn:

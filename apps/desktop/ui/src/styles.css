@@ -320,3 +320,13 @@ audio { display: none; }
 .brand__dot--waking { animation: dot-pulse .78s ease-in-out infinite; }
 .shell--sleeping .caption { opacity: .36; }
 .shell--sleeping .composer { background: rgba(11, 16, 25, .68); }
+
+/* Repair16 cancellation diagnostic only: isolated from normal Jarvis controls. */
+.luna-cancel-test-cue {
+  color: #b7ecff;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-shadow: 0 0 14px rgba(78, 190, 255, 0.6);
+}

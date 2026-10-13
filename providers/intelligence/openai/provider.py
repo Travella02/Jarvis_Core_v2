@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.util
+import re
 from time import monotonic
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
@@ -102,6 +103,64 @@ class OpenAIProvider(IntelligenceProvider):
         if not self._request_diagnostics:
             return {}
         return dict(next(reversed(self._request_diagnostics.values())))
+
+    def response_diagnostics(self, response_id: str | None) -> dict[str, Any]:
+        """Find provider-owned safe telemetry by exact response ID, never by latest turn.
+
+        Core may have multiple providers or overlapping requests; diagnostics
+        must not accidentally attach a previous response to a new user turn.
+        """
+        if not isinstance(response_id, str) or not response_id:
+            return {}
+        for data in reversed(tuple(self._request_diagnostics.values())):
+            if data.get("provider_response_id") == response_id:
+                return dict(data)
+        return {}
+
+    @staticmethod
+    def _safe_usage_count(value: Any) -> int | None:
+        if type(value) is int and 0 <= value <= 10_000_000:
+            return value
+        return None
+
+    @classmethod
+    def _safe_response_telemetry(cls, response: Any) -> dict[str, Any]:
+        """Whitelist bounded scalars; never retain response body or raw text."""
+        if response is None:
+            return {}
+        result: dict[str, Any] = {}
+        identifier = getattr(response, "id", None)
+        if isinstance(identifier, str) and identifier:
+            result["provider_response_id"] = identifier  # Internal lookup only; never print.
+        status = getattr(response, "status", None)
+        if isinstance(status, str) and status in {"incomplete", "completed", "failed", "cancelled"}:
+            result["response_status"] = status
+        incomplete = getattr(response, "incomplete_details", None)
+        reason = incomplete.get("reason") if isinstance(incomplete, dict) else getattr(incomplete, "reason", None)
+        result["incomplete_reason"] = reason if isinstance(reason, str) and reason in {"max_output_tokens", "content_filter"} else "unknown"
+        usage = getattr(response, "usage", None)
+        if usage is not None and hasattr(usage, "model_dump"):
+            usage = usage.model_dump()
+        elif usage is not None and hasattr(usage, "to_dict"):
+            usage = usage.to_dict()
+        if not isinstance(usage, dict):
+            usage = {
+                "input_tokens": getattr(usage, "input_tokens", None),
+                "output_tokens": getattr(usage, "output_tokens", None),
+                "output_tokens_details": getattr(usage, "output_tokens_details", None),
+            }
+        details = usage.get("output_tokens_details")
+        if not isinstance(details, dict):
+            details = {"reasoning_tokens": getattr(details, "reasoning_tokens", None)}
+        for dest, value in (
+            ("input_tokens", usage.get("input_tokens")),
+            ("output_tokens", usage.get("output_tokens")),
+            ("reasoning_tokens", details.get("reasoning_tokens")),
+        ):
+            safe = cls._safe_usage_count(value)
+            if safe is not None:
+                result[dest] = safe
+        return result
 
     def _set_request_diagnostics(self, request_id: str, **values: Any) -> None:
         current = self._request_diagnostics.setdefault(request_id, {})
@@ -302,9 +361,14 @@ class OpenAIProvider(IntelligenceProvider):
         try:
             client = self._get_client()
             create_started = monotonic()
-            stream = await client.responses.create(
-                **self._request_params(context, tools, reasoning_policy)
+            params = self._request_params(context, tools, reasoning_policy)
+            self._set_request_diagnostics(
+                request_id,
+                requested_model=params["model"],
+                requested_output_limit=params["max_output_tokens"],
+                input_channel=context.metadata.get("input_channel", "typed"),
             )
+            stream = await client.responses.create(**params)
             self._set_request_diagnostics(
                 request_id,
                 create_return_ms=(monotonic() - create_started) * 1000.0,
@@ -324,7 +388,10 @@ class OpenAIProvider(IntelligenceProvider):
                 event_type = getattr(event, "type", "")
                 elapsed_ms = (monotonic() - request_started) * 1000.0
                 if event_type == "response.created":
-                    self._set_request_diagnostics(request_id, response_created_ms=elapsed_ms)
+                    self._set_request_diagnostics(
+                        request_id, response_created_ms=elapsed_ms,
+                        **self._safe_response_telemetry(getattr(event, "response", None)),
+                    )
                 elif event_type == "response.in_progress":
                     self._set_request_diagnostics(request_id, response_in_progress_ms=elapsed_ms)
                 elif event_type == "response.output_text.delta":
@@ -336,6 +403,7 @@ class OpenAIProvider(IntelligenceProvider):
                         request_id,
                         terminal_ms=elapsed_ms,
                         actual_service_tier=getattr(response, "service_tier", None),
+                        **self._safe_response_telemetry(response),
                     )
 
                 converted, response_id, terminal = self._convert_event(
@@ -435,6 +503,11 @@ class OpenAIProvider(IntelligenceProvider):
                     connection_reused=connection_reused,
                     input_items=len(params["input"]),
                     requested_service_tier=self.config.service_tier,
+                    # Diagnostic3: WebSocket requests need the same safe model
+                    # and effective token budget captured by the HTTP path.
+                    requested_model=params["model"],
+                    requested_output_limit=params["max_output_tokens"],
+                    input_channel=context.metadata.get("input_channel", "typed"),
                     interruption_context=bool(context.metadata.get("voice_interruption")),
                     stream_id=params["stream_id"],
                 )
@@ -459,7 +532,10 @@ class OpenAIProvider(IntelligenceProvider):
                     event_type = getattr(event, "type", "")
                     elapsed_ms = (monotonic() - request_started) * 1000.0
                     if event_type == "response.created":
-                        self._set_request_diagnostics(request_id, response_created_ms=elapsed_ms)
+                        self._set_request_diagnostics(
+                            request_id, response_created_ms=elapsed_ms,
+                            **self._safe_response_telemetry(getattr(event, "response", None)),
+                        )
                     elif event_type == "response.in_progress":
                         self._set_request_diagnostics(request_id, response_in_progress_ms=elapsed_ms)
                     elif event_type == "response.output_text.delta":
@@ -471,6 +547,10 @@ class OpenAIProvider(IntelligenceProvider):
                             request_id,
                             terminal_ms=elapsed_ms,
                             actual_service_tier=getattr(response, "service_tier", None),
+                            # Record provider metadata BEFORE emitting Core's
+                            # terminal event: Core stops consuming at that point.
+                            # The whitelist drops raw text, errors and secrets.
+                            **self._safe_response_telemetry(response),
                         )
 
                     if event_type == "response.output_text.delta":
@@ -776,7 +856,26 @@ class OpenAIProvider(IntelligenceProvider):
 
     @staticmethod
     def _safe_exception_detail(exc: Exception) -> str:
+        """Return typed provider metadata, NEVER OpenAI error/body/message text.
+
+        SDK exceptions can include full HTTP bodies with prompt fragments,
+        secrets, and account identifiers. We only allow constrained labels.
+        """
+        name = exc.__class__.__name__
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", name):
+            name = "ProviderException"
         status = getattr(exc, "status_code", None)
-        if status is not None:
-            return f"OpenAI request failed with HTTP {status}"
-        return f"OpenAI request failed ({exc.__class__.__name__})"
+        if isinstance(status, int) and 100 <= status <= 599:
+            labels = [name]
+            body = getattr(exc, "body", None)
+            if isinstance(body, dict) and isinstance(body.get("error"), dict):
+                body = body["error"]
+            for key, pattern in (("code", r"[A-Za-z0-9_.-]{1,64}"),
+                                 ("param", r"[A-Za-z0-9_.\[\]-]{1,80}")):
+                value = getattr(exc, key, None)
+                if value is None and isinstance(body, dict):
+                    value = body.get(key)
+                if isinstance(value, str) and re.fullmatch(pattern, value):
+                    labels.append(f"{key}={value}")
+            return f"OpenAI request failed with HTTP {status} ({'; '.join(labels)})"
+        return f"OpenAI request failed ({name})"

@@ -26,6 +26,11 @@ class HoldTest(unittest.IsolatedAsyncioTestCase):
         self.sent=[];self.core=FakeOrchestrator();self.conversation=FakeConversation()
         async def notify(msg):self.sent.append(msg)
         self.luna=DesktopLunaDelegator(orchestrator=self.core,conversation=self.conversation,notify=notify,result_hold_seconds=.09)
+        # Short synthetic holds are unit-test clocks, not human reaction windows.
+        # Never play a physical Windows audio cue in these tests.
+        self._cue_patch = patch('apps.desktop_luna.play_native_hold_cue', return_value='playback_api_completed')
+        self._cue_patch.start()
+        self.addCleanup(self._cue_patch.stop)
     async def asyncTearDown(self):await self.luna.close()
     async def wait_for_core(self):
         for _ in range(50):
@@ -43,7 +48,7 @@ class HoldTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(.02)
         self.luna.new_turn(2)
         await self.wait_for_finish()
-        self.assertEqual(self.sent,[])
+        self.assertEqual([m for m in self.sent if m['kind']=='core_luna_result'],[])
         self.assertEqual(self.core.calls,['First complex question'])
     async def test_new_core_request_does_not_wait_for_old_hold(self):
         self.luna.transcript(1,'First');self.luna.selected(1)
@@ -55,25 +60,25 @@ class HoldTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(.002)
         self.assertEqual(self.core.calls,['First','Second'])
         await self.wait_for_finish()
-        self.assertEqual([m['turn'] for m in self.sent],[2])
+        self.assertEqual([m['turn'] for m in self.sent if m['kind']=='core_luna_result'],[2])
     async def test_sleep_drops_held_verified_result(self):
         self.luna.transcript(1,'First complex question');self.luna.selected(1)
         await self.wait_for_core();await asyncio.sleep(.02)
         await self.luna.cancel()
         await self.wait_for_finish()
-        self.assertFalse(self.sent)
+        self.assertFalse([m for m in self.sent if m['kind']=='core_luna_result'])
     async def test_no_interruption_releases_once(self):
         self.luna.transcript(1,'First complex question');self.luna.selected(1)
         await self.wait_for_finish()
-        self.assertEqual(len(self.sent),1)
-        self.assertEqual(self.sent[0]['turn'],1)
-        self.assertIn('Core-verified',self.sent[0]['text'])
+        self.assertEqual(len([m for m in self.sent if m['kind']=='core_luna_result']),1)
+        self.assertEqual(next(m for m in self.sent if m['kind']=='core_luna_result')['turn'],1)
+        self.assertIn('Core-verified',next(m for m in self.sent if m['kind']=='core_luna_result')['text'])
     async def test_duplicate_selection_cannot_bypass_hold(self):
         self.luna.transcript(1,'Original');self.assertTrue(self.luna.selected(1))
         self.assertFalse(self.luna.selected(1))
         await self.wait_for_finish()
         self.assertEqual(self.core.calls,['Original'])
-        self.assertEqual(len(self.sent),1)
+        self.assertEqual(len([m for m in self.sent if m['kind']=='core_luna_result']),1)
 
 class ConfigContracts(unittest.TestCase):
     def test_hold_disabled_by_default(self):

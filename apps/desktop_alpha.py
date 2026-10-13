@@ -102,8 +102,29 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def _desktop_core_luna_budget(
+    config: OpenAIProviderConfig, env: dict[str, str]
+) -> OpenAIProviderConfig:
+    """Use >=1024 tokens for desktop Luna, even with a legacy 256 .env.
+
+    The dedicated desktop-only override permits intentional A/B comparisons.
+    An existing higher general voice budget stays respected.
+    """
+    raw = env.get("JARVIS_DESKTOP_LUNA_VOICE_MAX_OUTPUT_TOKENS")
+    if raw is None:
+        limit = max(1024, config.voice_max_output_tokens)
+    else:
+        limit = int(raw)
+    if not 128 <= limit <= 8192:
+        raise ValueError("JARVIS_DESKTOP_LUNA_VOICE_MAX_OUTPUT_TOKENS must be 128..8192")
+    return replace(config, voice_max_output_tokens=limit)
+
+
 def build_runtime() -> tuple[JarvisRuntime, OpenAIProvider, tuple[OpenAIProvider, ...], DelegationOrchestrator]:
-    intelligence_config = OpenAIProviderConfig.from_env(env_file=PROJECT_ROOT / ".env")
+    intelligence_config = _desktop_core_luna_budget(
+        OpenAIProviderConfig.from_env(env_file=PROJECT_ROOT / ".env"),
+        merged_environment(PROJECT_ROOT / ".env"),
+    )
     # Keep backend intelligence independent from the client-facing WebRTC
     # transport. The conversational frontend asks Core for a goal; this
     # composition root registers replaceable backend routes behind Core.
@@ -490,6 +511,11 @@ class DesktopRealtimeSession:
                               f"reason={message.get('reason','n/a')} | "
                               f"core_text_chars={message.get('core_text_chars','n/a')} | "
                               f"voice_delivered={message.get('voice_delivered','n/a')}", flush=True)
+                    continue
+                if kind == "desktop_luna_cancel_cue":
+                    if self._luna is not None and self.config.luna_result_hold_seconds:
+                        print(f"[Jarvis Luna Cancel Test] turn={int(message.get('turn') or 0)} "
+                              f"| phase=cue_ack | audio_scheduled={message.get('audible') is True}", flush=True)
                     continue
                 if kind == "desktop_luna_cancel":
                     if self._luna is not None:
