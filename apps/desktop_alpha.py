@@ -350,7 +350,8 @@ class DesktopRealtimeSession:
                     raise RuntimeError("Decisions shadow requires mini-overlap and a backend OpenAI key")
                 self._decisions_shadow = DecisionsShadowProbe(self.config.api_key)
                 print("[Jarvis Decisions Shadow] mode=read_only | billing=extra_input_tokens "
-                      "| transcript=dev_only | audio=unchanged | routing=mini", flush=True)
+                      f"| transcript=dev_only | audio=unchanged | routing=mini | "
+                      f"core_luna={'on' if self.config.core_luna_probe else 'off'}", flush=True)
             if self.config.parallel_shadow_probe and not self.config.direct_only_benchmark:
                 provider = self.runtime.provider_router.resolve()
                 if not isinstance(provider, OpenAIProvider):
@@ -419,6 +420,7 @@ class DesktopRealtimeSession:
             "buffered_tool_probe": buffered_probe,
             "overlap_probe": overlap_probe,
             "core_luna_probe": self.config.core_luna_probe,
+            "pcm_trim_leading_silence": overlap_probe and str(merged_environment(PROJECT_ROOT / ".env").get("JARVIS_PCM_TRIM_LEADING_SILENCE", "0")).lower() in {"1", "true", "yes", "on"},
             "response": policy,
         })
 
@@ -503,7 +505,9 @@ class DesktopRealtimeSession:
                             self._decisions_shadow.observe_mini_route(int(message.get("turn") or 0), phase)
                     if message.get("phase") == "latency_breakdown":
                         fields = ("commit_ms", "transcript_ms", "route_ms", "candidate_created_ms",
-                                  "pcm_ready_ms", "gate_authorized_ms", "first_audio_ms")
+                                  "pcm_ready_ms", "gate_authorized_ms", "first_audio_ms",
+                                  "pcm_signal_ms", "pcm_buffer_ready_ms", "signal_to_first_audio_ms",
+                                  "authorized_to_first_audio_ms", "pcm_trim_enabled")
                         details = " | ".join(f"{key}={message.get(key, 'n/a')}" for key in fields)
                         print(f"[Jarvis Latency Detail] turn={message.get('turn','n/a')} | {details}", flush=True)
                         continue

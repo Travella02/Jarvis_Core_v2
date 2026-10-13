@@ -101,6 +101,7 @@ class _Turn:
     memory_probability: float | None = None
     timing_reported: bool = False
     voice_timing_reported: bool = False
+    ab_reported: bool = False
 
 
 class DecisionsShadowProbe:
@@ -193,6 +194,7 @@ class DecisionsShadowProbe:
         self._report_timing(turn, state)
         if state.status != "pending" and state.timing_reported:
             self._report_voice_timing(turn, state)
+            self._report_ab(turn, state)
 
     async def _classify(self, turn: int, text: str) -> None:
         started = time.perf_counter()
@@ -322,6 +324,40 @@ class DecisionsShadowProbe:
                   f"estimated_speech_end_to_decisions_ready_ms={ready_after_speech if ready_after_speech is not None else 'n/a'} | "
                   "decision_authority=mini | hypothetical_decisions_audio=not_measured")
         state.voice_timing_reported = True
+        self._report_ab(turn, state)
+
+    def _report_ab(self, turn: int, state: _Turn) -> None:
+        """Single machine-readable, observational A/B row when E2E timing is available.
+
+        A positive headroom is *potential* routing savings, not an observed
+        audio improvement: Mini still owns every route and PCM publication.
+        """
+        if state.ab_reported or state.status == "pending" or state.mini_arrived_at is None:
+            return
+        if state.actual_first_audio_ms is None:
+            return
+        ready_ms = (state.transcript_delay_ms + state.latency_ms
+                    if state.transcript_delay_ms is not None and state.latency_ms is not None
+                    and state.status == "ok" and state.decisions_route is not None else None)
+        headroom_ms = (state.mini_route_from_speech_ms - ready_ms
+                       if state.mini_route_from_speech_ms is not None and ready_ms is not None else None)
+        agreement = ("yes" if state.observed == state.decisions_route else "no") if state.decisions_route else "n/a"
+        # Failure/mismatch, sleep and ambiguous routes are NEVER early audio authorization.
+        unsafe_direct = (state.decisions_route == "direct" and
+                         (state.sleep_probability is None or state.memory_probability is None or
+                          state.sleep_probability >= 0.10 or state.memory_probability >= 0.10))
+        self._log(f"[Jarvis Repair12 A/B] turn={turn} | mini_route={state.observed or 'n/a'} | "
+                  f"decisions_route={state.decisions_route or 'n/a'} | decisions_status={state.status} | "
+                  f"agreement={agreement} | "
+                  f"transcript_ms={state.transcript_delay_ms if state.transcript_delay_ms is not None else 'n/a'} | "
+                  f"decisions_api_ms={state.latency_ms if state.latency_ms is not None else 'n/a'} | "
+                  f"decisions_ready_ms={ready_ms if ready_ms is not None else 'n/a'} | "
+                  f"mini_route_ms={state.mini_route_from_speech_ms if state.mini_route_from_speech_ms is not None else 'n/a'} | "
+                  f"potential_route_headroom_ms={headroom_ms if headroom_ms is not None else 'n/a'} | "
+                  f"first_audio_ms={state.actual_first_audio_ms if state.actual_first_audio_ms is not None else 'n/a'} | "
+                  f"unsafe_direct={str(unsafe_direct).lower()} | authority=mini | "
+                  "actual_decisions_audio_gain=not_measured")
+        state.ab_reported = True
 
     def _trim_old_turns(self) -> None:
         while len(self._turns) > 32:

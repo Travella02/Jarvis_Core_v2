@@ -20,6 +20,16 @@ class JarvisPcmGateProcessor extends AudioWorkletProcessor {
     this.playedSamples = 0;
     this.underflows = 0;
     this.startBuffer = Math.max(256, Math.round(rate * 0.045));
+    // Repair13: opt-in A/B. Remote WebRTC tracks can deliver zero samples
+    // long before the provider starts speaking. Buffering those zeros adds a
+    // delay equal to that silence AFTER the private gate has been authorized.
+    this.trimLeadingSilence = options?.processorOptions?.trimLeadingSilence === true;
+    this.onsetThreshold = 0.00015; // only zero / near-digital-zero is discarded
+    this.preroll = new Float32Array(Math.max(16, Math.round(rate * 0.008)));
+    this.prerollCount = 0;
+    this.prerollWrite = 0;
+    this.signalDetected = false;
+    this.bufferReadyReported = false;
     this.port.onmessage = (event) => {
       switch (event.data?.type) {
         case 'authorize': this.approved = true; break;
@@ -43,17 +53,46 @@ class JarvisPcmGateProcessor extends AudioWorkletProcessor {
     const a = input[0];
     const b = input[1] || a;
     const inputLength = a ? a.length : 0;
-    // Capture mono mix as contiguous PCM. No codec frames or timestamps are rebuilt.
+    // Capture mono mix as contiguous PCM. Neither trimmed nor untrimmed
+    // samples reach the speaker before explicit authorization.
+    const enqueue = (value) => {
+      if (this.count === this.capacity) return false;
+      this.ring[this.write] = value;
+      this.write = (this.write + 1) % this.capacity;
+      this.count++;
+      return true;
+    };
     for (let i = 0; i < inputLength && !this.finished; i++) {
-      if (this.count === this.capacity) {
+      const sample = b ? (a[i] + b[i]) * 0.5 : a[i];
+      if (!this.signalDetected && Math.abs(sample) > this.onsetThreshold) {
+        this.signalDetected = true;
+        this.port.postMessage({type:'first_pcm_signal'});
+      }
+      if (this.trimLeadingSilence && !this.signalDetected) {
+        // Preserve just 8 ms of preceding signal so the first quiet phoneme
+        // or attack isn't truncated; do not queue arbitrary idle silence.
+        this.preroll[this.prerollWrite] = sample;
+        this.prerollWrite = (this.prerollWrite + 1) % this.preroll.length;
+        this.prerollCount = Math.min(this.prerollCount + 1, this.preroll.length);
+        continue;
+      }
+      if (this.trimLeadingSilence && this.signalDetected && this.prerollCount) {
+        const first = (this.prerollWrite - this.prerollCount + this.preroll.length) % this.preroll.length;
+        for (let n = 0; n < this.prerollCount; n++) {
+          if (!enqueue(this.preroll[(first + n) % this.preroll.length])) break;
+        }
+        this.prerollCount = 0;
+      }
+      if (!enqueue(sample)) {
         this.port.postMessage({type:'overflow'});
         this.cancelled = true;
         this.count = 0;
         return true; // Fail closed, never play overwritten samples.
       }
-      this.ring[this.write] = b ? (a[i] + b[i]) * 0.5 : a[i];
-      this.write = (this.write + 1) % this.capacity;
-      this.count++;
+      if (this.signalDetected && !this.bufferReadyReported && this.count >= this.startBuffer) {
+        this.bufferReadyReported = true;
+        this.port.postMessage({type:'pcm_buffer_ready'});
+      }
     }
     if (!this.approved) return true;
     if (!this.started) {

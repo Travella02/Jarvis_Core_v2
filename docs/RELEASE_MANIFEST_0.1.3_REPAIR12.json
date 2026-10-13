@@ -1,0 +1,33 @@
+{
+  "version": "0.1.3",
+  "release_id": "0.1.3-repair12-decisions-core-luna-route-latency-ab",
+  "title": "Repair12 \u2014 Decisions shadow paired real Core/Luna route latency A/B",
+  "status": "unaccepted_live_test_candidate",
+  "required_previous_version": "0.1.3",
+  "required_previous_checkpoint": "Jarvis_0.1.3repair11_clean_checkpoint.zip (unaccepted Repair11 checkpoint)",
+  "scope": "Opt-in matched Mini + real Core/Luna Decisions read-only route timer; preserves routing and PCM authority; no real actions",
+  "patch_notes": "docs/PATCH_NOTES_0.1.3_REPAIR12.md",
+  "testing_guide": "docs/TESTING_GUIDE_0.1.3_REPAIR12.md",
+  "issue": "issues/ISSUE_090_0_1_3_REPAIR12_DECISIONS_CORE_LUNA_LATENCY_AB.md",
+  "automated_test_command": "python -m unittest discover -s tests -v",
+  "automated_test_result": "725 run, 1 skipped, local container; target Windows manual pending",
+  "focused_test_command": "python -m unittest tests.unit.test_0_1_3_repair12_decisions_luna_ab -v",
+  "desktop_static_check": "npm run desktop:check",
+  "base_run_command": "python .\\scripts\\realtime_ab.py mini-overlap-luna",
+  "test_run_command": "python .\\scripts\\realtime_ab.py mini-overlap-luna-decisions-shadow",
+  "comparison_command": "python .\\scripts\\repair12_latency_report.py .runtime\\repair12_baseline.log .runtime\\repair12_decisions.log",
+  "realtime_model": "gpt-realtime-2.1-mini",
+  "core_luna_in_both_arms": true,
+  "decision_authority": "Realtime Mini; Decisions stays read-only",
+  "real_external_actions": "dry_run_only",
+  "known_limitations": [
+    "This repair does not lower actual first-audio latency directly; it instruments a routing alternative.",
+    "No actual Decisions-authorized speech has been measured.",
+    "Decisions requires finalized transcript text; transcript delay can cancel API advantage.",
+    "Shadow mode adds billable inference input and can perturb host-side throughput.",
+    "Windows live acceptance pending"
+  ],
+  "v1_reference": "Reference_jarvis_corev1/Jarvis_0.3.6_clean_checkpoint.zip",
+  "live_acceptance": "pending",
+  "cleanup_commit": "blocked_until_user_acceptance"
+}

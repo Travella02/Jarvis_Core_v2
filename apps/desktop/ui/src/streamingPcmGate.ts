@@ -24,7 +24,8 @@ export class StreamingPcmGate {
   readonly startedAt = performance.now();
   private constructor(private readonly played: () => void, private readonly ended: () => void,
     private readonly fail: (reason: string) => void,
-    private readonly underflow: (count: number) => void) {}
+    private readonly underflow: (count: number) => void,
+    private readonly onStage: (stage: 'first_pcm_signal' | 'pcm_buffer_ready') => void) {}
 
   static supported(): boolean {
     return typeof AudioContext !== 'undefined' &&
@@ -61,9 +62,11 @@ export class StreamingPcmGate {
   }
 
   static async create(stream: MediaStream, played: () => void, ended: () => void,
-    fail: (reason: string) => void, underflow: (count: number) => void): Promise<StreamingPcmGate> {
+    fail: (reason: string) => void, underflow: (count: number) => void,
+    trimLeadingSilence = false,
+    onStage: (stage: 'first_pcm_signal' | 'pcm_buffer_ready') => void = () => {}): Promise<StreamingPcmGate> {
     if (!StreamingPcmGate.supported()) throw new Error('AudioWorklet PCM playback unsupported');
-    const self = new StreamingPcmGate(played, ended, fail, underflow);
+    const self = new StreamingPcmGate(played, ended, fail, underflow, onStage);
     try {
       // Never connect the remote audio element directly to speaker output.
       const context = await StreamingPcmGate.readyContext();
@@ -72,7 +75,7 @@ export class StreamingPcmGate {
       self.source = context.createMediaStreamSource(stream);
       self.gate = new AudioWorkletNode(context, 'jarvis-pcm-gate', {
         numberOfInputs:1, numberOfOutputs:1, outputChannelCount:[2],
-        processorOptions:{rate:context.sampleRate},
+        processorOptions:{rate:context.sampleRate,trimLeadingSilence},
       });
       self.gate.port.onmessage = (event: MessageEvent) => {
         if (self.disposed) return;
@@ -81,6 +84,8 @@ export class StreamingPcmGate {
           self.played();
         } else if (event.data?.type === 'ended') {
           self.ended();
+        } else if (event.data?.type === 'first_pcm_signal' || event.data?.type === 'pcm_buffer_ready') {
+          self.onStage(event.data.type);
         } else if (event.data?.type === 'underflow') {
           self.underflow(Number(event.data.count || 0));
         } else if (event.data?.type === 'overflow') {

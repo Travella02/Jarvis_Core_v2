@@ -429,6 +429,7 @@ export default function App() {
   const coreLunaProbeRef = useRef(false);
   const overlapCandidateStageRef = useRef('overlap_candidate');
   const overlapGateRef = useRef<StreamingPcmGate | null>(null);
+  const pcmTrimRef = useRef(false);
   const overlapDecisionIdRef = useRef('');
   const overlapCandidateIdRef = useRef('');
   const overlapDecisionRef = useRef<'pending' | 'direct' | 'tool' | 'failed'>('pending');
@@ -442,8 +443,10 @@ export default function App() {
   const overlapStartedRef = useRef(0);
   const overlapDecisionMsRef = useRef<number | null>(null);
   const overlapPerfRef = useRef<{turn:number;commit:number|null;transcript:number|null;
-    route:number|null;candidate:number|null;pcmReady:number|null;gateAuthorized:number|null}>({
-      turn:0,commit:null,transcript:null,route:null,candidate:null,pcmReady:null,gateAuthorized:null});
+    route:number|null;candidate:number|null;pcmReady:number|null;gateAuthorized:number|null;
+    pcmSignal:number|null;pcmBufferReady:number|null}>({
+      turn:0,commit:null,transcript:null,route:null,candidate:null,pcmReady:null,gateAuthorized:null,
+      pcmSignal:null,pcmBufferReady:null});
   // An out-of-band response must explicitly reference the committed USER item.
   // speech_stopped alone is too early: the model may otherwise see the prior turn.
   const overlapCommittedItemRef = useRef('');
@@ -1128,7 +1131,7 @@ export default function App() {
     overlapStartedRef.current = performance.now();
     overlapPerfRef.current = {turn:latencyRef.current.turn,
       commit:overlapStartedRef.current,transcript:overlapSleepInputRef.current ? overlapStartedRef.current : null,
-      route:null,candidate:null,pcmReady:null,gateAuthorized:null};
+      route:null,candidate:null,pcmReady:null,gateAuthorized:null,pcmSignal:null,pcmBufferReady:null};
     overlapDecisionMsRef.current = null;
     latencyRef.current.route = 'overlap_stream_probe';
     latencyRef.current.routeDecided = undefined;
@@ -1559,6 +1562,10 @@ export default function App() {
                   commit_ms:ms(p.commit),transcript_ms:ms(p.transcript),route_ms:ms(p.route),
                   candidate_created_ms:ms(p.candidate),pcm_ready_ms:ms(p.pcmReady),
                   gate_authorized_ms:ms(p.gateAuthorized),first_audio_ms:Math.round(performance.now()-start),
+                  pcm_signal_ms:ms(p.pcmSignal),pcm_buffer_ready_ms:ms(p.pcmBufferReady),
+                  signal_to_first_audio_ms:p.pcmSignal === null ? null : Math.round(performance.now()-p.pcmSignal),
+                  authorized_to_first_audio_ms:p.gateAuthorized === null ? null : Math.round(performance.now()-p.gateAuthorized),
+                  pcm_trim_enabled:pcmTrimRef.current,
                   model_route_before_transcript:p.route!==null&&p.transcript!==null&&p.route<p.transcript});
               }
               setStateSafely('speaking','Speaking');
@@ -1578,6 +1585,17 @@ export default function App() {
               if (!fallbackCoreLunaVoice(turn,'pcm_'+reason) &&
                   !recoverIncompleteDirectResponse(turn,'pcm_'+reason) && overlapDecisionRef.current !== 'failed')
                 setStateSafely('error','Streaming audio failed: '+reason);
+            }, (count) => {
+              // Previously missing argument: avoid throwing from the AudioWorklet
+              // on legitimate network/synthesis underflow diagnostics.
+              if (epoch === overlapEpochRef.current && count === 1)
+                sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'pcm_underflow',reason:'first_underflow'});
+            }, pcmTrimRef.current, (stage) => {
+              // Deliberately no transcript or private audio in timing events.
+              if (epoch !== overlapEpochRef.current || overlapPerfRef.current.turn !== turn) return;
+              const p = overlapPerfRef.current;
+              if (stage === 'first_pcm_signal' && p.pcmSignal === null) p.pcmSignal = performance.now();
+              if (stage === 'pcm_buffer_ready' && p.pcmBufferReady === null) p.pcmBufferReady = performance.now();
             }).then((gate) => {
               if (epoch !== overlapEpochRef.current || overlapDecisionRef.current === 'tool' || overlapDecisionRef.current === 'failed') {
                 gate.abort();
@@ -2154,6 +2172,7 @@ export default function App() {
           bufferedToolProbeRef.current = payload.buffered_tool_probe === true;
           overlapProbeRef.current = payload.overlap_probe === true;
           coreLunaProbeRef.current = payload.core_luna_probe === true;
+          pcmTrimRef.current = payload.pcm_trim_leading_silence === true;
         } else if (payload.kind === 'core_luna_result') {
           speakCoreLunaResult(payload);
         } else if (payload.kind === 'realtime_send' && dcRef.current?.readyState === 'open') {

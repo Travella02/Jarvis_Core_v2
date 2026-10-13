@@ -1,3 +1,17 @@
+# Jarvis Core v2 — CURRENT Repair12 handoff (2026-10-12)
+
+**Current candidate:** `0.1.3 repair12` (unaccepted, do not clean/commit). This document's older 0.0.8 section below is **historical only**, not the current state. The canonical master PDF is unchanged.
+
+- Repair11 was supplied as a clean, unaccepted checkpoint. Repair12 adds `mini-overlap-luna-decisions-shadow`, with real Core/Luna enabled in both A/B arms and an additional separately billed, observational Decisions call only in the shadow arm.
+- **Mini still authorizes** direct audio and Core/Luna routing; Decisions never executes anything, authorizes speech, or sleeps Jarvis in this repair.
+- Latency evidence: Repair11 routing 635–1,084 ms; first spoken audio 1,395–1,943 ms for the six visible prompts. Target already-awake direct response 500–800 ms, not validated.
+- Tests: 725 passed, 1 skipped in local Linux container on candidate sources; Windows Electron/WebRTC live tests remain pending. See `docs/TESTING_GUIDE_0.1.3_REPAIR12.md` and `issues/ISSUE_090_0_1_3_REPAIR12_DECISIONS_CORE_LUNA_LATENCY_AB.md`.
+- V1 reference archive remains immutable. No personality/identity adjustments in Repair12. Do not delete `patch_files`, installer, or `.patch_backups` before user acceptance. When accepted, clean exact repair artifacts and commit intended source/docs/tests only.
+
+---
+
+## Historical handoff: earlier 0.0.8 candidate (archival, not current)
+
 # Jarvis Core v2 - Current Handoff Instructions
 
 ## Canonical source

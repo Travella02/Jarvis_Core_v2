@@ -1,0 +1,27 @@
+{
+  "version": "0.1.3",
+  "release_id": "0.1.3-repair13-leading-silence-pcm-latency-ab",
+  "title": "Repair13 opt-in PCM silence trim and true onset timing",
+  "status": "unaccepted_live_test_candidate",
+  "baseline": "0.1.3 Repair12 installed (real Core/Luna + Decisions shadow available)",
+  "issue": "issues/ISSUE_091_0_1_3_REPAIR13_PCM_LEADING_SILENCE_LATENCY.md",
+  "patch_notes": "docs/PATCH_NOTES_0.1.3_REPAIR13.md",
+  "testing_guide": "docs/TESTING_GUIDE_0.1.3_REPAIR13.md",
+  "focused_test": "python -m unittest tests.unit.test_0_1_3_repair13_pcm_onset -v",
+  "full_suite": "python -m unittest discover -s tests -v",
+  "core_diagnostics": "python -m core.diagnostics",
+  "desktop_check": "npm run desktop:check",
+  "desktop_build": "npm run desktop:build",
+  "baseline_command": "python .\\scripts\\realtime_ab.py mini-overlap-luna",
+  "experimental_command": "python .\\scripts\\realtime_ab.py mini-overlap-luna-trim",
+  "report_command": "python .\\scripts\\repair13_latency_report.py .runtime\\repair13_baseline.log .runtime\\repair13_trim.log",
+  "known_limitations": [
+    "User Windows live results required",
+    "Potential startup phoneme clipping on very quiet provider audio needs listening test",
+    "A/B results vary by network/model timing",
+    "first_audio_ms is worklet-detected output, not measured speaker DAC time"
+  ],
+  "action_authority": "Core unchanged; actions dry-run",
+  "decision_authority": "Mini router unchanged, Decisions shadow not enabled in Repair13 matched A/B",
+  "cleanup_commit": "blocked_pending_user_acceptance"
+}
