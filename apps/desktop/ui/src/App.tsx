@@ -415,6 +415,9 @@ export default function App() {
   const captionAudioStartedRef = useRef(false);
   const audioPlayingRef = useRef(false);
   const turnCounterRef = useRef(0);
+  // A wake-only acknowledgment is a normal, fully authorized Realtime turn,
+  // with a shorter speech instruction. Do not treat wake+command as wake-only.
+  const wakeOnlyTurnRef = useRef(0);
   const responsePolicyRef = useRef<ResponsePolicy | null>(null);
   const activeResponseIdRef = useRef('');
   const suppressedResponseIdsRef = useRef<Set<string>>(new Set());
@@ -806,7 +809,15 @@ export default function App() {
         });
       } else if (payload.kind === 'wake_detected') {
         const command = String(payload.command_text || '').trim();
-        void startRealtimeSession(command, 'local_wake_phrase');
+        if (command) {
+          // Same-turn wake+command path: no preliminary greeting.
+          void startRealtimeSession(command, 'local_wake_phrase');
+        } else {
+          // The host sends this only after LocalWakeListener verifies a complete
+          // wake-only utterance. Use the exact transcript, not canned assistant audio.
+          const wakeOnly = String(payload.wake_only_transcript || '').trim();
+          void startRealtimeSession(wakeOnly, wakeOnly ? 'wake_only' : 'local_wake_phrase');
+        }
       } else if (payload.kind === 'wake_unavailable') {
         setStateSafely('sleeping', 'Voice wake is unavailable; type a message to wake Jarvis.');
       }
@@ -1042,6 +1053,7 @@ export default function App() {
     pcRef.current = null;
     wsRef.current = null;
     activeResponseIdRef.current = '';
+    wakeOnlyTurnRef.current = 0;
     suppressedResponseIdsRef.current.clear();
     responseMessageItemIdsRef.current.clear();
     parallelShadowIdsRef.current.clear();
@@ -1137,6 +1149,7 @@ export default function App() {
     latencyRef.current.routeDecided = undefined;
     setStateSafely('thinking', 'Preparing response');
     const turn = String(latencyRef.current.turn);
+    const wakeOnly = wakeOnlyTurnRef.current === latencyRef.current.turn;
     const tools = responsePolicyRef.current?.tools || [];
     // Both responses are OUT OF BAND; neither can mutate the default history.
     // The silent decision is the only response allowed to request probe tools.
@@ -1144,14 +1157,17 @@ export default function App() {
       metadata:{jarvis_stage:'overlap_decision',jarvis_turn:turn},
       input,
       output_modalities:['text'],max_output_tokens:512,tools,tool_choice:'auto',
-      instructions:coreLunaProbeRef.current
+      instructions:(coreLunaProbeRef.current
         ? `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. For complex reasoning or coding use ask_luna, which may invoke real Core reasoning after authorization. Actual external actions use test_action and remain dry runs. Never claim work was executed prematurely.`
-        : `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. Otherwise decide direct versus ask_luna for complex reasoning or test_action for external actions. Both expert/action tools are dry runs. Never claim any action succeeded.`}}));
+        : `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. Otherwise decide direct versus ask_luna for complex reasoning or test_action for external actions. Both expert/action tools are dry runs. Never claim any action succeeded.`)
+        + (wakeOnly ? ' This is a locally verified wake-only name call with no requested action. Route direct for a brief greeting; do not delegate it, put Jarvis to sleep, or perform an action.' : '')}}));
     dc.send(JSON.stringify({type:'response.create',response:{conversation:'none',
       metadata:{jarvis_stage:'overlap_candidate',jarvis_turn:turn},
       input,
       output_modalities:['audio'],max_output_tokens:1024,tools:[],tool_choice:'none',
-      instructions:'Generate one natural conversational answer without tools. Do not claim external actions or research were performed. No action is executable in this response.'}}));
+      instructions:wakeOnly
+        ? 'The user just called you by name to wake you. Reply naturally in 1 to 5 spoken words, as a brief acknowledgment. Vary your wording. No explanations, tools, actions, preambles, or claims of external work.'
+        : 'Generate one natural conversational answer without tools. Do not claim external actions or research were performed. No action is executable in this response.'}}));
     sendControlMessage({kind:'desktop_overlap_audio',turn:latencyRef.current.turn,phase:'started',
       input_binding:committedItemId ? 'committed_audio_item' : 'typed_text',
       commit_wait_ms:latencyRef.current.speechStopped === undefined ? null : Math.round(performance.now()-latencyRef.current.speechStopped)});
@@ -1210,12 +1226,13 @@ export default function App() {
     }
   };
 
-  const dispatchTextToRealtime = (text: string, source = 'typed') => {
+  const dispatchTextToRealtime = (text: string, source = 'typed', wakeOnly = false) => {
     const dc = dcRef.current;
     const clean = text.trim();
     if (!clean || !dc || dc.readyState !== 'open') return false;
     if (overlapProbeRef.current) cancelOverlap(); // A typed turn replaces any in-flight speculative speech.
     turnCounterRef.current += 1;
+    wakeOnlyTurnRef.current = wakeOnly ? turnCounterRef.current : 0;
     const now = performance.now();
     latencyRef.current = { turn: turnCounterRef.current, speechStarted: now, speechStopped: now };
     if (conversationTraceRef.current) {
@@ -2246,7 +2263,7 @@ export default function App() {
       if (preservedCommand.trim()) {
         // Distinguish user-typed wake from a command preserved by local STT.
         if (reason === 'typed_wake') dispatchTextToRealtime(preservedCommand, 'typed');
-        else dispatchTextToRealtime(preservedCommand, 'wake_transcript');
+        else dispatchTextToRealtime(preservedCommand, 'wake_transcript', reason === 'wake_only');
       } else {
         setStateSafely('idle', 'Ready');
         noteActivity();

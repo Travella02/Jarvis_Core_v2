@@ -1,0 +1,17 @@
+{
+  "version": "0.1.3",
+  "release_id": "0.1.3-repair15-wake-only-ack",
+  "title": "Repair15 \u2014 short model-generated acknowledgment for wake-only phrases",
+  "status": "pending_windows_live_acceptance",
+  "required_previous_checkpoint": "Committed Repair13 PCM latency checkpoint badbdc6 (after rollback of rejected Repair14)",
+  "scope": "Locally verified bare wake name becomes a normal Mini user turn; Mini gives natural short answer behind unchanged Core/PCM authorization",
+  "changed_pipeline": "wake-only control/Realtime ingress only; no routing/PCM change",
+  "automated_tests": "740 passed, 1 skipped, on reconstructed clean Repair13 baseline",
+  "unit_test": "python -m unittest tests.unit.test_0_1_3_repair15_wake_ack -v",
+  "full_test": "python -m unittest discover -s tests -v",
+  "desktop_build": "required on Windows before acceptance",
+  "live_test": "docs/TESTING_GUIDE_0.1.3_REPAIR15.md",
+  "issue": "issues/ISSUE_093_0_1_3_REPAIR15_WAKE_ONLY_ACK.md",
+  "root_manifest_unchanged": true,
+  "live_acceptance": "pending"
+}

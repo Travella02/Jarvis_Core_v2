@@ -254,6 +254,10 @@ class DesktopWakeService:
                         "kind": "wake_detected",
                         "phrase": result.match.phrase,
                         "command_text": result.match.command_text,
+                        # Only a confirmed wake with no attached command becomes an
+                        # acknowledgment turn. The exact locally verified phrase
+                        # is forwarded; wake-plus-command behavior is unchanged.
+                        "wake_only_transcript": result.transcript if not result.match.command_text else "",
                     }
                 )
                 return

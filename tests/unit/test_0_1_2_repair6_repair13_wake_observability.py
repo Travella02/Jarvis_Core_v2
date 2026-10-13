@@ -107,7 +107,7 @@ class WakeTraceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_typed_wake_is_not_logged_as_voice_wake(self):
         self.assertIn("if (reason === 'typed_wake') dispatchTextToRealtime(preservedCommand, 'typed')", APP)
-        self.assertIn("else dispatchTextToRealtime(preservedCommand, 'wake_transcript')", APP)
+        self.assertIn("else dispatchTextToRealtime(preservedCommand, 'wake_transcript', reason === 'wake_only')", APP)
 
 
 if __name__ == '__main__':
