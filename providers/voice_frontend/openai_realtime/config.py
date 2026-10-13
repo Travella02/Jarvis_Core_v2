@@ -47,6 +47,7 @@ class OpenAIRealtimeConfig:
     overlap_probe: bool = False
     decisions_shadow_probe: bool = False
     core_luna_probe: bool = False
+    delegation_guidance_probe: bool = False  # 0.1.4.1 opt-in A/B only.
     luna_result_hold_seconds: float = 0.0  # Only explicit cancellation-test mode.
 
     @classmethod
@@ -104,5 +105,6 @@ class OpenAIRealtimeConfig:
             overlap_probe=_env_bool(source.get("JARVIS_REALTIME_OVERLAP_PROBE", "0")),
             decisions_shadow_probe=_env_bool(source.get("JARVIS_DECISIONS_SHADOW_PROBE", "0")),
             core_luna_probe=_env_bool(source.get("JARVIS_CORE_LUNA_PROBE", "0")),
+            delegation_guidance_probe=_env_bool(source.get("JARVIS_0141_DELEGATION_GUIDANCE", "0")),
             luna_result_hold_seconds=hold_seconds,
         )

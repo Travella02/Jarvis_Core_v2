@@ -396,6 +396,8 @@ class DesktopRealtimeSession:
         tool_probe = self.config.tool_selection_probe
         buffered_probe = self.config.buffered_tool_probe
         overlap_probe = self.config.overlap_probe
+        if self.config.delegation_guidance_probe and not (self.config.core_luna_probe and overlap_probe):
+            raise RuntimeError("0.1.4.1 guidance requires real Core/Luna overlap mode")
         direct_only = direct_only and not (tool_probe or buffered_probe or overlap_probe)
         policy = (overlap_probe_response_policy() if overlap_probe else probe_response_policy() if tool_probe else {
             **probe_response_policy(),
@@ -445,6 +447,7 @@ class DesktopRealtimeSession:
             "buffered_tool_probe": buffered_probe,
             "overlap_probe": overlap_probe,
             "core_luna_probe": self.config.core_luna_probe,
+            "delegation_guidance_probe": self.config.delegation_guidance_probe,
             "pcm_trim_leading_silence": overlap_probe and str(merged_environment(PROJECT_ROOT / ".env").get("JARVIS_PCM_TRIM_LEADING_SILENCE", "0")).lower() in {"1", "true", "yes", "on"},
             "response": policy,
         })

@@ -1,0 +1,14 @@
+{
+  "version": "0.1.4",
+  "milestone": "0.1.4.1",
+  "title": "Delegation consistency A/B benchmark",
+  "status": "candidate_pending_windows_live_acceptance",
+  "base": "accepted_0.1.3_release",
+  "default_behavior_changed": false,
+  "added_launcher": "mini-overlap-luna-trim-guided",
+  "unchanged_baseline_launcher": "mini-overlap-luna-trim",
+  "changed_route_authority": false,
+  "changed_actions_or_permissions": false,
+  "changed_pcm_audio": false,
+  "runbook": "docs/TESTING_GUIDE_0.1.4.1.md"
+}

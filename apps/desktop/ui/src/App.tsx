@@ -441,6 +441,7 @@ export default function App() {
   const bufferedToolProbeRef = useRef(false);
   const overlapProbeRef = useRef(false);
   const coreLunaProbeRef = useRef(false);
+  const delegationGuidanceRef = useRef(false); // Opt-in; no extra inference request.
   const overlapCandidateStageRef = useRef('overlap_candidate');
   const overlapGateRef = useRef<StreamingPcmGate | null>(null);
   const pcmTrimRef = useRef(false);
@@ -1172,6 +1173,9 @@ export default function App() {
       instructions:(coreLunaProbeRef.current
         ? `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. For complex reasoning or coding use ask_luna, which may invoke real Core reasoning after authorization. Actual external actions use test_action and remain dry runs. Never claim work was executed prematurely.`
         : `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. Otherwise decide direct versus ask_luna for complex reasoning or test_action for external actions. Both expert/action tools are dry runs. Never claim any action succeeded.`)
+        + (delegationGuidanceRef.current && coreLunaProbeRef.current && !wakeOnly
+          ? ' In this experimental A/B arm, choose ask_luna for user requests requiring substantial multi-step reasoning, a detailed technical design, trade-off analysis across multiple constraints, or a considered recommendation—even when the user does not explicitly mention Core, Luna, or deep reasoning. Choose direct for greetings, simple arithmetic, straightforward factual questions, a short definition, and light conversation. Do not escalate merely because a familiar technical word occurs; judge the entire user request and expected answer. This is guidance to the same Mini router, NOT an additional model call. Preserve sleep_evidence validation and external-action dry-run rules exactly.'
+          : '')
         + (wakeOnly ? ' This is a locally verified wake-only name call with no requested action. Route direct for a brief greeting; do not delegate it, put Jarvis to sleep, or perform an action.' : '')}}));
     dc.send(JSON.stringify({type:'response.create',response:{conversation:'none',
       metadata:{jarvis_stage:'overlap_candidate',jarvis_turn:turn},
@@ -2201,6 +2205,7 @@ export default function App() {
           bufferedToolProbeRef.current = payload.buffered_tool_probe === true;
           overlapProbeRef.current = payload.overlap_probe === true;
           coreLunaProbeRef.current = payload.core_luna_probe === true;
+          delegationGuidanceRef.current = payload.delegation_guidance_probe === true && coreLunaProbeRef.current && overlapProbeRef.current;
           pcmTrimRef.current = payload.pcm_trim_leading_silence === true;
         } else if (payload.kind === 'core_luna_cancel_hold') {
           // Cancellation-test mode only. Never voices the held Core result.
