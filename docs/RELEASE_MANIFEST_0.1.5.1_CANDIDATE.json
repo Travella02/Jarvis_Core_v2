@@ -1,0 +1,19 @@
+{
+  "version_candidate": "0.1.5.1",
+  "title": "Core Tool Gateway and Approved Browser Action Foundation",
+  "required_checkpoint": "accepted 0.1.4 (reported Git f6f8a5a)",
+  "scope": "Core-only, no existing voice/UI changes; manual verified first OS action",
+  "status": "automated_passed_manual_acceptance_pending",
+  "test_focused": "python -m unittest tests.unit.test_0_1_5_1_tool_gateway -v",
+  "test_full": "python -m unittest discover -s tests -v",
+  "test_guide": "docs/TESTING_GUIDE_0.1.5.1.md",
+  "limitations": [
+    "Not yet connected to live spoken or typed Jarvis; model action tools remain dry-run.",
+    "Only one approved destination: YouTube HTTPS URL.",
+    "Default browser launch acceptance does not prove website load or visible focus.",
+    "Replay protection is process-local and non-durable.",
+    "Single-local-user permission foundation only; accounts and hardened approval later.",
+    "Baseline release metadata labels remain legacy and will be reconciled separately."
+  ],
+  "live_acceptance": "pending manual browser check and unchanged voice regression"
+}
