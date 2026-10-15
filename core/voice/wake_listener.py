@@ -74,7 +74,8 @@ class LocalWakeListener:
             preroll_ms=300,
             max_utterance_ms=20_000,
         )
-        self.wake_detector = WakePhraseDetector(self.config.wake_phrases)
+        self.wake_detector = WakePhraseDetector(
+            self.config.wake_phrases, phonetic_enabled=self.config.phonetic_wake_enabled)
         self._sequence = 0
         self._trace = CorrelationContext.create()
         self._endpoint = EndpointDetector(self.endpoint_config)

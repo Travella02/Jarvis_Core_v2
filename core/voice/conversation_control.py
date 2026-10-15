@@ -88,6 +88,7 @@ class WakeSleepConfig:
     )
     idle_timeout_seconds: float = 60.0
     start_awake: bool = False
+    phonetic_wake_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.idle_timeout_seconds <= 0:
@@ -114,7 +115,33 @@ class WakeSleepConfig:
         sleep = _split_phrases(source.get("JARVIS_SLEEP_PHRASES"), defaults.sleep_phrases)
         timeout_raw = source.get("JARVIS_IDLE_SLEEP_SECONDS")
         timeout = float(timeout_raw) if timeout_raw else defaults.idle_timeout_seconds
-        return cls(wake_phrases=wake, sleep_phrases=sleep, idle_timeout_seconds=timeout)
+        phonetic_enabled = source.get("JARVIS_PHONETIC_WAKE", "0").lower() in ("1", "true", "yes", "on")
+        return cls(wake_phrases=wake, sleep_phrases=sleep, idle_timeout_seconds=timeout,
+                   phonetic_wake_enabled=phonetic_enabled)
+
+
+def _same_wake_pronunciation(observed: str, canonical: str, *, preceded_by_hey: bool) -> bool:
+    """Conservative transcription tolerance for the *name token*.
+
+    A stable trailing consonant/vowel pattern and length are more reliable than
+    fuzzy edit distance over the entire utterance. This is an opt-in heuristic,
+    not a learned acoustic confidence score. Other words remain exact, and a
+    multiword wake requires its leading words to match exactly.
+    """
+    if observed == canonical:
+        return True
+    if not (5 <= len(observed) <= 7 and len(canonical) == 6):
+        return False
+    # Variations of the first syllable (including d/j transcription) are
+    # permitted only when the distinctive 'rvis' ending is intact. The first
+    # syllable must retain a single consonant followed by a vowel.
+    if len(observed) == 6 and observed[2:] == canonical[2:]:
+        return observed[0].isalpha() and observed[1] in 'aei' and observed[0] in 'jdg'
+    # Very-near spelling tolerances such as an extra final s require 'hey'.
+    if preceded_by_hey and observed.startswith(canonical[:3]):
+        from difflib import SequenceMatcher
+        return SequenceMatcher(None, observed, canonical).ratio() >= 0.90
+    return False
 
 
 class WakePhraseDetector:
@@ -126,7 +153,8 @@ class WakePhraseDetector:
     Jarvis.
     """
 
-    def __init__(self, phrases: tuple[str, ...]) -> None:
+    def __init__(self, phrases: tuple[str, ...], *, phonetic_enabled: bool = False) -> None:
+        self.phonetic_enabled = phonetic_enabled
         candidates: list[tuple[str, tuple[str, ...]]] = []
         for phrase in phrases:
             words = _normalized_words(phrase)
@@ -139,8 +167,17 @@ class WakePhraseDetector:
         matches = list(_WORD_RE.finditer(text))
         lowered = tuple(match.group(0).lower() for match in matches)
         for phrase, words in self._phrases:
-            if len(lowered) < len(words) or lowered[: len(words)] != words:
+            if len(lowered) < len(words):
                 continue
+            if lowered[:len(words)] != words:
+                # Optional spoken-name tolerance for the default canonical name.
+                # Operates on the isolated invocation token only, not substrings,
+                # and never changes custom user-chosen wake words.
+                if not (self.phonetic_enabled and words[-1] == 'jarvis' and
+                        lowered[:len(words)-1] == words[:-1] and
+                        _same_wake_pronunciation(lowered[len(words)-1], 'jarvis',
+                                                 preceded_by_hey=bool(words[:-1]))):
+                    continue
             end = matches[len(words) - 1].end()
             remainder = text[end:].lstrip(" \t,;:.-!?—–")
             return WakeMatch(phrase=phrase, command_text=remainder.strip())
@@ -148,7 +185,8 @@ class WakePhraseDetector:
 
 
 class SleepPhraseDetector:
-    def __init__(self, phrases: tuple[str, ...]) -> None:
+    def __init__(self, phrases: tuple[str, ...], *, phonetic_enabled: bool = False) -> None:
+        self.phonetic_enabled = phonetic_enabled
         self._phrases = frozenset(_normalized_words(item) for item in phrases if item.strip())
 
     def matches(self, text: str) -> bool:
@@ -198,7 +236,8 @@ class ContinuousVoiceSession:
             if self.config.start_awake
             else VoicePresenceState.SLEEPING
         )
-        self.wake_detector = WakePhraseDetector(self.config.wake_phrases)
+        self.wake_detector = WakePhraseDetector(
+            self.config.wake_phrases, phonetic_enabled=self.config.phonetic_wake_enabled)
         self.sleep_detector = SleepPhraseDetector(self.config.sleep_phrases)
         self._last_activity = monotonic()
         self._wake_count = 0

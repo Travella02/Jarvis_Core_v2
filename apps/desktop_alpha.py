@@ -347,8 +347,9 @@ class DesktopRealtimeSession:
         self._semantic_actions = self._actions_enabled and str(env.get('JARVIS_SEMANTIC_ACTIONS_PROBE','0')).lower() in {'1','true','yes','on'}
         self._managed_browser = self._semantic_actions and str(env.get('JARVIS_MANAGED_BROWSER_PROBE','0')).lower() in {'1','true','yes','on'}
         # One external browser across wake/sleep cycles, separate from voice session.
+        self._advanced_browser = self._managed_browser and str(env.get('JARVIS_BROWSER_MEDIA_PROBE','0')).lower() in {'1','true','yes','on'}
         self._managed_browser_engine = PlaywrightManagedBrowser() if self._managed_browser else None
-        self._action_session = (ManagedDesktopBrowserSession(browser=self._managed_browser_engine) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()) if self._actions_enabled else None
+        self._action_session = (ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()) if self._actions_enabled else None
         self._browser_action_task: asyncio.Task | None = None
 
     @property
@@ -374,7 +375,7 @@ class DesktopRealtimeSession:
             self._relay = relay
             self._bridge = bridge
             if self._actions_enabled:
-                self._action_session = ManagedDesktopBrowserSession(browser=self._managed_browser_engine) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
+                self._action_session = ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
             if self.config.core_luna_probe:
                 if not self.config.overlap_probe or self.delegation_orchestrator is None:
                     raise RuntimeError("Core Luna mode requires overlap and Core delegation orchestration")
@@ -486,17 +487,27 @@ class DesktopRealtimeSession:
                     'For searches include query from the current request/context. '
                     'Never call for hypothetical, quoted, negated, or combined privileged requests. '
                     'Do not claim execution until Core verifies it.')
+                if self._advanced_browser:
+                    action_tool['description'] += (' Also control a specified open tab by domain: select_tab or close_named_tab. '
+                        'For a currently visible HTML5 video in Jarvis managed browser use site=current and intent=play,pause,mute,unmute,volume. '
+                        'For volume include an integer percentage value explicitly spoken by the user. '
+                        'Open and search use the system default browser, which you cannot control with tab/media tools. '
+                        'Only if the user explicitly asks to open a site in Jarvis managed browser, use open_managed; '
+                        'that separate browser can be controlled with tab/media commands. '
+                        'Never invent a tab target, video, or volume. Do not claim execution.')
                 action_tool['parameters']={'type':'object','properties':{
                     'site':{'type':'string','description':'Public website domain without protocol, path or query, or current for tab operations'},
-                    'intent':{'type':'string','enum':['open','search','back','forward','reload','close_tab','next_tab']},
+                    'intent':{'type':'string','enum':['open','search','back','forward','reload','close_tab','next_tab'] +
+                        (['open_managed','select_tab','close_named_tab','play','pause','mute','unmute','volume'] if self._advanced_browser else [])},
                     'query':{'type':'string','description':'Short search terms for search; omit for other intents'},
+                    **({'value':{'type':'integer','description':'Explicitly requested volume percentage 0-100 (volume only)'}} if self._advanced_browser else {}),
                 },'required':['site','intent'],'additionalProperties':False}
                 policy['instructions']=str(policy['instructions']).replace(
                     'For an immediate request to open YouTube or find a video there, call browser_action. '
                     'Never claim execution; Core verifies the user request and the exact destination. '
                     'Other external actions remain unsupported.',
-                    'For an immediate natural-language request to navigate public websites, search YouTube/Google, '
-                    'or manage Jarvis-owned browser tabs, call browser_action with a typed domain and intent. '
+                    'For an immediate natural-language request to open or search public sites, use the operating-system default browser (intent open/search). '
+                    'For explicitly requested Jarvis-managed browsing (open_managed) or to manage Jarvis-owned tabs, call browser_action with a typed domain and intent. '
                     'Do not claim completion before Core approves and verifies it. All other actions remain unsupported.')
 
         print(f"[Jarvis A/B Start] model={self.config.model} | reasoning={self.config.reasoning_effort} | "
@@ -515,6 +526,7 @@ class DesktopRealtimeSession:
             "core_actions_probe": self._actions_enabled,
             "semantic_actions_probe": self._semantic_actions,
             "managed_browser_probe": self._managed_browser,
+            "browser_media_probe": self._advanced_browser,
             "pcm_trim_leading_silence": overlap_probe and str(merged_environment(PROJECT_ROOT / ".env").get("JARVIS_PCM_TRIM_LEADING_SILENCE", "0")).lower() in {"1", "true", "yes", "on"},
             "response": policy,
         })

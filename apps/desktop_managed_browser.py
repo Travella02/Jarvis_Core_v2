@@ -17,8 +17,9 @@ class ManagedBrowserOutcome:
     code: str
 
 class ManagedDesktopBrowserSession:
-    def __init__(self, *, browser: BrowserOperations|None=None):
-        self.gateway=ManagedBrowserGateway(browser)
+    def __init__(self, *, browser: BrowserOperations|None=None, advanced:bool=False, launch_default=None):
+        self.gateway=ManagedBrowserGateway(browser, advanced=advanced, launch_default=launch_default)
+        self.advanced=advanced
         self.active_turn=0
         self.handled:set[int]=set()
 
@@ -39,14 +40,17 @@ class ManagedDesktopBrowserSession:
             return ManagedBrowserOutcome('failed','I could not verify that browser request.',
                                          'missing_independent_user_evidence')
         intent=arguments.get('intent')
-        if intent not in ALLOWED or not isinstance(intent,str) or not isinstance(arguments.get('site'),str):
+        if (intent not in ALLOWED or not isinstance(intent,str) or
+                (not self.advanced and intent in {'select_tab','close_named_tab','play','pause','mute','unmute','volume','open_managed'}) or
+                not isinstance(arguments.get('site'),str)):
             return ManagedBrowserOutcome('failed','I do not support that browser operation yet.','unknown_operation')
-        expected={'site','intent','query'} if intent=='search' else {'site','intent'}
+        expected={'site','intent','query'} if intent=='search' else {'site','intent','value'} if intent=='volume' else {'site','intent'}
         cleaned={k:v for k,v in arguments.items() if not (k=='query' and intent!='search' and v in ('',None))}
         if set(cleaned)!=expected:
             return ManagedBrowserOutcome('failed','Those browser parameters are not authorized.','invalid_arguments')
         args={'site':cleaned['site']}
         if intent=='search':args['query']=cleaned['query']
+        if intent=='volume':args['value']=cleaned['value']
         trace=CorrelationContext.create()
         request=ToolRequest(trace,'desktop_browser',intent,args,idempotency_key=f'local-turn-{turn}')
         result=await self.gateway.execute(request,evidence=ConfirmedUserAction(
