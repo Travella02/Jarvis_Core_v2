@@ -64,9 +64,9 @@ class ActionUIContractTests(unittest.TestCase):
         self.assertLess(part.index('overlapAwaitingActionResultRef.current = {turn:pending.turn,epoch:pending.epoch}'),
                         part.index("sendControlMessage({kind:'desktop_action_request'"))
         self.assertIn('}, 5000);',part)
-        self.assertIn('I could not confirm the browser result.',part)
-        self.assertIn("setStateSafely('idle', 'Ready')",part)
-        self.assertIn('I will not retry automatically',part)
+        self.assertIn('I could not confirm whether that browser action completed.',part)
+        self.assertIn('announceActionProblem',part)
+        self.assertIn('Never automatically replay it',part)
 
     def test_core_response_only_settles_matching_action_and_is_silent(self):
         start=self.ui.index("} else if (payload.kind === 'core_tool_result')")

@@ -1,0 +1,33 @@
+{
+  "anchors": {
+    "apps/desktop_alpha.py": "cefbdcbc1cd202a2a23e2ad0900fbe8212c58160ebf4328b25aec4dfe9aa1e94",
+    "apps/desktop_semantic_actions.py": "c0bdb415df4cd0478ac37550b99d112523c7fab0cdfd2a7943ed180b1a77d045",
+    "core/tools/semantic_browser.py": "f3e715f29f78626fb3ea2941bd34cc819b0aa1f83df0c8ecac29788feb67c933",
+    "tests/unit/test_0_1_5_3_semantic_actions.py": "072a26f1993d31aa6b067dd4acd0c557e39760e7c615bae3a4608a52426fec38"
+  },
+  "base": "Committed 0.1.5.3 semantic alpha checkpoint",
+  "milestone": "Repair1 Browser Action Result Feedback",
+  "observations": "Relay notification of core_tool_result was filtered; fix forwards explicitly. Success remains silent; failures use existing voice renderer.",
+  "source_sha256_after": {
+    "apps/desktop/ui/src/App.tsx": "6a068642a8a6ad7024253a0650c8666bc80f17ed4380604f9287fb17e8f8155d",
+    "docs/PATCH_NOTES_0.1.5.3_REPAIR1.md": "f33fa5136f22d0429124f8536afff8586a0758cee8f396c4708a1786ebb68a7c",
+    "docs/TESTING_GUIDE_0.1.5.3_REPAIR1.md": "8752b8ff324581129b9d13ee9e272e97dd4311128438f78412d676ef501af97b",
+    "issues/ISSUE_108_0_1_5_3_REPAIR1_ACTION_RESULT_VOICE.md": "3b566866a2b38cda087eedc0901b5e7c332e890cb69a9be059193cef0d9c3a4f",
+    "providers/voice_frontend/openai_realtime/webrtc.py": "67d660802d7b9c12947b6602ad9f5b4878ec5b4a851e84b664f6ad8ccb00c7ba",
+    "tests/unit/test_0_1_5_2_repair1_action_polish.py": "d5a3d3a7854c0805dfc962f7b9fb6531bfc9fdbb75300cc9712a87aa33a97bbf",
+    "tests/unit/test_0_1_5_2_repair2_action_settlement.py": "941b9fe1c20ad9a29909eddc549036a017a82cdad10e5d2574bd86111d3e61a4",
+    "tests/unit/test_0_1_5_3_repair1_action_voice.py": "c851047222f0bbdd8b57d7d67b42db50a5481e1f38cf10feb35b8bc60d8499e3"
+  },
+  "source_sha256_before": {
+    "apps/desktop/ui/src/App.tsx": "39b93aa31d749e1a86247a353e3be5c2c1cac63ded647ba86e09e6e0f6bf6e52",
+    "docs/PATCH_NOTES_0.1.5.3_REPAIR1.md": null,
+    "docs/TESTING_GUIDE_0.1.5.3_REPAIR1.md": null,
+    "issues/ISSUE_108_0_1_5_3_REPAIR1_ACTION_RESULT_VOICE.md": null,
+    "providers/voice_frontend/openai_realtime/webrtc.py": "d1f048054f34c228a1c75b94da5ae44ace7755ed019f6dae52c1f002e7d55ce5",
+    "tests/unit/test_0_1_5_2_repair1_action_polish.py": "f8470ade666f75e389ad07dcf73800e5c19a7ac49e0b97b4e9f2ad26e5bc7b32",
+    "tests/unit/test_0_1_5_2_repair2_action_settlement.py": "871c686b2d402034b5f7c20689b32747c2b52e2411b5554539d97727b8f04780",
+    "tests/unit/test_0_1_5_3_repair1_action_voice.py": null
+  },
+  "status": "automated validation only; Windows live acceptance required",
+  "version": "0.1.5.3"
+}

@@ -1396,14 +1396,14 @@ export default function App() {
     return true;
   };
 
-  const speakCoreLunaResult = (payload: {turn?: number; status?: string; text?: string; origin?: string}) => {
+  const speakCoreLunaResult = (payload: {turn?: number; status?: string; text?: string; origin?: string}): boolean => {
     const turn = Number(payload.turn || 0);
     if (!coreLunaProbeRef.current || turn <= 0 || turn !== overlapActiveTurnRef.current ||
-        overlapDecisionRef.current !== 'tool' || presenceRef.current !== 'awake') return;
+        overlapDecisionRef.current !== 'tool' || presenceRef.current !== 'awake') return false;
     const dc = dcRef.current;
-    if (dc?.readyState !== 'open') return;
+    if (dc?.readyState !== 'open') return false;
     const resultText = String(payload.text || '').trim().slice(0, 3000);
-    if (!resultText) { setStateSafely('idle','Luna returned no usable result'); return; }
+    if (!resultText) { setStateSafely('idle','Core returned no usable result'); return false; }
     coreLunaVerifiedTextRef.current = resultText;
     // Original candidate was cancelled and *never* authorized. Reuse the same
     // private PCM gate only for a NEW response owned by this exact turn.
@@ -1423,15 +1423,32 @@ export default function App() {
     const input: any[] = [];
     if (/^item_[A-Za-z0-9_-]+$/.test(originalItem)) input.push({type:'item_reference',id:originalItem});
     input.push({type:'message',role:'user',content:[{type:'input_text',
-      text:`Jarvis Core returned this ${payload.origin === 'tool' ? 'verified browser-action outcome' : (payload.status === 'completed' ? 'verified reasoning answer' : 'verified failure')} for your most recent request. Speak this faithfully without new factual claims or actions:\n${resultText}`}]});
+      text:`Jarvis Core returned this ${payload.origin === 'tool' ? (payload.status === 'unknown' ? 'unconfirmed browser-action status' : 'verified browser-action outcome') : (payload.status === 'completed' ? 'verified reasoning answer' : 'verified failure')} for your most recent request. Speak this faithfully without new factual claims or actions:\n${resultText}`}]});
     dc.send(JSON.stringify({type:'response.create',response:{conversation:'none',
       metadata:{jarvis_stage:'core_luna_voice',jarvis_turn:String(turn)},
       // Audio tokens and transcript tokens share this limit. Unlike the short
       // speculative candidate, a bounded 3000-character Core answer must not
       // be truncated by a 1024-token voice-synthesis budget.
       input,output_modalities:['audio'],max_output_tokens:'inf',tools:[],tool_choice:'none',
-      instructions:'You are Jarvis speaking an already obtained Core result. Give the answer naturally and faithfully, without claiming any additional research, external actions, or capabilities. Never announce internal routing or say that you are about to check something. If Core reported a failure, communicate that failure accurately. Do not run tools.'}}));
+      instructions:payload.origin === 'tool' ? 'You are Jarvis delivering a browser-action problem to the speaker. Say one short, clear sentence in first person based only on the supplied Core status. If unconfirmed, say you cannot verify success; NEVER say the action failed or succeeded. For a denial or failure, explain that it could not be done. Do not claim any new action, research, or capability. No preamble, no follow-up, no extra commentary. Do not run tools.' : 'You are Jarvis speaking an already obtained Core result. Give the answer naturally and faithfully, without claiming any additional research, external actions, or capabilities. Never announce internal routing or say that you are about to check something. If Core reported a failure, communicate that failure accurately. Do not run tools.'}}));
     sendControlMessage({kind:'desktop_luna_voice',turn,phase:'started',status:String(payload.status || '')});
+    return true;
+  };
+
+  // Verified negative action outcomes require a spoken reply. Keep the
+  // authority in Core and reuse the proven Core-result voice renderer; never
+  // synthesize a speculative success or invoke a second browser action.
+  const announceActionProblem = (turn: number, status: 'failed' | 'unknown', message: string): boolean => {
+    const safeMessage = message.trim().slice(0, 400) || 'I could not complete that request.';
+    const started = speakCoreLunaResult({turn, status, origin:'tool', text:safeMessage});
+    if (!started) {
+      // When audio is unavailable, show the honest result; never claim speech.
+      overlapDecisionRef.current = 'failed';
+      setCaption(safeMessage);
+      setStateSafely('idle', 'Ready');
+      sendControlMessage({kind:'desktop_action_voice',turn,status,phase:'unavailable'});
+    }
+    return started;
   };
 
   // A model selecting test_action is only a proposal. Core receives the
@@ -1465,11 +1482,10 @@ export default function App() {
       overlapActionResultTimerRef.current = null;
       overlapGateRef.current?.abort();
       overlapGateRef.current = null;
-      overlapDecisionRef.current = 'failed';
       // The action MAY have succeeded even if its acknowledgment went missing.
       // Never automatically replay it or claim that nothing happened.
-      setCaption('I could not confirm the browser result. Check the browser; I will not retry automatically.');
-      setStateSafely('idle', 'Ready');
+      announceActionProblem(pending.turn,'unknown',
+        'I could not confirm whether that browser action completed. Please check your browser.');
       sendControlMessage({kind:'desktop_action_feedback',turn:pending.turn,status:'unknown',
         visible_confirmation:false,spoken:false,reason:'result_timeout'});
     }, 5000);
@@ -2330,21 +2346,31 @@ export default function App() {
             overlapActionTimerRef.current = null;
             overlapGateRef.current?.abort();
             overlapGateRef.current = null;
-            overlapDecisionRef.current = 'failed'; // Fail closed for late candidate audio.
             const completed = payload.status === 'completed';
-            setCaption(completed ? '' : String(payload.text || 'I could not complete that action.'));
-            setStateSafely('idle', 'Ready');
-            // Some delayed cancelled-candidate events may arrive immediately
-            // after Core's WS result. Reassert Ready without touching a new turn.
-            window.setTimeout(() => {
-              if (awaiting.epoch === overlapEpochRef.current &&
-                  awaiting.turn === overlapActiveTurnRef.current &&
-                  overlapDecisionRef.current === 'failed' && presenceRef.current === 'awake') {
-                setStateSafely('idle', 'Ready');
-              }
-            }, 180);
+            if (completed) {
+              // Visible browser success is its own confirmation. No extra voice.
+              overlapDecisionRef.current = 'failed'; // Fail closed for late candidate audio.
+              setCaption('');
+              setStateSafely('idle', 'Ready');
+              // Delayed candidate events must not resurrect Working.
+              window.setTimeout(() => {
+                if (awaiting.epoch === overlapEpochRef.current &&
+                    awaiting.turn === overlapActiveTurnRef.current &&
+                    overlapDecisionRef.current === 'failed' && presenceRef.current === 'awake') {
+                  setStateSafely('idle', 'Ready');
+                }
+              }, 180);
+            } else {
+              // Denied, unsupported or failed: one truthful spoken explanation.
+              // An unrecognized status is not verified success or verified failure.
+              const status = payload.status === 'failed' ? 'failed' : 'unknown';
+              const message = status === 'unknown'
+                ? 'I could not confirm whether that browser action completed. Please check your browser.'
+                : String(payload.text || 'I could not complete that action.');
+              announceActionProblem(turn,status,message);
+            }
             noteActivity();
-            sendControlMessage({kind:'desktop_action_feedback',turn,status:completed ? 'completed' : 'failed',
+            sendControlMessage({kind:'desktop_action_feedback',turn,status:completed ? 'completed' : (payload.status === 'failed' ? 'failed' : 'unknown'),
               visible_confirmation:completed,spoken:false});
           }
         } else if (payload.kind === 'core_luna_result') {
