@@ -73,7 +73,33 @@ def site_label(host: str) -> str:
     return pieces[-3] if len(pieces)==3 else pieces[-2]
 
 
-def trusted_intent(text: object, operation: str, host: str | None, value: object=None) -> bool:
+def _phonetic_search_evidence(text: str, host: str | None, query: object) -> bool:
+    """Conservative STT repair, not intent routing or a generic fuzzy command.
+
+    Realtime must already have proposed SEARCH. Only tolerate a search-like
+    *verb* immediately preceding a clearly named supported search site, and
+    require all model-proposed query words to be independently present in the
+    same utterance. No site or search-topic inference from the model itself.
+    """
+    if host not in ('youtube.com', 'google.com') or not isinstance(query, str):
+        return False
+    query_words = re.findall(r'[a-z0-9]+', query.casefold())
+    if not query_words or len(query_words)>12:
+        return False
+    words = re.findall(r'[a-z0-9]+', text.casefold())
+    # A near-spelled verb alone is not authority. The user's actual spoken
+    # query must support the model-proposed destination AND the query topic.
+    if not all(word in words for word in query_words):
+        return False
+    label=site_label(host)
+    for index,word in enumerate(words[:-1]):
+        if word != 'search' and 4 <= len(word) <= 8 and re.sub(r'[aeiouy]', '', word) == 'srch':
+            if label in words[index+1:index+4]:
+                return True
+    return False
+
+
+def trusted_intent(text: object, operation: str, host: str | None, value: object=None, query: object=None) -> bool:
     if not isinstance(text,str) or not (2 <= len(text) <= 2000) or operation not in ALLOWED:
         return False
     text=' '.join(text.split())
@@ -84,7 +110,8 @@ def trusted_intent(text: object, operation: str, host: str | None, value: object
     if any(pattern.search(safe) for pattern in (_NEGATED, _NON_REQUEST, _SECOND_ACTION)):
         return False
     if not _ACTIONS[operation].search(text):
-        return False
+        if not (operation=='search' and _phonetic_search_evidence(text,host,query)):
+            return False
     # A single open-site effect must not silently satisfy one clause of a compound
     # request such as 'open Google and YouTube'. Search is a distinct operation.
     if operation in ('open','open_managed') and re.search(r'\b(?:open|launch|visit)\b.{0,100}\band\b', text, re.I):
@@ -323,8 +350,9 @@ def open_in_system_default(url: str) -> bool:
 class ManagedBrowserGateway:
     """Single-user, opt-in, transcript-bound browser authorization."""
     def __init__(self, browser: BrowserOperations | None = None, *, advanced: bool = False,
-                 launch_default=None):
+                 launch_default=None, bridge_mode: bool = False):
         self.browser=browser or PlaywrightManagedBrowser()
+        self.bridge_mode=bridge_mode
         self.advanced=advanced
         self._launch_default=launch_default or open_in_system_default
         self._lock=asyncio.Lock()
@@ -334,7 +362,7 @@ class ManagedBrowserGateway:
         def outcome(status,code=None,message=None,output=None):
             return ToolResult(request.trace,request.tool_name,request.operation,status,output or {},
                               provider_call_id=request.provider_call_id,error_code=code,error_message=message)
-        if request.tool_name!=CAPABILITY or request.operation not in ALLOWED or (not self.advanced and request.operation in (MEDIA|NAMED_TABS|{'open_managed'})):
+        if request.tool_name!=CAPABILITY or request.operation not in ALLOWED or (self.bridge_mode and request.operation=='open_managed') or (not self.advanced and request.operation in (MEDIA|NAMED_TABS|{'open_managed'})):
             return outcome(ToolResultStatus.DENIED,'unknown_capability','That browser operation is not supported yet.')
         operation=request.operation
         arguments=dict(request.arguments)
@@ -352,7 +380,7 @@ class ManagedBrowserGateway:
             return outcome(ToolResultStatus.DENIED,'unsupported_search','I can search YouTube or Google in this browser test.')
         if (evidence is None or not evidence.confirmed or not evidence.local_desktop or
                 request.trace.turn_id!=evidence.turn_id or not request.trace.turn_id or
-                not trusted_intent(evidence.transcript,operation,host,value)):
+                not trusted_intent(evidence.transcript,operation,host,value,query)):
             return outcome(ToolResultStatus.DENIED,'unverified_user_intent',
                            'I could not verify that immediate browser request, so I did not act.')
         replay=(evidence.turn_id,request.idempotency_key or request.trace.request_id)
@@ -370,6 +398,10 @@ class ManagedBrowserGateway:
                      else f'https://www.{host}/') if operation in ('open','open_managed') else ''
             try:
                 async def act():
+                    if operation in ('open','search') and self.bridge_mode:
+                        # A connected extension may reuse an existing matching tab;
+                        # otherwise the adapter asks Windows to open in its default.
+                        return await self.browser.navigate(uri)
                     if operation in ('open','search') and self.advanced:
                         # Do not start/reuse the separate Playwright browser for
                         # ordinary opens. The user chooses their system default.
@@ -383,12 +415,14 @@ class ManagedBrowserGateway:
                 success=await asyncio.wait_for(act(),timeout=7.0)
                 result=(outcome(ToolResultStatus.SUCCEEDED,output={
                     'operation':operation,'browser_navigation_committed':success if (operation in ('open','search') and not self.advanced) or operation == 'open_managed' else False,
-                    'system_browser_handoff_accepted':bool(success and self.advanced and operation in ('open','search')),
-                    'page_loaded_verified':False,'url':uri if uri else None,
-                    'user_message':'I sent the website to your default browser.' if self.advanced and operation in ('open','search') else 'I completed the browser action.'})
+                    'system_browser_handoff_accepted':bool(success and self.advanced and operation in ('open','search') and (not self.bridge_mode or getattr(self.browser,'last_system_handoff',False))),
+                    'page_loaded_verified':bool(success and self.bridge_mode and getattr(self.browser,'last_navigation_verified',False)),'url':uri if uri else None,
+                    'user_message':('I opened that page in your browser.' if self.bridge_mode and getattr(self.browser,'last_navigation_verified',False) else 'I sent the website to your default browser.') if self.advanced and operation in ('open','search') else 'I completed the browser action.'})
                     if success else outcome(ToolResultStatus.FAILED,'not_available',
                                             ('The default browser did not accept that website request.' if self.advanced and operation in ('open','search')
+                                             else 'I need the Jarvis browser extension connected to control that video.' if self.bridge_mode and operation in MEDIA
                                              else 'I can only control video inside Jarvis managed browser right now.' if operation in MEDIA
+                                             else 'I need the Jarvis browser extension connected to control that tab.' if self.bridge_mode and (operation in NAMED_TABS or operation in ('close_tab','next_tab','back','forward','reload'))
                                              else 'I can only control tabs inside Jarvis managed browser right now.' if operation in NAMED_TABS or operation in ('close_tab','next_tab','back','forward','reload')
                                              else 'I could not find a matching tab or supported video player for that request.')))
             except asyncio.TimeoutError:

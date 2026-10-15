@@ -29,6 +29,8 @@ from apps.desktop_actions import DesktopActionSession
 from apps.desktop_semantic_actions import SemanticDesktopActionSession
 from apps.desktop_managed_browser import ManagedDesktopBrowserSession
 from core.tools.managed_browser import PlaywrightManagedBrowser
+from core.tools.browser_bridge import BrowserBridge
+from core.tools.default_browser_bridge import DefaultBrowserBridgeAdapter
 from core.runtime import IntelligenceProviderRouter, JarvisRuntime, RuntimeSettings
 from core.voice import LocalWakeListener, WakeSleepConfig
 from providers.stt.whisper_cpp import WhisperCppConfig, WhisperCppProvider
@@ -345,11 +347,14 @@ class DesktopRealtimeSession:
         self._actions_enabled = (config.overlap_probe and config.core_luna_probe and
             str(env.get('JARVIS_CORE_ACTIONS_PROBE','0')).lower() in {'1','true','yes','on'})
         self._semantic_actions = self._actions_enabled and str(env.get('JARVIS_SEMANTIC_ACTIONS_PROBE','0')).lower() in {'1','true','yes','on'}
-        self._managed_browser = self._semantic_actions and str(env.get('JARVIS_MANAGED_BROWSER_PROBE','0')).lower() in {'1','true','yes','on'}
+        self._browser_bridge_enabled = self._semantic_actions and str(env.get('JARVIS_BROWSER_BRIDGE_PROBE','0')).lower() in {'1','true','yes','on'}
+        self._extension_id = str(env.get('JARVIS_BROWSER_BRIDGE_EXTENSION_ID','')).strip().lower()
+        self._extension_bridge = BrowserBridge()
+        self._managed_browser = self._browser_bridge_enabled or (self._semantic_actions and str(env.get('JARVIS_MANAGED_BROWSER_PROBE','0')).lower() in {'1','true','yes','on'})
         # One external browser across wake/sleep cycles, separate from voice session.
-        self._advanced_browser = self._managed_browser and str(env.get('JARVIS_BROWSER_MEDIA_PROBE','0')).lower() in {'1','true','yes','on'}
-        self._managed_browser_engine = PlaywrightManagedBrowser() if self._managed_browser else None
-        self._action_session = (ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()) if self._actions_enabled else None
+        self._advanced_browser = self._managed_browser and (self._browser_bridge_enabled or str(env.get('JARVIS_BROWSER_MEDIA_PROBE','0')).lower() in {'1','true','yes','on'})
+        self._managed_browser_engine = (DefaultBrowserBridgeAdapter(self._extension_bridge) if self._browser_bridge_enabled else PlaywrightManagedBrowser() if self._managed_browser else None)
+        self._action_session = (ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=self._browser_bridge_enabled) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()) if self._actions_enabled else None
         self._browser_action_task: asyncio.Task | None = None
 
     @property
@@ -375,7 +380,7 @@ class DesktopRealtimeSession:
             self._relay = relay
             self._bridge = bridge
             if self._actions_enabled:
-                self._action_session = ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
+                self._action_session = ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=self._browser_bridge_enabled) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
             if self.config.core_luna_probe:
                 if not self.config.overlap_probe or self.delegation_orchestrator is None:
                     raise RuntimeError("Core Luna mode requires overlap and Core delegation orchestration")
@@ -385,7 +390,7 @@ class DesktopRealtimeSession:
                     notify=relay.notify_desktop,
                     result_hold_seconds=self.config.luna_result_hold_seconds,
                 )
-                print(f"[Jarvis Luna] mode=real_core_reasoning | actions={'managed_browser' if self._managed_browser else 'approved_site_only' if self._actions_enabled else 'dry_run'} | audio=private_pcm | authority=core", flush=True)
+                print(f"[Jarvis Luna] mode=real_core_reasoning | actions={'extension_browser' if self._browser_bridge_enabled else 'managed_browser' if self._managed_browser else 'approved_site_only' if self._actions_enabled else 'dry_run'} | audio=private_pcm | authority=core", flush=True)
             if self.config.decisions_shadow_probe:
                 if not self.config.overlap_probe or not self.config.api_key:
                     raise RuntimeError("Decisions shadow requires mini-overlap and a backend OpenAI key")
@@ -489,16 +494,15 @@ class DesktopRealtimeSession:
                     'Do not claim execution until Core verifies it.')
                 if self._advanced_browser:
                     action_tool['description'] += (' Also control a specified open tab by domain: select_tab or close_named_tab. '
-                        'For a currently visible HTML5 video in Jarvis managed browser use site=current and intent=play,pause,mute,unmute,volume. '
-                        'For volume include an integer percentage value explicitly spoken by the user. '
-                        'Open and search use the system default browser, which you cannot control with tab/media tools. '
-                        'Only if the user explicitly asks to open a site in Jarvis managed browser, use open_managed; '
-                        'that separate browser can be controlled with tab/media commands. '
+                        'For a currently visible HTML5 video in the connected browser use site=current and intent=play,pause,mute,unmute,volume. '
+                        'For volume include an integer percentage value explicitly spoken by the user. ' +
+                        ('The installed extension can reuse a matching tab in the user browser; otherwise open/search use the operating system default browser. ' if self._browser_bridge_enabled else
+                         'Open and search use the system default browser, which you cannot control with tab/media tools. Only if the user explicitly asks to open a site in Jarvis managed browser, use open_managed. ') + 
                         'Never invent a tab target, video, or volume. Do not claim execution.')
                 action_tool['parameters']={'type':'object','properties':{
                     'site':{'type':'string','description':'Public website domain without protocol, path or query, or current for tab operations'},
                     'intent':{'type':'string','enum':['open','search','back','forward','reload','close_tab','next_tab'] +
-                        (['open_managed','select_tab','close_named_tab','play','pause','mute','unmute','volume'] if self._advanced_browser else [])},
+                        (['select_tab','close_named_tab','play','pause','mute','unmute','volume'] + ([] if self._browser_bridge_enabled else ['open_managed']) if self._advanced_browser else [])},
                     'query':{'type':'string','description':'Short search terms for search; omit for other intents'},
                     **({'value':{'type':'integer','description':'Explicitly requested volume percentage 0-100 (volume only)'}} if self._advanced_browser else {}),
                 },'required':['site','intent'],'additionalProperties':False}
@@ -506,8 +510,9 @@ class DesktopRealtimeSession:
                     'For an immediate request to open YouTube or find a video there, call browser_action. '
                     'Never claim execution; Core verifies the user request and the exact destination. '
                     'Other external actions remain unsupported.',
-                    'For an immediate natural-language request to open or search public sites, use the operating-system default browser (intent open/search). '
-                    'For explicitly requested Jarvis-managed browsing (open_managed) or to manage Jarvis-owned tabs, call browser_action with a typed domain and intent. '
+                    'For an immediate natural-language request to open or search public sites, use the operating-system default browser (intent open/search). ' +
+                    ('For an existing browser with the installed Jarvis extension, control tabs and supported HTML5 video using browser_action. ' if self._browser_bridge_enabled else
+                     'For explicitly requested Jarvis-managed browsing (open_managed) or to manage Jarvis-owned tabs, call browser_action with a typed domain and intent. ') + 
                     'Do not claim completion before Core approves and verifies it. All other actions remain unsupported.')
 
         print(f"[Jarvis A/B Start] model={self.config.model} | reasoning={self.config.reasoning_effort} | "
@@ -527,6 +532,7 @@ class DesktopRealtimeSession:
             "semantic_actions_probe": self._semantic_actions,
             "managed_browser_probe": self._managed_browser,
             "browser_media_probe": self._advanced_browser,
+            "browser_bridge_probe": self._browser_bridge_enabled,
             "pcm_trim_leading_silence": overlap_probe and str(merged_environment(PROJECT_ROOT / ".env").get("JARVIS_PCM_TRIM_LEADING_SILENCE", "0")).lower() in {"1", "true", "yes", "on"},
             "response": policy,
         })
@@ -914,6 +920,7 @@ class DesktopRealtimeSession:
         if self._managed_browser_engine is not None:
             with suppress(Exception):
                 await self._managed_browser_engine.close()
+        await self._extension_bridge.close()
 
 
 def _missing_ui_page() -> str:
@@ -1033,6 +1040,41 @@ def create_desktop_app(
     async def end_realtime_session() -> dict[str, bool]:
         await session.stop()
         return {"closed": True}
+
+    @app.websocket("/api/browser/ws")
+    async def browser_extension_socket(websocket: WebSocket) -> None:
+        # Alpha pairing: only the explicitly configured local extension may connect.
+        # Origin is checked against exact extension ID, never a broad prefix.
+        origin = str(websocket.headers.get('origin') or '').strip().lower()
+        id_value = session._extension_id
+        if (not session._browser_bridge_enabled or len(id_value) != 32 or
+            any(c not in 'abcdefghijklmnop' for c in id_value) or
+            origin != f'chrome-extension://{id_value}' or
+            str(websocket.query_params.get('client') or '') != 'jarvis-browser-bridge-v1' or
+            websocket.client is None or websocket.client.host not in ('127.0.0.1','::1')):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        attached = False
+        try:
+            hello = await asyncio.wait_for(websocket.receive_json(), timeout=8)
+            if not isinstance(hello,dict) or hello.get('type') != 'hello':
+                await websocket.close(code=1008)
+                return
+            await session._extension_bridge.attach(websocket, hello)
+            attached=True
+            await websocket.send_json({'type':'ready', 'browser_access':True})
+            while True:
+                message = await websocket.receive_json()
+                if isinstance(message,dict):
+                    await session._extension_bridge.handle_message(websocket,message)
+        except (WebSocketDisconnect, TimeoutError):
+            pass
+        except Exception:
+            print('[Jarvis Browser Bridge] connection ended',flush=True)
+        finally:
+            if attached:
+                await session._extension_bridge.detach(websocket)
 
     @app.websocket("/ws/control")
     async def control_socket(websocket: WebSocket) -> None:

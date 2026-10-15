@@ -17,9 +17,10 @@ class ManagedBrowserOutcome:
     code: str
 
 class ManagedDesktopBrowserSession:
-    def __init__(self, *, browser: BrowserOperations|None=None, advanced:bool=False, launch_default=None):
-        self.gateway=ManagedBrowserGateway(browser, advanced=advanced, launch_default=launch_default)
+    def __init__(self, *, browser: BrowserOperations|None=None, advanced:bool=False, launch_default=None, bridge_mode:bool=False):
+        self.gateway=ManagedBrowserGateway(browser, advanced=advanced, launch_default=launch_default, bridge_mode=bridge_mode)
         self.advanced=advanced
+        self.bridge_mode=bridge_mode
         self.active_turn=0
         self.handled:set[int]=set()
 
@@ -42,6 +43,7 @@ class ManagedDesktopBrowserSession:
         intent=arguments.get('intent')
         if (intent not in ALLOWED or not isinstance(intent,str) or
                 (not self.advanced and intent in {'select_tab','close_named_tab','play','pause','mute','unmute','volume','open_managed'}) or
+                (self.bridge_mode and intent == 'open_managed') or
                 not isinstance(arguments.get('site'),str)):
             return ManagedBrowserOutcome('failed','I do not support that browser operation yet.','unknown_operation')
         expected={'site','intent','query'} if intent=='search' else {'site','intent','value'} if intent=='volume' else {'site','intent'}
