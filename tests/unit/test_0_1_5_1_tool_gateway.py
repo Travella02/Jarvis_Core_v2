@@ -50,7 +50,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_claim_is_not_authorization_for_other_intent(self):
         for utterance in ["Don't open YouTube", "Please explain how to open YouTube",
-                          "Open Youtube and delete my files", "Could you open YouTube?",
+                          "Open Youtube and delete my files", "Could you open YouTube later, after I leave?",
                           "Remember: open YouTube", "Jarvis, open Netflix", "quote: open youtube"]:
             ev = ConfirmedUserAction(self.trace.turn_id, utterance, True, True)
             self.assertEqual((await self.gateway.execute(self.request(), evidence=ev)).status, ToolResultStatus.DENIED)

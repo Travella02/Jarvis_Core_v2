@@ -1,0 +1,17 @@
+{
+  "version": "0.1.5.2",
+  "title": "Natural Language Tool Action Wiring + Silent Test Cues",
+  "status": "live_qa_pending",
+  "required_baseline": "accepted 0.1.5.1 from clean accepted 0.1.4",
+  "scope": "Opt-in Mini action tool selection; Core-authorized YouTube launch from confirmed typed/voice transcript; test-only cue mute",
+  "new_launch": "python .\\scripts\\realtime_ab.py mini-overlap-luna-trim-guided-actions",
+  "tests_expected": "805 total, one skipped, plus actual Windows live acceptance",
+  "authority": "Core; Mini arguments are never executors",
+  "known_limitations": [
+    "Only YouTube permitted",
+    "User account and local WebSocket origin/auth need hardening before public release",
+    "No full Windows E2E verification in generation container",
+    "False mic-noise barge-in is still open"
+  ],
+  "live_acceptance": "pending"
+}

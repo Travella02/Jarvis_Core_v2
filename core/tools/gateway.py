@@ -46,13 +46,24 @@ def _requested_site(transcript: str) -> str | None:
     actions must remain unexecutable until later confirmation UX exists.
     """
     text = re.sub(r"\s+", " ", transcript.strip().lower()).strip(' .!?')
-    m = re.fullmatch(
-        r"(?:(?:hey\s+)?jarvis\s*[,,:]?\s*)?"
-        r"(?:please\s+)?(?:open|launch)\s+(?:the\s+)?"
-        r"(youtube(?:\.com)?)(?:\s+please)?",
-        text,
+    # Independent authorization uses only the committed user's exact utterance,
+    # NEVER the model's selected tool or model-provided arguments. Keep this
+    # grammar intentionally narrow: a direct affirmative request for YouTube,
+    # not quoted speech, a negation, a conditional, or a compound instruction.
+    # Include optional conversational lead-ins but not conditional or combined
+    # requests. A standalone "hey" before the command does not itself provide
+    # authorization; the rest of the utterance must still match completely.
+    prefix = r"(?:(?:hey\s+)?(?:jarvis|jervis)\s*[,,:]?\s*|hey\s+)?"
+    lead_in = r"(?:go\s+ahead\s+and\s+)?"
+    request = (
+        r"(?:please\s+)?(?:"
+        + lead_in + r"(?:open|launch)\s+"
+        + r"|(?:can|could|would|will)\s+you\s+(?:please\s+)?" + lead_in + r"(?:open|launch)\s+"
+        r")"
+        r"(?:the\s+)?youtube(?:\.com)?"
+        r"(?:\s+for\s+me)?(?:\s+please)?"
     )
-    return "youtube" if m is not None else None
+    return "youtube" if re.fullmatch(prefix + request, text) is not None else None
 
 
 class CoreToolGateway:

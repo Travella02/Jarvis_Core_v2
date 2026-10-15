@@ -25,6 +25,8 @@ import uvicorn
 from apps.runtime_api import create_app as create_runtime_api
 from apps.desktop_luna import DesktopLunaDelegator
 from core.intelligence import DelegationOrchestrator
+from apps.desktop_actions import DesktopActionSession
+from apps.desktop_semantic_actions import SemanticDesktopActionSession
 from core.runtime import IntelligenceProviderRouter, JarvisRuntime, RuntimeSettings
 from core.voice import LocalWakeListener, WakeSleepConfig
 from providers.stt.whisper_cpp import WhisperCppConfig, WhisperCppProvider
@@ -337,6 +339,11 @@ class DesktopRealtimeSession:
         self._decisions_shadow: DecisionsShadowProbe | None = None
         self._luna: DesktopLunaDelegator | None = None
         self._bench = RealtimeBenchmark(config.model)
+        env = merged_environment(PROJECT_ROOT / '.env')
+        self._actions_enabled = (config.overlap_probe and config.core_luna_probe and
+            str(env.get('JARVIS_CORE_ACTIONS_PROBE','0')).lower() in {'1','true','yes','on'})
+        self._semantic_actions = self._actions_enabled and str(env.get('JARVIS_SEMANTIC_ACTIONS_PROBE','0')).lower() in {'1','true','yes','on'}
+        self._action_session = (SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()) if self._actions_enabled else None
 
     @property
     def active(self) -> bool:
@@ -360,6 +367,8 @@ class DesktopRealtimeSession:
             )
             self._relay = relay
             self._bridge = bridge
+            if self._actions_enabled:
+                self._action_session = SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
             if self.config.core_luna_probe:
                 if not self.config.overlap_probe or self.delegation_orchestrator is None:
                     raise RuntimeError("Core Luna mode requires overlap and Core delegation orchestration")
@@ -369,7 +378,7 @@ class DesktopRealtimeSession:
                     notify=relay.notify_desktop,
                     result_hold_seconds=self.config.luna_result_hold_seconds,
                 )
-                print("[Jarvis Luna] mode=real_core_reasoning | actions=dry_run | audio=private_pcm | authority=core", flush=True)
+                print(f"[Jarvis Luna] mode=real_core_reasoning | actions={'approved_site_only' if self._actions_enabled else 'dry_run'} | audio=private_pcm | authority=core", flush=True)
             if self.config.decisions_shadow_probe:
                 if not self.config.overlap_probe or not self.config.api_key:
                     raise RuntimeError("Decisions shadow requires mini-overlap and a backend OpenAI key")
@@ -435,6 +444,29 @@ class DesktopRealtimeSession:
                 "Never claim that Luna or an action ran. No real external tools execute in this experiment.",
                 "Do not claim external actions were completed. Luna runs only after Core authorizes the reasoning request; external actions remain dry-run.",
             )
+        if self._semantic_actions:
+            # Swap only the ACTION tool in this explicitly opt-in experiment.
+            # The conversation/sleep/Luna route, VAD and PCM pipeline are unchanged.
+            policy['tools'] = [t for t in policy['tools'] if t.get('name') != 'test_action']
+            policy['tools'].append({
+                'type':'function', 'name':'browser_action',
+                'description':('For a real, immediate user request to open YouTube or find a video on YouTube. '
+                               'Understand any natural wording, including longer conversational requests. '
+                               'Use open to show the YouTube homepage; use search to show YouTube search results '
+                               'with a concise search query only from established conversation context; if missing, ask for clarification. '
+                               'Never call for negated, quoted, conditional or hypothetical requests. '
+                               'Do not claim completion; Core independently checks consent and destination.'),
+                'parameters':{'type':'object','properties':{
+                    'site':{'type':'string','enum':['youtube']},
+                    'intent':{'type':'string','enum':['open','search']},
+                    'query':{'type':'string','description':'Search terms if intent is search. Do not provide a URL.'}
+                },'required':['site','intent'],'additionalProperties':False}
+            })
+            policy['instructions'] = str(policy['instructions']).replace(
+                'For external actions use test_action (dry run).',
+                'For an immediate request to open YouTube or find a video there, call browser_action. '
+                'Never claim execution; Core verifies the user request and the exact destination. '
+                'Other external actions remain unsupported.')
         print(f"[Jarvis A/B Start] model={self.config.model} | reasoning={self.config.reasoning_effort} | "
               f"mode={'overlap_probe' if overlap_probe else ('buffered_tool_probe' if buffered_probe else ('tool_probe_text_only' if tool_probe else ('direct_no_gate_tools_disabled' if direct_only else 'safe_routed')))} | "
               f"shadow={self.config.parallel_shadow_probe and not direct_only} | "
@@ -448,6 +480,8 @@ class DesktopRealtimeSession:
             "overlap_probe": overlap_probe,
             "core_luna_probe": self.config.core_luna_probe,
             "delegation_guidance_probe": self.config.delegation_guidance_probe,
+            "core_actions_probe": self._actions_enabled,
+            "semantic_actions_probe": self._semantic_actions,
             "pcm_trim_leading_silence": overlap_probe and str(merged_environment(PROJECT_ROOT / ".env").get("JARVIS_PCM_TRIM_LEADING_SILENCE", "0")).lower() in {"1", "true", "yes", "on"},
             "response": policy,
         })
@@ -465,6 +499,37 @@ class DesktopRealtimeSession:
                 except ValueError:
                     continue
                 kind = message.get("kind")
+                if kind == "desktop_overlap_audio" and self._action_session is not None and message.get("phase") == "started":
+                    self._action_session.on_turn_started(int(message.get("turn") or 0))
+                    # Existing latency handling below still sees this event.
+                if kind == "desktop_action_request":
+                    if self._action_session is None:
+                        continue
+                    turn = int(message.get("turn") or 0)
+                    result = await self._action_session.handle(
+                        turn=turn, selected_tool=str(message.get("selected_tool") or ""),
+                        source=str(message.get("source") or ""),
+                        binding=str(message.get("binding") or ""),
+                        transcript=message.get("text"),
+                        **({"arguments": message.get("arguments")} if self._semantic_actions else {}))
+                    if result is not None:
+                        print(f"[Jarvis Action] turn={turn} | tool=desktop_browser "
+                              f"| status={result.status} | code={result.code} | authority=core", flush=True)
+                        await relay.notify_desktop({'kind':'core_tool_result', 'turn':turn,
+                            'status':result.status, 'text':result.text})
+                    continue
+                if kind == "desktop_action_feedback":
+                    # UI-only acknowledgment. Never execute/retry an action from
+                    # this message; print it to diagnose a stuck Working state.
+                    turn = int(message.get("turn") or 0)
+                    raw_status = str(message.get("status") or "unknown")
+                    status = raw_status if raw_status in {"completed", "failed", "unknown"} else "unknown"
+                    print(f"[Jarvis Action UI] turn={turn} | status={status} "
+                          f"| visible_confirmation={message.get('visible_confirmation') is True} "
+                          f"| spoken={message.get('spoken') is True} "
+                          f"| reason={'result_timeout' if message.get('reason') == 'result_timeout' else 'core_result'}",
+                          flush=True)
+                    continue
                 if kind == "desktop_user":
                     turn = int(message.get("turn") or 0)
                     source = str(message.get("source") or "unknown")

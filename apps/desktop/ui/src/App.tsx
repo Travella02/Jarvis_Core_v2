@@ -441,6 +441,8 @@ export default function App() {
   const bufferedToolProbeRef = useRef(false);
   const overlapProbeRef = useRef(false);
   const coreLunaProbeRef = useRef(false);
+  const coreActionsProbeRef = useRef(false);
+  const semanticActionsRef = useRef(false);
   const delegationGuidanceRef = useRef(false); // Opt-in; no extra inference request.
   const overlapCandidateStageRef = useRef('overlap_candidate');
   const overlapGateRef = useRef<StreamingPcmGate | null>(null);
@@ -474,6 +476,12 @@ export default function App() {
   const overlapSleepInputRef = useRef<SleepTurnInput | null>(null);
   const overlapTranscriptsRef = useRef<Map<string, string>>(new Map());
   const overlapPendingSleepRef = useRef<{turn:number;epoch:number;evidence:string} | null>(null);
+  const overlapPendingActionRef = useRef<{turn:number;epoch:number;proposal?: {site:string;intent:string;query?:string}} | null>(null);
+  const overlapActionTimerRef = useRef<number | null>(null);
+  // An action selection is not finished until the CURRENT turn receives Core's
+  // authoritative result (or the UI times out). Never retry an ambiguous launch.
+  const overlapAwaitingActionResultRef = useRef<{turn:number;epoch:number} | null>(null);
+  const overlapActionResultTimerRef = useRef<number | null>(null);
   const overlapSleepTimerRef = useRef<number | null>(null);
   const overlapDirectVerifiedRef = useRef(false);
   const overlapDirectTimerRef = useRef<number | null>(null);
@@ -997,6 +1005,12 @@ export default function App() {
     if (overlapSleepTimerRef.current !== null) window.clearTimeout(overlapSleepTimerRef.current);
     overlapSleepTimerRef.current = null;
     overlapPendingSleepRef.current = null;
+    if (overlapActionTimerRef.current !== null) window.clearTimeout(overlapActionTimerRef.current);
+    overlapActionTimerRef.current = null;
+    overlapPendingActionRef.current = null;
+    if (overlapActionResultTimerRef.current !== null) window.clearTimeout(overlapActionResultTimerRef.current);
+    overlapActionResultTimerRef.current = null;
+    overlapAwaitingActionResultRef.current = null;
     overlapInputBindingRef.current = '';
     overlapSleepInputRef.current = null;
     if (coreLunaProbeRef.current && overlapActiveTurnRef.current) {
@@ -1171,7 +1185,7 @@ export default function App() {
       input,
       output_modalities:['text'],max_output_tokens:512,tools,tool_choice:'auto',
       instructions:(coreLunaProbeRef.current
-        ? `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. For complex reasoning or coding use ask_luna, which may invoke real Core reasoning after authorization. Actual external actions use test_action and remain dry runs. Never claim work was executed prematurely.`
+        ? `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. For complex reasoning or coding use ask_luna, which may invoke real Core reasoning after authorization. ${semanticActionsRef.current ? 'For an immediate natural-language request to open YouTube or find a video there, choose browser_action with a typed destination and intent. For find-video requests generate concise search terms in query only if the topic is actually established by available context. If the user says "for that" but the topic is unknown, ask what topic they mean instead of inventing a query. Never call browser_action for denial, negation, hypothetical or conditional requests. All other external actions are unsupported. Never claim completion before Core executes.' : 'For an explicit request to open YouTube, select test_action (immediate). This opt-in trial may execute only if Core independently confirms the matching user command. All other external actions remain dry runs.'} Never claim work was executed prematurely.`
         : `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. Otherwise decide direct versus ask_luna for complex reasoning or test_action for external actions. Both expert/action tools are dry runs. Never claim any action succeeded.`)
         + (delegationGuidanceRef.current && coreLunaProbeRef.current && !wakeOnly
           ? ' In this experimental A/B arm, choose ask_luna for user requests requiring substantial multi-step reasoning, a detailed technical design, trade-off analysis across multiple constraints, or a considered recommendation—even when the user does not explicitly mention Core, Luna, or deep reasoning. Choose direct for greetings, simple arithmetic, straightforward factual questions, a short definition, and light conversation. Do not escalate merely because a familiar technical word occurs; judge the entire user request and expected answer. This is guidance to the same Mini router, NOT an additional model call. Preserve sleep_evidence validation and external-action dry-run rules exactly.'
@@ -1382,7 +1396,7 @@ export default function App() {
     return true;
   };
 
-  const speakCoreLunaResult = (payload: {turn?: number; status?: string; text?: string}) => {
+  const speakCoreLunaResult = (payload: {turn?: number; status?: string; text?: string; origin?: string}) => {
     const turn = Number(payload.turn || 0);
     if (!coreLunaProbeRef.current || turn <= 0 || turn !== overlapActiveTurnRef.current ||
         overlapDecisionRef.current !== 'tool' || presenceRef.current !== 'awake') return;
@@ -1409,7 +1423,7 @@ export default function App() {
     const input: any[] = [];
     if (/^item_[A-Za-z0-9_-]+$/.test(originalItem)) input.push({type:'item_reference',id:originalItem});
     input.push({type:'message',role:'user',content:[{type:'input_text',
-      text:`Jarvis Core returned this ${payload.status === 'completed' ? 'verified reasoning answer' : 'verified failure'} for your most recent request. Speak this faithfully without new factual claims or actions:\n${resultText}`}]});
+      text:`Jarvis Core returned this ${payload.origin === 'tool' ? 'verified browser-action outcome' : (payload.status === 'completed' ? 'verified reasoning answer' : 'verified failure')} for your most recent request. Speak this faithfully without new factual claims or actions:\n${resultText}`}]});
     dc.send(JSON.stringify({type:'response.create',response:{conversation:'none',
       metadata:{jarvis_stage:'core_luna_voice',jarvis_turn:String(turn)},
       // Audio tokens and transcript tokens share this limit. Unlike the short
@@ -1418,6 +1432,53 @@ export default function App() {
       input,output_modalities:['audio'],max_output_tokens:'inf',tools:[],tool_choice:'none',
       instructions:'You are Jarvis speaking an already obtained Core result. Give the answer naturally and faithfully, without claiming any additional research, external actions, or capabilities. Never announce internal routing or say that you are about to check something. If Core reported a failure, communicate that failure accurately. Do not run tools.'}}));
     sendControlMessage({kind:'desktop_luna_voice',turn,phase:'started',status:String(payload.status || '')});
+  };
+
+  // A model selecting test_action is only a proposal. Core receives the
+  // independent matching typed/committed-audio transcript; never model arguments.
+  const settlePendingOverlapAction = (timeout = false) => {
+    const pending = overlapPendingActionRef.current;
+    if (!pending) return;
+    if (pending.epoch !== overlapEpochRef.current || pending.turn !== overlapActiveTurnRef.current ||
+        presenceRef.current !== 'awake') {
+      overlapPendingActionRef.current = null;
+      if (overlapActionTimerRef.current !== null) window.clearTimeout(overlapActionTimerRef.current);
+      overlapActionTimerRef.current = null;
+      return;
+    }
+    const input = overlapSleepInputRef.current;
+    if (!input || input.turn !== pending.turn || input.binding !== overlapInputBindingRef.current) {
+      if (!timeout) return;
+    }
+    overlapPendingActionRef.current = null;
+    if (overlapActionTimerRef.current !== null) window.clearTimeout(overlapActionTimerRef.current);
+    overlapActionTimerRef.current = null;
+    // The exact pending turn is now dispatched. Keep explicit result ownership
+    // even if the browser Core responds before candidate-cancel telemetry ends.
+    overlapAwaitingActionResultRef.current = {turn:pending.turn,epoch:pending.epoch};
+    if (overlapActionResultTimerRef.current !== null) window.clearTimeout(overlapActionResultTimerRef.current);
+    overlapActionResultTimerRef.current = window.setTimeout(() => {
+      const awaiting = overlapAwaitingActionResultRef.current;
+      if (!awaiting || awaiting.turn !== pending.turn || awaiting.epoch !== overlapEpochRef.current ||
+          awaiting.turn !== overlapActiveTurnRef.current || presenceRef.current !== 'awake') return;
+      overlapAwaitingActionResultRef.current = null;
+      overlapActionResultTimerRef.current = null;
+      overlapGateRef.current?.abort();
+      overlapGateRef.current = null;
+      overlapDecisionRef.current = 'failed';
+      // The action MAY have succeeded even if its acknowledgment went missing.
+      // Never automatically replay it or claim that nothing happened.
+      setCaption('I could not confirm the browser result. Check the browser; I will not retry automatically.');
+      setStateSafely('idle', 'Ready');
+      sendControlMessage({kind:'desktop_action_feedback',turn:pending.turn,status:'unknown',
+        visible_confirmation:false,spoken:false,reason:'result_timeout'});
+    }, 5000);
+    sendControlMessage({kind:'desktop_action_request',turn:pending.turn,
+      selected_tool:semanticActionsRef.current ? 'browser_action' : 'test_action',
+      ...(semanticActionsRef.current ? {arguments:pending.proposal || null} : {}),
+      source:input?.turn === pending.turn && input?.binding === overlapInputBindingRef.current ? input.source : '',
+      binding:input?.turn === pending.turn && input?.binding === overlapInputBindingRef.current ? input.binding : '',
+      text:input?.turn === pending.turn && input?.binding === overlapInputBindingRef.current ? input.text : ''});
   };
 
   // An audio item is not proof that a user spoke actual words: semantic VAD
@@ -1545,6 +1606,7 @@ export default function App() {
             overlapPerfRef.current.transcript = now;
           settlePendingOverlapSleep();
           settlePendingOverlapDirect();
+          settlePendingOverlapAction();
         }
       }
       if (conversationTraceRef.current && transcript) {
@@ -1732,7 +1794,25 @@ export default function App() {
               dcRef.current.send(JSON.stringify({type:'response.cancel',response_id:overlapCandidateIdRef.current}));
               dcRef.current.send(JSON.stringify({type:'output_audio_buffer.clear'}));
             }
-            if (realLuna) {
+            if (coreActionsProbeRef.current && completed && calls.length === 1 &&
+                (semanticActionsRef.current ? tool === 'browser_action' : tool === 'test_action')) {
+              let proposal: {site:string;intent:string;query?:string} | undefined;
+              if (semanticActionsRef.current) {
+                try {
+                  const raw = JSON.parse(String(calls[0].arguments || '{}'));
+                  if (raw && typeof raw === 'object' && !Array.isArray(raw)) proposal = raw;
+                } catch (_) { /* Core rejects malformed proposals */ }
+              }
+              overlapPendingActionRef.current = {turn,epoch:overlapEpochRef.current,proposal};
+              setStateSafely('working','Validating browser action');
+              settlePendingOverlapAction();
+              if (overlapPendingActionRef.current) {
+                const epoch = overlapEpochRef.current;
+                overlapActionTimerRef.current = window.setTimeout(() => {
+                  if (overlapEpochRef.current === epoch) settlePendingOverlapAction(true);
+                }, 2500);
+              }
+            } else if (realLuna) {
               // Core will separately return the only approved turn's result.
               // No speculative audio or misleading success is released here.
               setStateSafely('working','Core reasoning');
@@ -2205,6 +2285,8 @@ export default function App() {
           bufferedToolProbeRef.current = payload.buffered_tool_probe === true;
           overlapProbeRef.current = payload.overlap_probe === true;
           coreLunaProbeRef.current = payload.core_luna_probe === true;
+          coreActionsProbeRef.current = payload.core_actions_probe === true && coreLunaProbeRef.current && overlapProbeRef.current;
+          semanticActionsRef.current = payload.semantic_actions_probe === true && coreActionsProbeRef.current;
           delegationGuidanceRef.current = payload.delegation_guidance_probe === true && coreLunaProbeRef.current && overlapProbeRef.current;
           pcmTrimRef.current = payload.pcm_trim_leading_silence === true;
         } else if (payload.kind === 'core_luna_cancel_hold') {
@@ -2215,7 +2297,7 @@ export default function App() {
             cancelHoldTurnRef.current = heldTurn;
             // Windows host plays a native WAV through the default output;
             // do not start another browser AudioContext from this WS handler.
-            if (payload.cue_route !== 'native_windows') {
+            if (payload.cue_route !== 'native_windows' && payload.cue_route !== 'silent') {
               void playLunaHoldCue().then((audible) => {
                 sendControlMessage({kind:'desktop_luna_cancel_cue',turn:heldTurn,audible});
               });
@@ -2231,6 +2313,40 @@ export default function App() {
         } else if (payload.kind === 'core_luna_cancel_hold_ended') {
           if (cancelHoldTurnRef.current === Number(payload.turn)) cancelHoldTurnRef.current = null;
           setCancelHoldTurn(current => current === Number(payload.turn) ? null : current);
+        } else if (payload.kind === 'core_tool_result') {
+          // An approved browser launch is visible confirmation in itself.
+          // Settle the same-turn tool selection without asking Mini to speak,
+          // and never leave the orb in WORKING after a denied capability.
+          const turn = Number(payload.turn || 0);
+          const awaiting = overlapAwaitingActionResultRef.current;
+          if (coreActionsProbeRef.current && awaiting && turn > 0 &&
+              awaiting.turn === turn && awaiting.epoch === overlapEpochRef.current &&
+              turn === overlapActiveTurnRef.current && presenceRef.current === 'awake') {
+            overlapAwaitingActionResultRef.current = null;
+            if (overlapActionResultTimerRef.current !== null) window.clearTimeout(overlapActionResultTimerRef.current);
+            overlapActionResultTimerRef.current = null;
+            overlapPendingActionRef.current = null;
+            if (overlapActionTimerRef.current !== null) window.clearTimeout(overlapActionTimerRef.current);
+            overlapActionTimerRef.current = null;
+            overlapGateRef.current?.abort();
+            overlapGateRef.current = null;
+            overlapDecisionRef.current = 'failed'; // Fail closed for late candidate audio.
+            const completed = payload.status === 'completed';
+            setCaption(completed ? '' : String(payload.text || 'I could not complete that action.'));
+            setStateSafely('idle', 'Ready');
+            // Some delayed cancelled-candidate events may arrive immediately
+            // after Core's WS result. Reassert Ready without touching a new turn.
+            window.setTimeout(() => {
+              if (awaiting.epoch === overlapEpochRef.current &&
+                  awaiting.turn === overlapActiveTurnRef.current &&
+                  overlapDecisionRef.current === 'failed' && presenceRef.current === 'awake') {
+                setStateSafely('idle', 'Ready');
+              }
+            }, 180);
+            noteActivity();
+            sendControlMessage({kind:'desktop_action_feedback',turn,status:completed ? 'completed' : 'failed',
+              visible_confirmation:completed,spoken:false});
+          }
         } else if (payload.kind === 'core_luna_result') {
           cancelHoldTurnRef.current = null;
           setCancelHoldTurn(null);

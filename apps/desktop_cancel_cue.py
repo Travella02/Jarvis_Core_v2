@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import math
+import os
 import struct
 import sys
 import wave
@@ -37,6 +38,8 @@ def hold_cue_wav() -> bytes:
 
 def play_native_hold_cue() -> str:
     """Call in a worker thread. Return only a safe status (never device details)."""
+    if os.environ.get('JARVIS_SILENT_TEST_CUES') == '1':
+        return 'silenced_by_test_setting'
     if sys.platform != 'win32':
         return 'unsupported_platform'
     try:

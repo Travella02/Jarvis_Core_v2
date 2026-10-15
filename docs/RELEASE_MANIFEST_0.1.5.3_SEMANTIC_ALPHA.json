@@ -1,0 +1,26 @@
+{
+  "version": "0.1.5.3",
+  "release_id": "0.1.5.3-semantic-browser-actions-alpha",
+  "title": "Natural-Language Typed Browser Tool Proposals (Opt-in Alpha)",
+  "status": "Windows_live_acceptance_pending",
+  "required_previous": "0.1.5.2 Repair2 installed, not yet committed",
+  "scope": "Model-proposed typed YouTube open and search actions; independent confirmed-turn Core authorization; no change to default audio pipeline",
+  "model_primary": "gpt-realtime-2.1-mini",
+  "decision_owner": "Realtime Mini proposes, Core authorizes, browser launcher executes a single allowlisted action",
+  "default_behavior": "unchanged",
+  "new_opt_in_launcher": "mini-overlap-luna-trim-guided-semantic",
+  "automated_suite": "python -m unittest discover -s tests -v",
+  "focused_suite": "python -m unittest tests.unit.test_0_1_5_3_semantic_actions -v",
+  "desktop_check": "npm run desktop:check",
+  "desktop_build": "npm run desktop:build",
+  "testing_guide": "docs/TESTING_GUIDE_0.1.5.3_SEMANTIC_ACTIONS_ALPHA.md",
+  "known_limitations": [
+    "Only approved youtube.com homepage or encoded YouTube search results are supported",
+    "Out-of-band decisions may not have reliable earlier-turn context for 'video about that'",
+    "Conservative Core safety checks may reject unusual legitimate phrasings",
+    "No independent semantic verification model or production identity boundary is implemented",
+    "First-audio latency and correct real-world Mini tool selection are not yet established on Windows",
+    "Browser launch acceptance does not prove page load or chosen search result relevance"
+  ],
+  "live_acceptance": "pending: do not clean or commit until user accepts"
+}

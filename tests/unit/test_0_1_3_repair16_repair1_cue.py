@@ -6,6 +6,7 @@ import io
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from unittest import IsolatedAsyncioTestCase, TestCase
 
 from apps.desktop_luna import DesktopLunaDelegator
@@ -29,6 +30,14 @@ class FakeConversation:
 
 
 class CueTests(IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        # These three lifecycle tests verify cancellation timing, not speakers.
+        # Real WAV playback here used to beep during `unittest discover` on
+        # Windows; the separate native audio test already mocks winsound.
+        self._sound = patch('apps.desktop_luna.play_native_hold_cue', return_value='playback_api_completed')
+        self._sound.start()
+        self.addCleanup(self._sound.stop)
+
     async def make_delegator(self, hold):
         sent = []
         recorded = io.StringIO()

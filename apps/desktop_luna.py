@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
+import os
 from collections.abc import Awaitable, Callable
 from time import monotonic
 from typing import Any
@@ -246,11 +247,12 @@ class DesktopLunaDelegator:
                 # The renderer updates the test banner. On Windows, play a
                 # *native* WAV rather than depending on an AudioContext resumed
                 # from an unsolicited WebSocket event (which may remain suspended).
+                silent_cue = os.environ.get("JARVIS_SILENT_TEST_CUES") == "1"
                 native_cue = sys.platform == "win32"
                 try:
                     await self.notify({"kind": "core_luna_cancel_hold", "turn": turn,
                                        "seconds": self.result_hold_seconds,
-                                       "cue_route": "native_windows" if native_cue else "renderer"})
+                                       "cue_route": "silent" if silent_cue else ("native_windows" if native_cue else "renderer")})
                 except Exception:
                     print(f"[Jarvis Luna Cancel Test] turn={turn} | phase=cue_ui_unavailable", flush=True)
                 if native_cue:
@@ -263,7 +265,7 @@ class DesktopLunaDelegator:
                     except Exception:
                         cue_status = "playback_api_failed"
                     print(f"[Jarvis Luna Cancel Test] turn={turn} | phase=cue_playback | route=windows_default_audio | state={cue_status}", flush=True)
-                    if cue_status != "playback_api_completed" and self._held_turn == turn:
+                    if cue_status not in {"playback_api_completed", "silenced_by_test_setting"} and self._held_turn == turn:
                         try:
                             await self.notify({"kind": "core_luna_cancel_cue_fallback", "turn": turn})
                         except Exception:
