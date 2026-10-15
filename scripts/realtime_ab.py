@@ -23,13 +23,14 @@ MODELS = {"mini": ("gpt-realtime-2.1-mini", False),
           "mini-overlap-luna-trim-guided": ("gpt-realtime-2.1-mini", False),
           "mini-overlap-luna-trim-guided-actions": ("gpt-realtime-2.1-mini", False),
           "mini-overlap-luna-trim-guided-semantic": ("gpt-realtime-2.1-mini", False),
+          "mini-overlap-luna-trim-guided-managed-browser": ("gpt-realtime-2.1-mini", False),
           "mini-overlap-luna-trim-cancel-test": ("gpt-realtime-2.1-mini", False),
           "mini-overlap-luna-decisions-shadow": ("gpt-realtime-2.1-mini", False),
           "mini-overlap-luna-cancel-test": ("gpt-realtime-2.1-mini", False)}
 
 def main() -> int:
     if len(sys.argv) != 2 or sys.argv[1] not in MODELS:
-        print("Usage: python scripts/realtime_ab.py mini|full|mini-fast|full-fast|mini-tools|full-tools|mini-buffered|mini-overlap|mini-overlap-decisions-shadow|mini-overlap-luna|mini-overlap-luna-trim|mini-overlap-luna-trim-guided|mini-overlap-luna-trim-guided-actions|mini-overlap-luna-trim-guided-semantic|mini-overlap-luna-trim-cancel-test|mini-overlap-luna-decisions-shadow|mini-overlap-luna-cancel-test", file=sys.stderr)
+        print("Usage: python scripts/realtime_ab.py mini|full|mini-fast|full-fast|mini-tools|full-tools|mini-buffered|mini-overlap|mini-overlap-decisions-shadow|mini-overlap-luna|mini-overlap-luna-trim|mini-overlap-luna-trim-guided|mini-overlap-luna-trim-guided-actions|mini-overlap-luna-trim-guided-semantic|mini-overlap-luna-trim-guided-managed-browser|mini-overlap-luna-trim-cancel-test|mini-overlap-luna-decisions-shadow|mini-overlap-luna-cancel-test", file=sys.stderr)
         return 2
     model, direct_only = MODELS[sys.argv[1]]
     env = os.environ.copy()
@@ -38,21 +39,22 @@ def main() -> int:
     env["JARVIS_REALTIME_TOOL_SELECTION_PROBE"] = "1" if tool_probe else "0"
     buffered_probe = sys.argv[1] == "mini-buffered"
     env["JARVIS_REALTIME_BUFFERED_TOOL_PROBE"] = "1" if buffered_probe else "0"
-    overlap_probe = sys.argv[1] in {"mini-overlap", "mini-overlap-decisions-shadow", "mini-overlap-luna", "mini-overlap-luna-trim", "mini-overlap-luna-trim-guided", "mini-overlap-luna-trim-guided-actions", "mini-overlap-luna-trim-guided-semantic", "mini-overlap-luna-trim-cancel-test", "mini-overlap-luna-decisions-shadow", "mini-overlap-luna-cancel-test"}
+    overlap_probe = sys.argv[1] in {"mini-overlap", "mini-overlap-decisions-shadow", "mini-overlap-luna", "mini-overlap-luna-trim", "mini-overlap-luna-trim-guided", "mini-overlap-luna-trim-guided-actions", "mini-overlap-luna-trim-guided-semantic", "mini-overlap-luna-trim-guided-managed-browser", "mini-overlap-luna-trim-cancel-test", "mini-overlap-luna-decisions-shadow", "mini-overlap-luna-cancel-test"}
     decisions_shadow = sys.argv[1] in {"mini-overlap-decisions-shadow", "mini-overlap-luna-decisions-shadow"}
     env["JARVIS_DECISIONS_SHADOW_PROBE"] = "1" if decisions_shadow else "0"
-    pcm_trim = sys.argv[1] in {"mini-overlap-luna-trim", "mini-overlap-luna-trim-guided", "mini-overlap-luna-trim-guided-actions", "mini-overlap-luna-trim-guided-semantic", "mini-overlap-luna-trim-cancel-test"}
+    pcm_trim = sys.argv[1] in {"mini-overlap-luna-trim", "mini-overlap-luna-trim-guided", "mini-overlap-luna-trim-guided-actions", "mini-overlap-luna-trim-guided-semantic", "mini-overlap-luna-trim-guided-managed-browser", "mini-overlap-luna-trim-cancel-test"}
     env["JARVIS_PCM_TRIM_LEADING_SILENCE"] = "1" if pcm_trim else "0"
     luna_cancel_test = sys.argv[1] in {"mini-overlap-luna-cancel-test", "mini-overlap-luna-trim-cancel-test"}
     luna_probe = sys.argv[1] == "mini-overlap-luna"
-    luna_probe = luna_probe or sys.argv[1] in {"mini-overlap-luna-trim", "mini-overlap-luna-trim-guided", "mini-overlap-luna-trim-guided-actions", "mini-overlap-luna-trim-guided-semantic"}
+    luna_probe = luna_probe or sys.argv[1] in {"mini-overlap-luna-trim", "mini-overlap-luna-trim-guided", "mini-overlap-luna-trim-guided-actions", "mini-overlap-luna-trim-guided-semantic", "mini-overlap-luna-trim-guided-managed-browser"}
     luna_probe = luna_probe or sys.argv[1] == "mini-overlap-luna-decisions-shadow"
     luna_probe = luna_probe or luna_cancel_test
     env["JARVIS_CORE_LUNA_PROBE"] = "1" if luna_probe else "0"
     env["JARVIS_LUNA_RESULT_HOLD_SECONDS"] = "8" if luna_cancel_test else "0"
-    env["JARVIS_0141_DELEGATION_GUIDANCE"] = "1" if sys.argv[1] in {"mini-overlap-luna-trim-guided", "mini-overlap-luna-trim-guided-actions", "mini-overlap-luna-trim-guided-semantic"} else "0"
-    env["JARVIS_CORE_ACTIONS_PROBE"] = "1" if sys.argv[1] in {"mini-overlap-luna-trim-guided-actions", "mini-overlap-luna-trim-guided-semantic"} else "0"
-    env["JARVIS_SEMANTIC_ACTIONS_PROBE"] = "1" if sys.argv[1] == "mini-overlap-luna-trim-guided-semantic" else "0"
+    env["JARVIS_0141_DELEGATION_GUIDANCE"] = "1" if sys.argv[1] in {"mini-overlap-luna-trim-guided", "mini-overlap-luna-trim-guided-actions", "mini-overlap-luna-trim-guided-semantic", "mini-overlap-luna-trim-guided-managed-browser"} else "0"
+    env["JARVIS_CORE_ACTIONS_PROBE"] = "1" if sys.argv[1] in {"mini-overlap-luna-trim-guided-actions", "mini-overlap-luna-trim-guided-semantic", "mini-overlap-luna-trim-guided-managed-browser"} else "0"
+    env["JARVIS_SEMANTIC_ACTIONS_PROBE"] = "1" if sys.argv[1] in {"mini-overlap-luna-trim-guided-semantic", "mini-overlap-luna-trim-guided-managed-browser"} else "0"
+    env["JARVIS_MANAGED_BROWSER_PROBE"] = "1" if sys.argv[1] == "mini-overlap-luna-trim-guided-managed-browser" else "0"
     env["JARVIS_SILENT_TEST_CUES"] = "1"  # A/B tests are silent unless expressly requested otherwise.
     # Matched Core/Luna setting in both Repair12 arms; only the shadow API differs.
     env["JARVIS_REALTIME_OVERLAP_PROBE"] = "1" if overlap_probe else "0"
@@ -66,6 +68,7 @@ def main() -> int:
           f" | delegation_guidance={'on' if env['JARVIS_0141_DELEGATION_GUIDANCE']=='1' else 'off'}"
           f" | real_browser_actions={'on' if env['JARVIS_CORE_ACTIONS_PROBE']=='1' else 'off'}"
           f" | semantic_actions={'on' if env['JARVIS_SEMANTIC_ACTIONS_PROBE']=='1' else 'off'}"
+          f" | managed_browser={'on' if env['JARVIS_MANAGED_BROWSER_PROBE']=='1' else 'off'}"
           f" | cancellation_test={'on' if luna_cancel_test else 'off'} | dev_transcripts=on", flush=True)
     root = Path(__file__).resolve().parents[1]
     try:

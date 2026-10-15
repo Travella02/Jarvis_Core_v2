@@ -1,0 +1,45 @@
+{
+  "patch": "0.1.5.4",
+  "title": "Managed Browser Foundation (Opt-In)",
+  "baseline": "Accepted 0.1.5.3 Repair1 source; installer verifies exact modified-file hashes",
+  "live_accepted": false,
+  "target_version_files_unchanged": true,
+  "modified_files": [
+    "apps/desktop_alpha.py",
+    "apps/desktop/ui/src/App.tsx",
+    "scripts/realtime_ab.py",
+    "tests/unit/test_0_1_5_2_repair2_action_settlement.py"
+  ],
+  "new_files": [
+    "core/tools/managed_browser.py",
+    "apps/desktop_managed_browser.py",
+    "requirements-browser.txt",
+    "tests/unit/test_0_1_5_4_managed_browser.py",
+    "docs/PATCH_NOTES_0.1.5.4.md",
+    "docs/TESTING_GUIDE_0.1.5.4.md",
+    "issues/ISSUE_109_0_1_5_4_BROWSER_FOUNDATION.md",
+    "docs/RELEASE_MANIFEST_0.1.5.4.json"
+  ],
+  "preflight_sha256_normalized": {
+    "apps/desktop_alpha.py": "cefbdcbc1cd202a2a23e2ad0900fbe8212c58160ebf4328b25aec4dfe9aa1e94",
+    "apps/desktop/ui/src/App.tsx": "6a068642a8a6ad7024253a0650c8666bc80f17ed4380604f9287fb17e8f8155d",
+    "scripts/realtime_ab.py": "60933f547d2860fd422078e83c0db0661896d26d43b65e936da7bfe49910dd70",
+    "tests/unit/test_0_1_5_2_repair2_action_settlement.py": "941b9fe1c20ad9a29909eddc549036a017a82cdad10e5d2574bd86111d3e61a4"
+  },
+  "payload_sha256_normalized": {
+    "apps/desktop_alpha.py": "9d456b26ffc25e5275184abc93620691e7e0422a45b063904db4701d2dc7275d",
+    "apps/desktop/ui/src/App.tsx": "3787b94f57c94174645410c5198e8bcc9621fb6cea8f1502f3c369e8e4d40238",
+    "scripts/realtime_ab.py": "285c4044b8e99db8043e68f9066c4fe18275dc06b797672d73d9fa29c5f03f3a",
+    "tests/unit/test_0_1_5_2_repair2_action_settlement.py": "b97149d371b512e940b629e5829fd6a2a741f3dd5f5fbea024ed3d39a59c802d",
+    "core/tools/managed_browser.py": "e0b9169e0c7cdf1cdedbad22e869c9c04d42c0e1a365150357c736402d443a61",
+    "apps/desktop_managed_browser.py": "91ae36af988e2578e9f828194d9b7e02903f1cd9364e5f9352b4e9d0096c41af",
+    "requirements-browser.txt": "ac0e883239031c95f27688e5be0c5481180d33075ded1040008868bb8de1d386",
+    "tests/unit/test_0_1_5_4_managed_browser.py": "9d0fb11b66a03600c4d460b794b097f8942fda168426fb9e8610f4ba18bc00f7",
+    "docs/PATCH_NOTES_0.1.5.4.md": "450ecbced1ca97746660927443d28ebbfd18134e92e74490445086beef9ec91f",
+    "docs/TESTING_GUIDE_0.1.5.4.md": "a6aea8e8cf20ca34e0580bfbf2560afb4920c9ebf7c76f2ca95786d1380c1920",
+    "issues/ISSUE_109_0_1_5_4_BROWSER_FOUNDATION.md": "98194a48a6844eaf8ce1b66383803fffbf3ad784dae61cd0a5f7091fe6ba4846"
+  },
+  "automated_test_result": "847 tests: OK, skipped=1 (candidate sandbox)",
+  "desktop_build": "Not executed in sandbox: Vite dependency missing (npm install required). Windows install must run desktop:build before acceptance.",
+  "browser_live_tests": "Not executed in sandbox: user Windows live acceptance required"
+}

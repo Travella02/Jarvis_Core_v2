@@ -63,7 +63,7 @@ class ActionUIContractTests(unittest.TestCase):
         part=self.ui[start:end]
         self.assertLess(part.index('overlapAwaitingActionResultRef.current = {turn:pending.turn,epoch:pending.epoch}'),
                         part.index("sendControlMessage({kind:'desktop_action_request'"))
-        self.assertIn('}, 5000);',part)
+        self.assertIn('managedBrowserRef.current ? 12000 : 5000',part)  # Legacy timeout remains five seconds
         self.assertIn('I could not confirm whether that browser action completed.',part)
         self.assertIn('announceActionProblem',part)
         self.assertIn('Never automatically replay it',part)

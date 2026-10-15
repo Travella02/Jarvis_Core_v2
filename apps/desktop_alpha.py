@@ -27,6 +27,8 @@ from apps.desktop_luna import DesktopLunaDelegator
 from core.intelligence import DelegationOrchestrator
 from apps.desktop_actions import DesktopActionSession
 from apps.desktop_semantic_actions import SemanticDesktopActionSession
+from apps.desktop_managed_browser import ManagedDesktopBrowserSession
+from core.tools.managed_browser import PlaywrightManagedBrowser
 from core.runtime import IntelligenceProviderRouter, JarvisRuntime, RuntimeSettings
 from core.voice import LocalWakeListener, WakeSleepConfig
 from providers.stt.whisper_cpp import WhisperCppConfig, WhisperCppProvider
@@ -343,7 +345,11 @@ class DesktopRealtimeSession:
         self._actions_enabled = (config.overlap_probe and config.core_luna_probe and
             str(env.get('JARVIS_CORE_ACTIONS_PROBE','0')).lower() in {'1','true','yes','on'})
         self._semantic_actions = self._actions_enabled and str(env.get('JARVIS_SEMANTIC_ACTIONS_PROBE','0')).lower() in {'1','true','yes','on'}
-        self._action_session = (SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()) if self._actions_enabled else None
+        self._managed_browser = self._semantic_actions and str(env.get('JARVIS_MANAGED_BROWSER_PROBE','0')).lower() in {'1','true','yes','on'}
+        # One external browser across wake/sleep cycles, separate from voice session.
+        self._managed_browser_engine = PlaywrightManagedBrowser() if self._managed_browser else None
+        self._action_session = (ManagedDesktopBrowserSession(browser=self._managed_browser_engine) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()) if self._actions_enabled else None
+        self._browser_action_task: asyncio.Task | None = None
 
     @property
     def active(self) -> bool:
@@ -368,7 +374,7 @@ class DesktopRealtimeSession:
             self._relay = relay
             self._bridge = bridge
             if self._actions_enabled:
-                self._action_session = SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
+                self._action_session = ManagedDesktopBrowserSession(browser=self._managed_browser_engine) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
             if self.config.core_luna_probe:
                 if not self.config.overlap_probe or self.delegation_orchestrator is None:
                     raise RuntimeError("Core Luna mode requires overlap and Core delegation orchestration")
@@ -378,7 +384,7 @@ class DesktopRealtimeSession:
                     notify=relay.notify_desktop,
                     result_hold_seconds=self.config.luna_result_hold_seconds,
                 )
-                print(f"[Jarvis Luna] mode=real_core_reasoning | actions={'approved_site_only' if self._actions_enabled else 'dry_run'} | audio=private_pcm | authority=core", flush=True)
+                print(f"[Jarvis Luna] mode=real_core_reasoning | actions={'managed_browser' if self._managed_browser else 'approved_site_only' if self._actions_enabled else 'dry_run'} | audio=private_pcm | authority=core", flush=True)
             if self.config.decisions_shadow_probe:
                 if not self.config.overlap_probe or not self.config.api_key:
                     raise RuntimeError("Decisions shadow requires mini-overlap and a backend OpenAI key")
@@ -467,6 +473,32 @@ class DesktopRealtimeSession:
                 'For an immediate request to open YouTube or find a video there, call browser_action. '
                 'Never claim execution; Core verifies the user request and the exact destination. '
                 'Other external actions remain unsupported.')
+            if self._managed_browser:
+                # The opt-in managed browser uses the same single Mini classifier,
+                # not a second routing/model call. Core independently authorizes.
+                action_tool=next(t for t in policy['tools'] if t.get('name')=='browser_action')
+                action_tool['description']=(
+                    'For real, immediate, natural requests to open a public website, '
+                    'search YouTube/Google, or control a Jarvis-managed tab. '
+                    'Choose the public registrable domain (for example wikipedia.org, '
+                    'google.com, youtube.com), not an arbitrary URL or a subdomain. '
+                    'For tab controls use site=current and intent=back,forward,reload,close_tab,next_tab. '
+                    'For searches include query from the current request/context. '
+                    'Never call for hypothetical, quoted, negated, or combined privileged requests. '
+                    'Do not claim execution until Core verifies it.')
+                action_tool['parameters']={'type':'object','properties':{
+                    'site':{'type':'string','description':'Public website domain without protocol, path or query, or current for tab operations'},
+                    'intent':{'type':'string','enum':['open','search','back','forward','reload','close_tab','next_tab']},
+                    'query':{'type':'string','description':'Short search terms for search; omit for other intents'},
+                },'required':['site','intent'],'additionalProperties':False}
+                policy['instructions']=str(policy['instructions']).replace(
+                    'For an immediate request to open YouTube or find a video there, call browser_action. '
+                    'Never claim execution; Core verifies the user request and the exact destination. '
+                    'Other external actions remain unsupported.',
+                    'For an immediate natural-language request to navigate public websites, search YouTube/Google, '
+                    'or manage Jarvis-owned browser tabs, call browser_action with a typed domain and intent. '
+                    'Do not claim completion before Core approves and verifies it. All other actions remain unsupported.')
+
         print(f"[Jarvis A/B Start] model={self.config.model} | reasoning={self.config.reasoning_effort} | "
               f"mode={'overlap_probe' if overlap_probe else ('buffered_tool_probe' if buffered_probe else ('tool_probe_text_only' if tool_probe else ('direct_no_gate_tools_disabled' if direct_only else 'safe_routed')))} | "
               f"shadow={self.config.parallel_shadow_probe and not direct_only} | "
@@ -482,6 +514,7 @@ class DesktopRealtimeSession:
             "delegation_guidance_probe": self.config.delegation_guidance_probe,
             "core_actions_probe": self._actions_enabled,
             "semantic_actions_probe": self._semantic_actions,
+            "managed_browser_probe": self._managed_browser,
             "pcm_trim_leading_silence": overlap_probe and str(merged_environment(PROJECT_ROOT / ".env").get("JARVIS_PCM_TRIM_LEADING_SILENCE", "0")).lower() in {"1", "true", "yes", "on"},
             "response": policy,
         })
@@ -501,22 +534,58 @@ class DesktopRealtimeSession:
                 kind = message.get("kind")
                 if kind == "desktop_overlap_audio" and self._action_session is not None and message.get("phase") == "started":
                     self._action_session.on_turn_started(int(message.get("turn") or 0))
+                    if self._managed_browser and self._browser_action_task is not None and not self._browser_action_task.done():
+                        # New authenticated turn supersedes any still-running browser job.
+                        # The old task may already have navigated; never claim it has not.
+                        self._browser_action_task.cancel()
+
                     # Existing latency handling below still sees this event.
                 if kind == "desktop_action_request":
                     if self._action_session is None:
                         continue
                     turn = int(message.get("turn") or 0)
-                    result = await self._action_session.handle(
-                        turn=turn, selected_tool=str(message.get("selected_tool") or ""),
-                        source=str(message.get("source") or ""),
-                        binding=str(message.get("binding") or ""),
-                        transcript=message.get("text"),
-                        **({"arguments": message.get("arguments")} if self._semantic_actions else {}))
-                    if result is not None:
-                        print(f"[Jarvis Action] turn={turn} | tool=desktop_browser "
-                              f"| status={result.status} | code={result.code} | authority=core", flush=True)
-                        await relay.notify_desktop({'kind':'core_tool_result', 'turn':turn,
-                            'status':result.status, 'text':result.text})
+                    # An arbitrary website can take seconds to start. Running it
+                    # inside the WebSocket receive loop would hide new turns,
+                    # cancellation and sleep until the browser returns.
+                    async def execute_and_report(msg=message, action_turn=turn, session=self._action_session) -> None:
+                        try:
+                            result = await session.handle(
+                                turn=action_turn, selected_tool=str(msg.get("selected_tool") or ""),
+                                source=str(msg.get("source") or ""),
+                                binding=str(msg.get("binding") or ""),
+                                transcript=msg.get("text"),
+                                **({"arguments": msg.get("arguments")} if self._semantic_actions else {}))
+                        except asyncio.CancelledError:
+                            return
+                        except Exception:
+                            print(f"[Jarvis Action] turn={action_turn} | status=failed | code=unexpected_error | authority=core", flush=True)
+                            if session is not None and session.active_turn == action_turn:
+                                await relay.notify_desktop({'kind':'core_tool_result','turn':action_turn,
+                                    'status':'failed','text':'I could not complete that browser action.'})
+                            return
+                        if result is not None and (not self._managed_browser or
+                                (session is not None and session.active_turn == action_turn)):
+                            print(f"[Jarvis Action] turn={action_turn} | tool=desktop_browser "
+                                  f"| status={result.status} | code={result.code} | authority=core", flush=True)
+                            await relay.notify_desktop({'kind':'core_tool_result', 'turn':action_turn,
+                                'status':result.status, 'text':result.text})
+
+                    if self._managed_browser:
+                        self._browser_action_task = asyncio.create_task(
+                            execute_and_report(),name=f'jarvis-managed-browser-{turn}')
+                    else:
+                        # Unmodified legacy semantic-action dispatch path.
+                        result = await self._action_session.handle(
+                            turn=turn, selected_tool=str(message.get("selected_tool") or ""),
+                            source=str(message.get("source") or ""),
+                            binding=str(message.get("binding") or ""),
+                            transcript=message.get("text"),
+                            **({"arguments": message.get("arguments")} if self._semantic_actions else {}))
+                        if result is not None:
+                            print(f"[Jarvis Action] turn={turn} | tool=desktop_browser "
+                                  f"| status={result.status} | code={result.code} | authority=core", flush=True)
+                            await relay.notify_desktop({'kind':'core_tool_result', 'turn':turn,
+                                'status':result.status, 'text':result.text})
                     continue
                 if kind == "desktop_action_feedback":
                     # UI-only acknowledgment. Never execute/retry an action from
@@ -597,6 +666,9 @@ class DesktopRealtimeSession:
                             self._luna.new_turn(turn)
                         elif phase == "sleep":
                             await self._luna.cancel()
+                    if (self._managed_browser and message.get("phase") == "sleep" and
+                            self._browser_action_task is not None and not self._browser_action_task.done()):
+                        self._browser_action_task.cancel()
                     if self._decisions_shadow is not None:
                         phase = str(message.get("phase") or "")
                         if phase in {"direct", "sleep"}:
@@ -791,7 +863,15 @@ class DesktopRealtimeSession:
             self._relay = None
             self._bridge = None
             self._event_task = None
+            action_session = self._action_session
+            self._action_session = None
 
+        if self._browser_action_task is not None and not self._browser_action_task.done():
+            self._browser_action_task.cancel()
+            await asyncio.gather(self._browser_action_task,return_exceptions=True)
+        self._browser_action_task = None
+        # Managed Chromium remains open while Jarvis sleeps. We only close the
+        # external browser when the desktop/Core actually shuts down.
         if call_id:
             with suppress(Exception):
                 await hangup_realtime_call(self.config, call_id)
@@ -816,6 +896,12 @@ class DesktopRealtimeSession:
                 event_task.cancel()
         if event_task is not None:
             await asyncio.gather(event_task, return_exceptions=True)
+
+    async def shutdown(self) -> None:
+        await self.stop()
+        if self._managed_browser_engine is not None:
+            with suppress(Exception):
+                await self._managed_browser_engine.close()
 
 
 def _missing_ui_page() -> str:
@@ -850,7 +936,7 @@ def create_desktop_app(
         try:
             yield
         finally:
-            await session.stop()
+            await session.shutdown()
             if wake_service is not None:
                 await wake_service.close()
             closed: set[int] = set()
