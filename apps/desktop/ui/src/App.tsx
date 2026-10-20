@@ -445,6 +445,8 @@ export default function App() {
   const semanticActionsRef = useRef(false);
   const managedBrowserRef = useRef(false);
   const browserBridgeRef = useRef(false);
+  const desktopAppRef = useRef(false);
+  const universalAppRef = useRef(false);
   const browserMediaRef = useRef(false);
   const delegationGuidanceRef = useRef(false); // Opt-in; no extra inference request.
   const overlapCandidateStageRef = useRef('overlap_candidate');
@@ -479,7 +481,7 @@ export default function App() {
   const overlapSleepInputRef = useRef<SleepTurnInput | null>(null);
   const overlapTranscriptsRef = useRef<Map<string, string>>(new Map());
   const overlapPendingSleepRef = useRef<{turn:number;epoch:number;evidence:string} | null>(null);
-  const overlapPendingActionRef = useRef<{turn:number;epoch:number;proposal?: {site:string;intent:string;query?:string}} | null>(null);
+  const overlapPendingActionRef = useRef<{turn:number;epoch:number;tool?:string;proposal?: {site?:string;intent?:string;query?:string;app?:string}} | null>(null);
   const overlapActionTimerRef = useRef<number | null>(null);
   // An action selection is not finished until the CURRENT turn receives Core's
   // authoritative result (or the UI times out). Never retry an ambiguous launch.
@@ -1188,7 +1190,7 @@ export default function App() {
       input,
       output_modalities:['text'],max_output_tokens:512,tools,tool_choice:'auto',
       instructions:(coreLunaProbeRef.current
-        ? `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. For complex reasoning or coding use ask_luna, which may invoke real Core reasoning after authorization. ${semanticActionsRef.current ? (managedBrowserRef.current ? (browserBridgeRef.current ? 'For immediate requests to open/search public websites choose browser_action open/search. Core may reuse the same site tab in the connected user browser; otherwise it opens the URL with the system default browser. For explicitly requested tab or currently playing video controls use browser_action back, forward, reload, close_tab, next_tab, select_tab, close_named_tab, play, pause, mute, unmute or volume. Media controls require a connected extension and a matching video; never invent a video or tab. If user requests playing first search result, do not claim it is supported unless tools explicitly provide that capability. ' : 'For immediate natural requests to open/search public websites, choose browser_action with intent open/search: Windows must hand off the URL to the user default browser, not a separate Jarvis session. Other tab operations control ONLY Jarvis-managed browser tabs, never tabs in the user default browser. Intent is open, search, back, forward, reload, close_tab or next_tab. ') + (browserMediaRef.current && !browserBridgeRef.current ? 'Only when the user explicitly asks for a Jarvis-managed browser instead of their default, use open_managed with a public domain; managed tabs and media may then be controlled. For a named Jarvis-managed tab, use select_tab or close_named_tab with the explicitly requested domain. For visible HTML5 video in Jarvis-managed tabs, use play, pause, mute, unmute or volume on site=current; volume requires a user-spoken numerical percentage. ' : '') + 'Queries must come from established user context. Never use this for hypothetical, negated, quoted, or combined privileged requests. Core must verify intent and action. Never claim completion before Core reports it.' : 'For an immediate natural-language request to open YouTube or find a video there, choose browser_action with a typed destination and intent. For find-video requests generate concise search terms in query only if the topic is actually established by available context. If the user says "for that" but the topic is unknown, ask what topic they mean instead of inventing a query. Never call browser_action for denial, negation, hypothetical or conditional requests. All other external actions are unsupported. Never claim completion before Core executes.') : 'For an explicit request to open YouTube, select test_action (immediate). This opt-in trial may execute only if Core independently confirms the matching user command. All other external actions remain dry runs.'} Never claim work was executed prematurely.`
+        ? `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. For complex reasoning or coding use ask_luna, which may invoke real Core reasoning after authorization. ${semanticActionsRef.current ? (managedBrowserRef.current ? (browserBridgeRef.current ? 'For immediate requests to open/search public websites choose browser_action open/search. Core may reuse the same site tab in the connected user browser; otherwise it opens the URL with the system default browser. For explicitly requested tab or currently playing video controls use browser_action back, forward, reload, close_tab, next_tab, select_tab, close_named_tab, play, pause, mute, unmute or volume. Media controls require a connected extension and a matching video; never invent a video or tab. If user requests playing first search result, do not claim it is supported unless tools explicitly provide that capability. ' : 'For immediate natural requests to open/search public websites, choose browser_action with intent open/search: Windows must hand off the URL to the user default browser, not a separate Jarvis session. Other tab operations control ONLY Jarvis-managed browser tabs, never tabs in the user default browser. Intent is open, search, back, forward, reload, close_tab or next_tab. ') + (browserMediaRef.current && !browserBridgeRef.current ? 'Only when the user explicitly asks for a Jarvis-managed browser instead of their default, use open_managed with a public domain; managed tabs and media may then be controlled. For a named Jarvis-managed tab, use select_tab or close_named_tab with the explicitly requested domain. For visible HTML5 video in Jarvis-managed tabs, use play, pause, mute, unmute or volume on site=current; volume requires a user-spoken numerical percentage. ' : '') + 'Queries must come from established user context. Never use this for hypothetical, negated, quoted, or combined privileged requests. Core must verify intent and action. Never claim completion before Core reports it.' : 'For an immediate natural-language request to open YouTube or find a video there, choose browser_action with a typed destination and intent. For find-video requests generate concise search terms in query only if the topic is actually established by available context. If the user says "for that" but the topic is unknown, ask what topic they mean instead of inventing a query. Never call browser_action for denial, negation, hypothetical or conditional requests. All other external actions are unsupported. Never claim completion before Core executes.') : 'For an explicit request to open YouTube, select test_action (immediate). This opt-in trial may execute only if Core independently confirms the matching user command. All other external actions remain dry runs.'} ${desktopAppRef.current ? (universalAppRef.current ? 'For an immediate direct request to launch an installed desktop application, use launch_app with its display name, e.g. Discord, Spotify, File Explorer. Never send a path or command. Use browser_action only for explicit websites, site searches, and browser tab/media operations; an app with a website is still an app. Core independently resolves installed apps and may report not found. Do not invent success.' : 'For a DIRECT immediate request to launch a desktop application, use launch_app only for Notepad, Calculator, or File Explorer. Do not call launch_app for websites, YouTube, or browser tabs. Core checks the exact user transcript. This tool cannot launch arbitrary apps yet.') : ''} Never claim work was executed prematurely.`
         : `Classify the entire current user utterance, including its ending. A clear closing or dismissal takes precedence over polite words earlier in the same utterance. For example, "Thanks, Jarvis" is ordinary gratitude (direct); "Thanks Jarvis, that is all" or "Thanks Jarvis, that's all" is an explicit ending (sleep_jarvis); "Thanks, one more question" is continuing conversation (direct); and "What does the expression that's all mean?" is a question (direct). Do not mistake a quotation or negated instruction for an actual dismissal. For sleep, call sleep_jarvis as your only output; never speak, send farewell text, or issue another tool. Set sleep_evidence to the exact contiguous closing words in the user input, not invented or paraphrased words. Mere gratitude does not authorize sleep. The desktop separately checks the quoted evidence against the confirmed same-turn transcript. Otherwise decide direct versus ask_luna for complex reasoning or test_action for external actions. Both expert/action tools are dry runs. Never claim any action succeeded.`)
         + (delegationGuidanceRef.current && coreLunaProbeRef.current && !wakeOnly
           ? ' In this experimental A/B arm, choose ask_luna for user requests requiring substantial multi-step reasoning, a detailed technical design, trade-off analysis across multiple constraints, or a considered recommendation—even when the user does not explicitly mention Core, Luna, or deep reasoning. Choose direct for greetings, simple arithmetic, straightforward factual questions, a short definition, and light conversation. Do not escalate merely because a familiar technical word occurs; judge the entire user request and expected answer. This is guidance to the same Mini router, NOT an additional model call. Preserve sleep_evidence validation and external-action dry-run rules exactly.'
@@ -1426,14 +1428,14 @@ export default function App() {
     const input: any[] = [];
     if (/^item_[A-Za-z0-9_-]+$/.test(originalItem)) input.push({type:'item_reference',id:originalItem});
     input.push({type:'message',role:'user',content:[{type:'input_text',
-      text:`Jarvis Core returned this ${payload.origin === 'tool' ? (payload.status === 'unknown' ? 'unconfirmed browser-action status' : 'verified browser-action outcome') : (payload.status === 'completed' ? 'verified reasoning answer' : 'verified failure')} for your most recent request. Speak this faithfully without new factual claims or actions:\n${resultText}`}]});
+      text:`Jarvis Core returned this ${payload.origin === 'tool' ? (payload.status === 'unknown' ? 'unconfirmed computer-action status' : 'verified computer-action outcome') : (payload.status === 'completed' ? 'verified reasoning answer' : 'verified failure')} for your most recent request. Speak this faithfully without new factual claims or actions:\n${resultText}`}]});
     dc.send(JSON.stringify({type:'response.create',response:{conversation:'none',
       metadata:{jarvis_stage:'core_luna_voice',jarvis_turn:String(turn)},
       // Audio tokens and transcript tokens share this limit. Unlike the short
       // speculative candidate, a bounded 3000-character Core answer must not
       // be truncated by a 1024-token voice-synthesis budget.
       input,output_modalities:['audio'],max_output_tokens:'inf',tools:[],tool_choice:'none',
-      instructions:payload.origin === 'tool' ? 'You are Jarvis delivering a browser-action problem to the speaker. Say one short, clear sentence in first person based only on the supplied Core status. If unconfirmed, say you cannot verify success; NEVER say the action failed or succeeded. For a denial or failure, explain that it could not be done. Do not claim any new action, research, or capability. No preamble, no follow-up, no extra commentary. Do not run tools.' : 'You are Jarvis speaking an already obtained Core result. Give the answer naturally and faithfully, without claiming any additional research, external actions, or capabilities. Never announce internal routing or say that you are about to check something. If Core reported a failure, communicate that failure accurately. Do not run tools.'}}));
+      instructions:payload.origin === 'tool' ? 'You are Jarvis delivering a computer-action problem to the speaker. Say one short, clear sentence in first person based only on the supplied Core status. If unconfirmed, say you cannot verify success; NEVER say the action failed or succeeded. For a denial or failure, explain that it could not be done. Do not claim any new action, research, or capability. No preamble, no follow-up, no extra commentary. Do not run tools.' : 'You are Jarvis speaking an already obtained Core result. Give the answer naturally and faithfully, without claiming any additional research, external actions, or capabilities. Never announce internal routing or say that you are about to check something. If Core reported a failure, communicate that failure accurately. Do not run tools.'}}));
     sendControlMessage({kind:'desktop_luna_voice',turn,phase:'started',status:String(payload.status || '')});
     return true;
   };
@@ -1488,12 +1490,14 @@ export default function App() {
       // The action MAY have succeeded even if its acknowledgment went missing.
       // Never automatically replay it or claim that nothing happened.
       announceActionProblem(pending.turn,'unknown',
-        'I could not confirm whether that browser action completed. Please check your browser.');
+        desktopAppRef.current && pending.tool === 'launch_app'
+          ? 'I could not confirm whether that application opened. Please check your screen.'
+          : 'I could not confirm whether that browser action completed. Please check your browser.');
       sendControlMessage({kind:'desktop_action_feedback',turn:pending.turn,status:'unknown',
         visible_confirmation:false,spoken:false,reason:'result_timeout'});
     }, managedBrowserRef.current ? 12000 : 5000);
     sendControlMessage({kind:'desktop_action_request',turn:pending.turn,
-      selected_tool:semanticActionsRef.current ? 'browser_action' : 'test_action',
+      selected_tool:desktopAppRef.current && pending.tool === 'launch_app' ? 'launch_app' : semanticActionsRef.current ? 'browser_action' : 'test_action',
       ...(semanticActionsRef.current ? {arguments:pending.proposal || null} : {}),
       source:input?.turn === pending.turn && input?.binding === overlapInputBindingRef.current ? input.source : '',
       binding:input?.turn === pending.turn && input?.binding === overlapInputBindingRef.current ? input.binding : '',
@@ -1814,16 +1818,16 @@ export default function App() {
               dcRef.current.send(JSON.stringify({type:'output_audio_buffer.clear'}));
             }
             if (coreActionsProbeRef.current && completed && calls.length === 1 &&
-                (semanticActionsRef.current ? tool === 'browser_action' : tool === 'test_action')) {
-              let proposal: {site:string;intent:string;query?:string} | undefined;
+                ((semanticActionsRef.current ? tool === 'browser_action' : tool === 'test_action') || (desktopAppRef.current && tool === 'launch_app'))) {
+              let proposal: {site?:string;intent?:string;query?:string;app?:string} | undefined;
               if (semanticActionsRef.current) {
                 try {
                   const raw = JSON.parse(String(calls[0].arguments || '{}'));
                   if (raw && typeof raw === 'object' && !Array.isArray(raw)) proposal = raw;
                 } catch (_) { /* Core rejects malformed proposals */ }
               }
-              overlapPendingActionRef.current = {turn,epoch:overlapEpochRef.current,proposal};
-              setStateSafely('working','Validating browser action');
+              overlapPendingActionRef.current = {turn,epoch:overlapEpochRef.current,tool,proposal};
+              setStateSafely('working',tool === 'launch_app' ? 'Validating application action' : 'Validating browser action');
               settlePendingOverlapAction();
               if (overlapPendingActionRef.current) {
                 const epoch = overlapEpochRef.current;
@@ -2308,6 +2312,8 @@ export default function App() {
           semanticActionsRef.current = payload.semantic_actions_probe === true && coreActionsProbeRef.current;
           managedBrowserRef.current = payload.managed_browser_probe === true && semanticActionsRef.current;
           browserBridgeRef.current = payload.browser_bridge_probe === true && managedBrowserRef.current;
+          desktopAppRef.current = payload.desktop_app_probe === true && browserBridgeRef.current;
+          universalAppRef.current = desktopAppRef.current && payload.universal_app_probe === true;
           browserMediaRef.current = managedBrowserRef.current && payload.browser_media_probe === true;
           delegationGuidanceRef.current = payload.delegation_guidance_probe === true && coreLunaProbeRef.current && overlapProbeRef.current;
           pcmTrimRef.current = payload.pcm_trim_leading_silence === true;
@@ -2371,7 +2377,7 @@ export default function App() {
               // An unrecognized status is not verified success or verified failure.
               const status = payload.status === 'failed' ? 'failed' : 'unknown';
               const message = status === 'unknown'
-                ? 'I could not confirm whether that browser action completed. Please check your browser.'
+                ? 'I could not confirm whether that computer action completed. Please check your screen.'
                 : String(payload.text || 'I could not complete that action.');
               announceActionProblem(turn,status,message);
             }

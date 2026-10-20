@@ -28,6 +28,7 @@ from core.intelligence import DelegationOrchestrator
 from apps.desktop_actions import DesktopActionSession
 from apps.desktop_semantic_actions import SemanticDesktopActionSession
 from apps.desktop_managed_browser import ManagedDesktopBrowserSession
+from apps.desktop_unified_actions import UnifiedDesktopActionSession
 from core.tools.managed_browser import PlaywrightManagedBrowser
 from core.tools.browser_bridge import BrowserBridge
 from core.tools.default_browser_bridge import DefaultBrowserBridgeAdapter
@@ -348,13 +349,15 @@ class DesktopRealtimeSession:
             str(env.get('JARVIS_CORE_ACTIONS_PROBE','0')).lower() in {'1','true','yes','on'})
         self._semantic_actions = self._actions_enabled and str(env.get('JARVIS_SEMANTIC_ACTIONS_PROBE','0')).lower() in {'1','true','yes','on'}
         self._browser_bridge_enabled = self._semantic_actions and str(env.get('JARVIS_BROWSER_BRIDGE_PROBE','0')).lower() in {'1','true','yes','on'}
+        self._app_actions = self._browser_bridge_enabled and str(env.get('JARVIS_DESKTOP_APP_PROBE', '0')).lower() in {'1','true','yes','on'}
+        self._universal_apps = self._app_actions and str(env.get('JARVIS_UNIVERSAL_APP_PROBE', '0')).lower() in {'1','true','yes','on'}
         self._extension_id = str(env.get('JARVIS_BROWSER_BRIDGE_EXTENSION_ID','')).strip().lower()
         self._extension_bridge = BrowserBridge()
         self._managed_browser = self._browser_bridge_enabled or (self._semantic_actions and str(env.get('JARVIS_MANAGED_BROWSER_PROBE','0')).lower() in {'1','true','yes','on'})
         # One external browser across wake/sleep cycles, separate from voice session.
         self._advanced_browser = self._managed_browser and (self._browser_bridge_enabled or str(env.get('JARVIS_BROWSER_MEDIA_PROBE','0')).lower() in {'1','true','yes','on'})
         self._managed_browser_engine = (DefaultBrowserBridgeAdapter(self._extension_bridge) if self._browser_bridge_enabled else PlaywrightManagedBrowser() if self._managed_browser else None)
-        self._action_session = (ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=self._browser_bridge_enabled) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()) if self._actions_enabled else None
+        self._action_session = (UnifiedDesktopActionSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=True, universal_apps=self._universal_apps) if self._app_actions else ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=self._browser_bridge_enabled) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()) if self._actions_enabled else None
         self._browser_action_task: asyncio.Task | None = None
 
     @property
@@ -380,7 +383,7 @@ class DesktopRealtimeSession:
             self._relay = relay
             self._bridge = bridge
             if self._actions_enabled:
-                self._action_session = ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=self._browser_bridge_enabled) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
+                self._action_session = UnifiedDesktopActionSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=True, universal_apps=self._universal_apps) if self._app_actions else ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=self._browser_bridge_enabled) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
             if self.config.core_luna_probe:
                 if not self.config.overlap_probe or self.delegation_orchestrator is None:
                     raise RuntimeError("Core Luna mode requires overlap and Core delegation orchestration")
@@ -515,6 +518,37 @@ class DesktopRealtimeSession:
                      'For explicitly requested Jarvis-managed browsing (open_managed) or to manage Jarvis-owned tabs, call browser_action with a typed domain and intent. ') + 
                     'Do not claim completion before Core approves and verifies it. All other actions remain unsupported.')
 
+        if self._app_actions:
+            # Same Mini tool selection, no extra router. Discovery is opt-in and
+            # Core-only; the default 0.1.5.7 probe remains a comparison baseline.
+            policy['tools'].append({
+                'type': 'function', 'name': 'launch_app',
+                'description': (
+                    'Launch a locally installed desktop APPLICATION (not a website, tab, or search). '
+                    + ('Use the installed application display name (e.g. Discord or File Explorer). '
+                       'Choose this for an immediate natural request for a desktop app, even if it is not prelisted. '
+                       if self._universal_apps else
+                       'Only Notepad, Calculator, and Windows File Explorer are supported in this alpha. '
+                       'Choose this only when the user directly requests one of these apps. ')
+                    + 'For explicitly requested websites, YouTube, Google search, or browser tabs use browser_action. '
+                    'Core independently checks the request and launch permission.'),
+                'parameters': {'type': 'object', 'properties': {
+                    'app': ({'type': 'string', 'description': 'Installed app display name (not a path, URL, or command line)'}
+                            if self._universal_apps else {'type': 'string', 'enum': ['notepad', 'calculator', 'file_explorer']})
+                }, 'required': ['app'], 'additionalProperties': False}
+            })
+            policy['instructions'] = str(policy['instructions']) + (
+                (' For an immediate user request to launch an installed desktop application, use launch_app '
+                 'with its natural display name, even if not explicitly listed. Examples: Discord, Spotify, '
+                 'File Explorer, Notepad. Do not assume an app means its website. '
+                 'Core discovers installed apps locally and may report not found. '
+                 if self._universal_apps else
+                 ' For an immediate user request to launch a supported desktop application '
+                 '(Notepad, Calculator, File Explorer), use launch_app. Other apps are unsupported. ')
+                + 'For explicitly requested websites and browser operations use browser_action. '
+                'No app or website launch is successful until Core reports the result.'
+            )
+
         print(f"[Jarvis A/B Start] model={self.config.model} | reasoning={self.config.reasoning_effort} | "
               f"mode={'overlap_probe' if overlap_probe else ('buffered_tool_probe' if buffered_probe else ('tool_probe_text_only' if tool_probe else ('direct_no_gate_tools_disabled' if direct_only else 'safe_routed')))} | "
               f"shadow={self.config.parallel_shadow_probe and not direct_only} | "
@@ -533,6 +567,8 @@ class DesktopRealtimeSession:
             "managed_browser_probe": self._managed_browser,
             "browser_media_probe": self._advanced_browser,
             "browser_bridge_probe": self._browser_bridge_enabled,
+            "desktop_app_probe": self._app_actions,
+            "universal_app_probe": self._universal_apps,
             "pcm_trim_leading_silence": overlap_probe and str(merged_environment(PROJECT_ROOT / ".env").get("JARVIS_PCM_TRIM_LEADING_SILENCE", "0")).lower() in {"1", "true", "yes", "on"},
             "response": policy,
         })
@@ -562,7 +598,7 @@ class DesktopRealtimeSession:
                     if self._action_session is None:
                         continue
                     turn = int(message.get("turn") or 0)
-                    # An arbitrary website can take seconds to start. Running it
+                    # An arbitrary browser/app action can take seconds. Running it
                     # inside the WebSocket receive loop would hide new turns,
                     # cancellation and sleep until the browser returns.
                     async def execute_and_report(msg=message, action_turn=turn, session=self._action_session) -> None:
