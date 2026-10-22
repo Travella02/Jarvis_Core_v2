@@ -41,6 +41,20 @@ class ManagedDesktopBrowserSession:
             return ManagedBrowserOutcome('failed','I could not verify that browser request.',
                                          'missing_independent_user_evidence')
         intent=arguments.get('intent')
+        # Mini occasionally encodes a request to RETURN to a site AND SEARCH it
+        # as select_tab/open with a query. Interpret that *single proposed tool*
+        # as search only when Mini supplied a query AND the independent user's
+        # current-turn speech explicitly requested a search for those terms.
+        # No query is inferred, no second effect is executed, and the browser
+        # gateway still enforces host, transcript, permissions and idempotency.
+        if (intent in {'select_tab', 'open'} and isinstance(arguments.get('site'), str)
+                and isinstance(arguments.get('query'), str)
+                and 2 <= len(arguments['query'].strip()) <= 160):
+            from core.tools.managed_browser import confirmed_site_search_query
+            if confirmed_site_search_query(transcript, arguments['site'], arguments['query']):
+                arguments = {'site': arguments['site'], 'intent': 'search',
+                             'query': arguments['query']}
+                intent = 'search'
         if (intent not in ALLOWED or not isinstance(intent,str) or
                 (not self.advanced and intent in {'select_tab','close_named_tab','play','pause','mute','unmute','volume','open_managed'}) or
                 (self.bridge_mode and intent == 'open_managed') or

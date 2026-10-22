@@ -1,0 +1,3 @@
+# ISSUE: Compound return-to-tab + search commands denied
+
+Live report, 2026-10-22. A direct `Search YouTube for Sidemen` succeeded but `Go back to YouTube and search for soccer videos` failed with `unverified_user_intent`, and `Switch back to the YouTube tab and search for soccer` failed with `unverified_arguments`. This was a mismatch between model tool proposals and Core transcript/action contract, not evidence of a broken tab-ID guard. Remedy is a single, same-site search proposal; guarded correction of already-present query arguments; and independent evidence verification. Live Windows revalidation required.

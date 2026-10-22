@@ -176,6 +176,37 @@ def trusted_intent(text: object, operation: str, host: str | None, value: object
     return bool(re.search(r'(?<!\w)'+re.escape(label)+r'(?!\w)', text, re.I))
 
 
+def confirmed_site_search_query(transcript: object, site: object, query: object) -> bool:
+    """Verify a model-supplied query for a current-turn, same-site search.
+
+    For composite site-return requests we cannot infer a search from model
+    parameters alone. Require independently transcribed search intent, one
+    supported destination and the actual search subject in the utterance.
+    The normal ManagedBrowserGateway subsequently performs its full authorization.
+    """
+    if not isinstance(transcript, str) or not isinstance(query, str) or not isinstance(site, str):
+        return False
+    host = normalize_host(site)
+    if host not in ('youtube.com', 'google.com'):
+        return False
+    if len(query.strip()) < 2 or len(query.strip()) > 160:
+        return False
+    if not re.search(r'\b(?:search|find|look\s+up)\b', transcript, re.I):
+        return False
+    if not trusted_intent(transcript, 'search', host, query=query):
+        return False
+    # Composite return-and-search requests must not authorize a model-invented
+    # query. Every distinctive search token must be in the verified utterance;
+    # permit neutral 'video/videos' query fillers, but no new subject terms.
+    utterance_tokens=set(re.findall(r'[a-z0-9]+', transcript.casefold()))
+    query_tokens=re.findall(r'[a-z0-9]+', query.casefold())
+    if not query_tokens or len(query_tokens)>24:
+        return False
+    ignored={'video','videos','a','an','the','about','for','of','on','in'}
+    significant=[t for t in query_tokens if t not in ignored]
+    return bool(significant) and all(token in utterance_tokens for token in significant)
+
+
 class BrowserOperations(Protocol):
     async def navigate(self, url: str) -> bool: ...
     async def go_back(self) -> bool: ...

@@ -501,7 +501,12 @@ class DesktopRealtimeSession:
                         'For volume include an integer percentage value explicitly spoken by the user. ' +
                         ('The installed extension can reuse a matching tab in the user browser; otherwise open/search use the operating system default browser. ' if self._browser_bridge_enabled else
                          'Open and search use the system default browser, which you cannot control with tab/media tools. Only if the user explicitly asks to open a site in Jarvis managed browser, use open_managed. ') + 
-                        'Never invent a tab target, video, or volume. Do not claim execution.')
+                        'For a request to RETURN or SWITCH BACK to an earlier website AND SEARCH it, '
+                        'make ONE browser_action call with intent=search, site=the named website domain, '
+                        'and query=the search terms. Do not use select_tab, back, or open for that combined '
+                        'search request: Core finds and reuses an authorized matching tab when connected. '
+                        'Do not call multiple browser tools for the same request. '
+                        'Never invent search terms, tab targets, videos, or volume. Do not claim execution.')
                 action_tool['parameters']={'type':'object','properties':{
                     'site':{'type':'string','description':'Public website domain without protocol, path or query, or current for tab operations'},
                     'intent':{'type':'string','enum':['open','search','back','forward','reload','close_tab','next_tab'] +
@@ -514,7 +519,7 @@ class DesktopRealtimeSession:
                     'Never claim execution; Core verifies the user request and the exact destination. '
                     'Other external actions remain unsupported.',
                     'For an immediate natural-language request to open or search public sites, use the operating-system default browser (intent open/search). ' +
-                    ('For an existing browser with the installed Jarvis extension, control tabs and supported HTML5 video using browser_action. ' if self._browser_bridge_enabled else
+                    ('For a site-return-and-search request, propose ONE search action with the explicit website domain and search query; the connected extension can reuse the earlier tab. Do not propose select_tab followed by search. For an existing browser with the installed Jarvis extension, control tabs and supported HTML5 video using browser_action. ' if self._browser_bridge_enabled else
                      'For explicitly requested Jarvis-managed browsing (open_managed) or to manage Jarvis-owned tabs, call browser_action with a typed domain and intent. ') + 
                     'Do not claim completion before Core approves and verifies it. All other actions remain unsupported.')
 
