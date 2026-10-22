@@ -413,7 +413,13 @@ class ManagedBrowserGateway:
                     return await getattr(self.browser,{'back':'go_back','forward':'go_forward',
                          'reload':'reload','close_tab':'close_tab','next_tab':'next_tab'}[operation])()
                 success=await asyncio.wait_for(act(),timeout=7.0)
+                if self.bridge_mode and operation in ('open', 'search'):
+                    # No transcript, query text, URL or browser-history content
+                    # in diagnostics: only the navigation route and connection.
+                    route=getattr(self.browser,'last_navigation_route','unknown')
+                    print(f'[Jarvis Browser Route] operation={operation} | route={route} | accepted={bool(success)}', flush=True)
                 result=(outcome(ToolResultStatus.SUCCEEDED,output={
+                    'navigation_route':getattr(self.browser,'last_navigation_route','unknown') if self.bridge_mode else 'not_applicable',
                     'operation':operation,'browser_navigation_committed':success if (operation in ('open','search') and not self.advanced) or operation == 'open_managed' else False,
                     'system_browser_handoff_accepted':bool(success and self.advanced and operation in ('open','search') and (not self.bridge_mode or getattr(self.browser,'last_system_handoff',False))),
                     'page_loaded_verified':bool(success and self.bridge_mode and getattr(self.browser,'last_navigation_verified',False)),'url':uri if uri else None,

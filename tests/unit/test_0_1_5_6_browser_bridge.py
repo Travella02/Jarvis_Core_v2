@@ -15,7 +15,7 @@ class FakeExtension:
         self.active=next((t['id'] for t in self.tabs if t['active']),self.tabs[0]['id'] if self.tabs else 0)
         self.operations=[]
         self.media_verified=True
-    def status(self):return {'connected':self.connected}
+    def status(self):return {'connected':self.connected,'capabilities':['navigate_target_guarded']}
     def snapshot(self):
         return {'ok':True,'tabs':[dict(t) for t in self.tabs],
                 'active_tab':dict(next((t for t in self.tabs if t['id']==self.active),{}))}

@@ -1,13 +1,13 @@
-# Jarvis Core v2 Browser Bridge — Chrome / Edge opt-in alpha
+# Jarvis Browser Bridge — Chrome / Edge alpha
 
-Ported from the read-only v1 0.3.6 Jarvis Browser Bridge. This is an unpacked development extension; browser privileges are substantial. Install only for your own test profile.
+This opt-in extension is required for **existing-tab reuse**, tab switching and video control in Chrome/Edge. Opening URLs without the extension still uses the system default browser; it cannot guarantee tab reuse. Universal browser support and permission onboarding are not implemented yet.
 
-1. Open Chrome `chrome://extensions` or Edge `edge://extensions` in your **Windows default browser**.
-2. Enable Developer mode; Load unpacked; select this exact folder.
-3. Copy extension ID, which is visible on the extension card.
-4. Start Jarvis with `JARVIS_BROWSER_BRIDGE_EXTENSION_ID=<copied-id>` in the same PowerShell environment as `realtime_ab.py`.
-5. Use the opt-in `mini-overlap-luna-trim-guided-browser-bridge` A/B arm. The extension reconnects after the desktop Core is ready.
+**Development setup only:** The extension requests powerful tab and site permissions. Install only in your test browser profile. Do not claim it can be installed or enabled without user permission.
 
-The Core side **only authorizes** snapshot, switch/navigation, close tab, back/forward/reload, and verified media play/pause/mute/volume. All other upstream V1 extension features remain inaccessible to v2 Core in this candidate. No permissions on user account credentials or forms have been accepted for this milestone.
+1. Open `chrome://extensions` (Chrome) or `edge://extensions` (Edge) in the browser that Windows uses as its default.
+2. Enable developer mode, choose **Load unpacked**, and select the `extensions/jarvis_browser_bridge` folder.
+3. Note the extension ID shown by the browser and explicitly set `JARVIS_BROWSER_BRIDGE_EXTENSION_ID` in your local Jarvis environment (the ID must match the one displayed).
+4. After Repair 3, click **Reload** on the unpacked extension. This is essential: older workers do not understand guarded target navigation and will fall back to default-browser handoffs.
+5. Start Jarvis's `mini-overlap-luna-trim-guided-universal-apps` test arm and check `[Jarvis Browser Route]` logs for `reused_connected_tab`.
 
-This is **not** a production-ready or universal-browser integration. Firefox and other browser adapters are planned later.
+Jarvis Core independently authorizes operations using same-turn user speech. Browser content is never an action authority. Control is limited to tab navigation/switch/close, back/forward/reload, and verified media play/pause/mute/volume for this candidate; the wider V1 bridge is not exposed. Firefox and other browser adapters are a later milestone.

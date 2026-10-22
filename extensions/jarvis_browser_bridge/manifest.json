@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Jarvis Browser Bridge",
-  "version": "0.1.5",
+  "version": "0.1.5.8",
   "minimum_chrome_version": "116",
   "description": "Opt-in local browser extension for Jarvis Core v2. Browser actions require independently verified spoken authorization.",
   "permissions": [

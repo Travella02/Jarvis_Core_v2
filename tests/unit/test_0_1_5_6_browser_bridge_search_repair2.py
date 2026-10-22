@@ -11,7 +11,7 @@ class FakeConnectedExtension:
         self.tabs=[{'id':7,'title':'YouTube','url':'https://www.youtube.com/',
                     'window_id':2,'active':True}]
         self.operations=[]
-    def status(self):return {'connected':True}
+    def status(self):return {'connected':True,'capabilities':['navigate_target_guarded']}
     async def execute(self, name, args=None, **kwargs):
         args=args or {};self.operations.append((name,dict(args)))
         if name=='tabs_list':

@@ -6,7 +6,7 @@ const RECONNECT_MAX_MS = 5000;
 const KEEPALIVE_MS = 20000;
 const RECONNECT_ALARM = "jarvis-browser-bridge-reconnect";
 const BRIDGE_CAPABILITIES = Object.freeze([
-  "tabs_list", "navigate", "search", "tab_new", "tab_switch", "tab_close", "back", "forward", "refresh", "wait",
+  "tabs_list", "navigate", "navigate_target_guarded", "search", "tab_new", "tab_switch", "tab_close", "back", "forward", "refresh", "wait",
   "click", "type", "select", "scroll",
   "media_control", "media_volume", "media_mute", "media_seek", "media_rate", "media_fullscreen",
   "media_fullscreen_prepare_native", "media_fullscreen_state_native"
@@ -336,12 +336,33 @@ async function executeCommand(operation, args) {
   if (operation === "snapshot") return await snapshotCommand();
   if (operation === "navigate") {
     const url = String(args.url || "").trim();
-    if (!/^https?:\/\//i.test(url)) throw new Error("navigate_requires_http_url");
-    const tab = await activeTab();
-    if (!tab.id) throw new Error("no_active_tab");
-    await chrome.tabs.update(tab.id, {url});
-    if (args.wait_for_load !== false) await waitForTabSettled(tab.id);
-    return {ok: true, summary: `Opened ${url}.`, active_tab: await activeTab()};
+    let parsed;
+    try { parsed = new URL(url); } catch (_) { throw new Error("navigate_invalid_url"); }
+    if (parsed.protocol !== "https:") throw new Error("navigate_requires_https_url");
+    const tabId = Number(args.tab_id || 0);
+    const expectedHost = String(args.expected_host || "").toLowerCase();
+    // v2 Core may ONLY navigate a specific live tab whose current hostname
+    // still matches the independently authorized site. A focus change cannot
+    // silently redirect an unrelated tab between switch and navigate.
+    if (!Number.isSafeInteger(tabId) || tabId < 1 || !expectedHost ||
+        !/^[a-z0-9.-]+$/.test(expectedHost)) throw new Error("navigate_requires_verified_tab");
+    const normalizedHost = (host) => String(host || "").toLowerCase().replace(/^www\./, "");
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab || !urlSupported(tab.url) ||
+        normalizedHost(new URL(tab.url).hostname) !== expectedHost ||
+        normalizedHost(parsed.hostname) !== expectedHost) {
+      throw new Error("navigate_target_changed");
+    }
+    await chrome.tabs.update(tabId, {url});
+    try { await chrome.windows.update(tab.windowId, {focused: true}); } catch (_) {}
+    await chrome.tabs.update(tabId, {active: true});
+    if (args.wait_for_load !== false) await waitForTabSettled(tabId);
+    const updated = await chrome.tabs.get(tabId);
+    return {
+      ok: true, summary: "Navigated the verified tab.",
+      active_tab: {id: tabId, title: String(updated.title || ""),
+        url: String(updated.url || ""), window_id: Number(updated.windowId || 0)}
+    };
   }
   if (operation === "search") {
     const query = String(args.query || "").trim();
