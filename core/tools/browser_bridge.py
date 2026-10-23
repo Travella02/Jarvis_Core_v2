@@ -11,7 +11,7 @@ from fastapi import WebSocket
 
 # Ported from read-only v1 0.3.6 BrowserBridge. V2 Core alone owns tool authority.
 # Keep executor operations strictly bounded; never expose a general page-action API.
-_BRIDGE_ALLOWED = frozenset({"tabs_list", "tab_switch", "navigate", "tab_close", "back", "forward", "refresh", "media_control", "media_volume", "media_mute"})
+_BRIDGE_ALLOWED = frozenset({"tabs_list", "snapshot", "tab_switch", "navigate", "tab_close", "back", "forward", "refresh", "media_control", "media_volume", "media_mute", "media_fullscreen"})
 
 
 def _utc_iso() -> str:

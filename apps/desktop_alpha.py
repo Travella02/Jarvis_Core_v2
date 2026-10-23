@@ -498,7 +498,12 @@ class DesktopRealtimeSession:
                 if self._advanced_browser:
                     action_tool['description'] += (' Also control a specified open tab by domain: select_tab or close_named_tab. '
                         'For a currently visible HTML5 video in the connected browser use site=current and intent=play,pause,mute,unmute,volume. '
-                        'For volume include an integer percentage value explicitly spoken by the user. ' +
+                        'For volume include an integer percentage value explicitly spoken by the user. '
+                        'For a visible YouTube search results page, a request such as play the first video, '
+                        'open second result, or watch the third one uses intent=select_result, site=current, '
+                        'value=the ordinal number explicitly said (1-10). This navigates the existing search tab '
+                        'to a YouTube watch page; do not claim playback unless verified. '
+                        'For fullscreen or exit fullscreen video use site=current and intent=fullscreen/exit_fullscreen. ' +
                         ('The installed extension can reuse a matching tab in the user browser; otherwise open/search use the operating system default browser. ' if self._browser_bridge_enabled else
                          'Open and search use the system default browser, which you cannot control with tab/media tools. Only if the user explicitly asks to open a site in Jarvis managed browser, use open_managed. ') + 
                         'For a request to RETURN or SWITCH BACK to an earlier website AND SEARCH it, '
@@ -510,9 +515,9 @@ class DesktopRealtimeSession:
                 action_tool['parameters']={'type':'object','properties':{
                     'site':{'type':'string','description':'Public website domain without protocol, path or query, or current for tab operations'},
                     'intent':{'type':'string','enum':['open','search','back','forward','reload','close_tab','next_tab'] +
-                        (['select_tab','close_named_tab','play','pause','mute','unmute','volume'] + ([] if self._browser_bridge_enabled else ['open_managed']) if self._advanced_browser else [])},
+                        (['select_tab','close_named_tab','play','pause','mute','unmute','volume','select_result','fullscreen','exit_fullscreen'] + ([] if self._browser_bridge_enabled else ['open_managed']) if self._advanced_browser else [])},
                     'query':{'type':'string','description':'Short search terms for search; omit for other intents'},
-                    **({'value':{'type':'integer','description':'Explicitly requested volume percentage 0-100 (volume only)'}} if self._advanced_browser else {}),
+                    **({'value':{'type':'integer','description':'Explicit volume percentage (0-100) or explicitly spoken search-result ordinal (1-10). Only for volume or select_result.'}} if self._advanced_browser else {}),
                 },'required':['site','intent'],'additionalProperties':False}
                 policy['instructions']=str(policy['instructions']).replace(
                     'For an immediate request to open YouTube or find a video there, call browser_action. '

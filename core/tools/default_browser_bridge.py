@@ -8,7 +8,7 @@ browser page merely because its title looks similar.
 """
 from __future__ import annotations
 
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 from typing import Callable
 
 from core.tools.browser_bridge import BrowserBridge, BrowserBridgeError
@@ -149,6 +149,95 @@ class DefaultBrowserBridgeAdapter:
         except Exception:
             return False
 
+    async def select_result(self, index: int) -> bool:
+        """Open a grounded YouTube search result in its existing tab.
+
+        No model-provided URL or selector crosses this boundary. The connected
+        extension supplies a fresh page snapshot; Core selects a deduplicated,
+        validated watch link and uses the already guarded same-host navigation.
+        """
+        self.last_navigation_verified = False
+        self.last_navigation_route = 'result_not_verified'
+        self.last_media_verified = False
+        if type(index) is not int or not 1 <= index <= 10 or not self._refresh_instance():
+            return False
+        if not {'snapshot', 'navigate_target_guarded'}.issubset(
+                set(self.bridge.status().get('capabilities', ()))):
+            self.last_navigation_route = 'result_bridge_outdated'
+            return False
+        try:
+            before = await self._snapshot()
+            active = before.get('active_tab') or {}
+            tab_id = self._tab_id(active)
+            old_url = str(active.get('url') or '')
+            parsed = urlsplit(old_url)
+            if not (tab_id and self._host(old_url) == 'youtube.com'
+                    and parsed.scheme == 'https' and parsed.path == '/results'
+                    and parse_qs(parsed.query).get('search_query')):
+                self.last_navigation_route = 'result_not_search_page'
+                return False
+            snapshot = await self.bridge.execute('snapshot', {}, timeout_seconds=4)
+            page = snapshot.get('page') or {}
+            observed_tab = snapshot.get('active_tab') or {}
+            # Snapshot is active-tab-only; never confuse a focus switch with
+            # authorization for a different tab.
+            if (self._tab_id(observed_tab) != tab_id or
+                    str(page.get('url') or '') != old_url or
+                    not page.get('supported')):
+                self.last_navigation_route = 'result_tab_changed'
+                return False
+            videos = []
+            seen = set()
+            for element in page.get('elements', [])[:160]:
+                if not isinstance(element, dict) or element.get('disabled') or element.get('risk') != 'normal':
+                    continue
+                target = str(element.get('href') or '')
+                parts = urlsplit(target)
+                if parts.scheme != 'https' or self._host(target) != 'youtube.com' or parts.path != '/watch':
+                    continue
+                ids = parse_qs(parts.query).get('v', [])
+                video_id = ids[0] if len(ids) == 1 else ''
+                if not (len(video_id) == 11 and video_id.isascii() and
+                        all(ch.isalnum() or ch in '-_' for ch in video_id)):
+                    continue
+                if video_id not in seen:
+                    seen.add(video_id)
+                    videos.append('https://www.youtube.com/watch?v=' + video_id)
+            if not 1 <= index <= len(videos):
+                self.last_navigation_route = 'result_index_unavailable'
+                return False
+            target_url = videos[index - 1]
+            await self.bridge.execute('navigate', {
+                'url':target_url, 'tab_id':tab_id, 'expected_host':'youtube.com',
+                'wait_for_load':False,
+            },timeout_seconds=4)
+            after = await self._snapshot()
+            target = next((tab for tab in after.get('tabs', []) if self._tab_id(tab) == tab_id), None)
+            observed = str(target.get('url') or '') if target else ''
+            watched = urlsplit(observed)
+            # YouTube may add playback/tracking query parameters while the
+            # requested video ID stays the same. Verify that ID, not byte-
+            # equality of the whole URL, and never accept another video.
+            same_video = (watched.scheme == 'https' and
+                          self._host(observed) == 'youtube.com' and
+                          watched.path == '/watch' and
+                          parse_qs(watched.query).get('v') == [target_url.rsplit('=', 1)[-1]])
+            if not (target and same_video):
+                self.last_navigation_route = 'result_navigation_unverified'
+                return False
+            self.last_navigation_verified = True
+            self.last_navigation_route = 'selected_video_same_tab'
+            self._affinity['youtube.com'] = tab_id
+            # Opening a YouTube watch page is verified, but playback is not
+            # automatically asserted. Modern browsers may block autoplay.
+            return True
+        except (BrowserBridgeError, ValueError, TypeError, KeyError):
+            self.last_navigation_route = 'result_bridge_failed'
+            return False
+        except Exception:
+            self.last_navigation_route = 'result_bridge_failed'
+            return False
+
     async def _matching_tab(self, host: str) -> dict | None:
         self._refresh_instance()
         state = await self._snapshot()
@@ -206,6 +295,8 @@ class DefaultBrowserBridgeAdapter:
             command = 'media_mute'; args = {'muted':operation == 'mute'}
         elif operation == 'volume' and type(value) is int and 0 <= value <= 100:
             command = 'media_volume'; args = {'percent':value}
+        elif operation in ('fullscreen', 'exit_fullscreen'):
+            command = 'media_fullscreen'; args = {'action': 'enter' if operation == 'fullscreen' else 'exit'}
         else:return False
         response = await self.bridge.execute(command,args,timeout_seconds=6)
         return response.get('verified') is True

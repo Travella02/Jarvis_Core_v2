@@ -22,9 +22,10 @@ from core.tools.semantic_browser import _NEGATED, _NON_REQUEST, _SECOND_ACTION
 
 CAPABILITY = 'desktop_browser'
 ALLOWED = frozenset(('open', 'open_managed', 'search', 'back', 'forward', 'reload', 'close_tab', 'next_tab',
-                     'select_tab', 'close_named_tab', 'play', 'pause', 'mute', 'unmute', 'volume'))
+                     'select_tab', 'close_named_tab', 'play', 'pause', 'mute', 'unmute', 'volume',
+                     'select_result', 'fullscreen', 'exit_fullscreen'))
 NAMED_TABS = frozenset(('select_tab','close_named_tab'))
-MEDIA = frozenset(('play','pause','mute','unmute','volume'))
+MEDIA = frozenset(('play','pause','mute','unmute','volume','fullscreen','exit_fullscreen'))
 _DOMAIN = re.compile(r'^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$')
 _ACTIONS = {
     'open': re.compile(r'\b(?:open|launch|visit|navigate|browse|pull\s+up|bring\s+up|go\s+to|take\s+me\s+to|show\s+me|load|head\s+to)\b', re.I),
@@ -42,6 +43,9 @@ _ACTIONS = {
     'mute': re.compile(r'\bmute\b|\bturn\s+(?:the\s+)?sound\s+off\b', re.I),
     'unmute': re.compile(r'\bunmute\b|\bturn\s+(?:the\s+)?sound\s+on\b', re.I),
     'volume': re.compile(r'\b(?:volume|sound)\b', re.I),
+    'select_result': re.compile(r'\b(?:play|open|select|choose|click|watch|start|show)\b', re.I),
+    'fullscreen': re.compile(r'\b(?:full\s?screen|maximize)\b', re.I),
+    'exit_fullscreen': re.compile(r'\b(?:exit|leave|close|stop)\b.*\bfull\s?screen\b|\b(?:minimize|unfullscreen)\b', re.I),
 }
 _BLOCKED_TLDS = {'local', 'internal', 'localhost', 'onion', 'test', 'invalid'}
 _COMPLEX_SUFFIXES = {'co.uk', 'org.uk', 'com.au', 'co.nz', 'com.br', 'co.jp'}
@@ -126,8 +130,27 @@ def trusted_intent(text: object, operation: str, host: str | None, value: object
         # tab is only allowed when the user explicitly asks for that surface.
         if not re.search(r"\b(?:in|using|with|through)\s+(?:(?:the|a)\s+)?(?:(?:your|jarvis(?:'s)?)\s+)?(?:managed|controlled|jarvis)\s+browser\b|\b(?:in|using|with|through)\s+(?:your|jarvis(?:'s)?)\s+browser\b", text, re.I):
             return False
+    if operation == 'select_result':
+        if host != 'current' or type(value) is not int or not 1 <= value <= 10: return False
+        # Reject conflicting/multiple ordinals and model-invented indices.
+        # The currently heard utterance, not previous page text, is authority.
+        ordinal_words = {1:('first','1st'),2:('second','2nd'),3:('third','3rd'),
+                         4:('fourth','4th'),5:('fifth','5th'),6:('sixth','6th'),
+                         7:('seventh','7th'),8:('eighth','8th'),9:('ninth','9th'),
+                         10:('tenth','10th')}
+        spoken = set()
+        tokens = re.findall(r'(?<!\w)(?:10|[1-9])(?!\w)', text)
+        spoken.update(int(token) for token in tokens)
+        for number, words in ordinal_words.items():
+            if any(re.search(r'(?<!\w)'+re.escape(word)+r'(?!\w)',text,re.I) for word in words):
+                spoken.add(number)
+        if spoken != {value} or re.search(r'\b(?:and|then)\b',text,re.I): return False
+        if not re.search(r'\b(?:video|result|one|it|that|this|clip|episode)\b',text,re.I): return False
+        return True
     if operation in MEDIA:
         if host != 'current' or re.search(r'\b(?:and|then)\b',text,re.I): return False
+        if operation in ('fullscreen','exit_fullscreen'):
+            return bool(re.search(r'\bfull\s?screen\b|\bunfullscreen\b',text,re.I))
         # A media intent must be about playback, not a request to operate a named site.
         if not (re.search(r'\b(?:video|player|audio|sound|volume|music|playback|it|this|that)\b',text,re.I)
                 or text.strip().lower().rstrip(' .!?') in {'play','pause','mute','unmute'}):
@@ -217,6 +240,7 @@ class BrowserOperations(Protocol):
     async def select_tab(self, host: str) -> bool: ...
     async def close_named_tab(self, host: str) -> bool: ...
     async def media(self, operation: str, value: int | None=None) -> bool: ...
+    async def select_result(self, index: int) -> bool: ...
     async def close(self) -> None: ...
 
 
@@ -393,17 +417,20 @@ class ManagedBrowserGateway:
         def outcome(status,code=None,message=None,output=None):
             return ToolResult(request.trace,request.tool_name,request.operation,status,output or {},
                               provider_call_id=request.provider_call_id,error_code=code,error_message=message)
-        if request.tool_name!=CAPABILITY or request.operation not in ALLOWED or (self.bridge_mode and request.operation=='open_managed') or (not self.advanced and request.operation in (MEDIA|NAMED_TABS|{'open_managed'})):
+        if request.tool_name!=CAPABILITY or request.operation not in ALLOWED or (self.bridge_mode and request.operation=='open_managed') or (not self.advanced and request.operation in (MEDIA|NAMED_TABS|{'open_managed','select_result'})):
             return outcome(ToolResultStatus.DENIED,'unknown_capability','That browser operation is not supported yet.')
         operation=request.operation
         arguments=dict(request.arguments)
-        expected={'site','query'} if operation=='search' else {'site','value'} if operation=='volume' else {'site'}
+        expected={'site','query'} if operation=='search' else {'site','value'} if operation in ('volume','select_result') else {'site'}
         if set(arguments)!=expected:return outcome(ToolResultStatus.DENIED,'invalid_arguments','Those browser parameters are not supported.')
         site=arguments['site']
         host=normalize_host(site) if operation in ({'open','open_managed','search'}|NAMED_TABS) else ('current' if site=='current' else None)
         if not host:return outcome(ToolResultStatus.DENIED,'unsafe_destination','I need a valid public website name to open.')
         query=arguments.get('query')
         value=arguments.get('value')
+        if operation=='select_result' and (type(value) is not int or not 1<=value<=10 or not self.bridge_mode):
+            return outcome(ToolResultStatus.DENIED,'invalid_result_selection',
+                           'I need a numbered result in a connected browser to select.')
         if operation=='volume' and (type(value) is not int or not 0<=value<=100):
             return outcome(ToolResultStatus.DENIED,'invalid_volume','Please give a volume from 0 to 100 percent.')
         if operation=='search' and (not isinstance(query,str) or not 2<=len(query.strip())<=160
@@ -438,13 +465,14 @@ class ManagedBrowserGateway:
                         # ordinary opens. The user chooses their system default.
                         return await asyncio.to_thread(self._launch_default, uri)
                     if operation in ('open','open_managed','search'):return await self.browser.navigate(uri)
+                    if operation=='select_result':return await self.browser.select_result(value)
                     if operation=='select_tab':return await self.browser.select_tab(host)
                     if operation=='close_named_tab':return await self.browser.close_named_tab(host)
                     if operation in MEDIA:return await self.browser.media(operation,value)
                     return await getattr(self.browser,{'back':'go_back','forward':'go_forward',
                          'reload':'reload','close_tab':'close_tab','next_tab':'next_tab'}[operation])()
                 success=await asyncio.wait_for(act(),timeout=7.0)
-                if self.bridge_mode and operation in ('open', 'search'):
+                if self.bridge_mode and operation in ('open', 'search', 'select_result'):
                     # No transcript, query text, URL or browser-history content
                     # in diagnostics: only the navigation route and connection.
                     route=getattr(self.browser,'last_navigation_route','unknown')
@@ -454,9 +482,10 @@ class ManagedBrowserGateway:
                     'operation':operation,'browser_navigation_committed':success if (operation in ('open','search') and not self.advanced) or operation == 'open_managed' else False,
                     'system_browser_handoff_accepted':bool(success and self.advanced and operation in ('open','search') and (not self.bridge_mode or getattr(self.browser,'last_system_handoff',False))),
                     'page_loaded_verified':bool(success and self.bridge_mode and getattr(self.browser,'last_navigation_verified',False)),'url':uri if uri else None,
-                    'user_message':('I opened that page in your browser.' if self.bridge_mode and getattr(self.browser,'last_navigation_verified',False) else 'I sent the website to your default browser.') if self.advanced and operation in ('open','search') else 'I completed the browser action.'})
+                    'user_message':('I opened the selected video in your existing tab.' if operation=='select_result' else 'I completed that media control.' if operation in MEDIA else 'I opened that page in your browser.' if self.bridge_mode and getattr(self.browser,'last_navigation_verified',False) else 'I sent the website to your default browser.') if self.advanced and operation in ('open','search') else 'I completed the browser action.'})
                     if success else outcome(ToolResultStatus.FAILED,'not_available',
                                             ('The default browser did not accept that website request.' if self.advanced and operation in ('open','search')
+                                             else 'I could not find or verify that numbered video on the current YouTube search page.' if operation == 'select_result'
                                              else 'I need the Jarvis browser extension connected to control that video.' if self.bridge_mode and operation in MEDIA
                                              else 'I can only control video inside Jarvis managed browser right now.' if operation in MEDIA
                                              else 'I need the Jarvis browser extension connected to control that tab.' if self.bridge_mode and (operation in NAMED_TABS or operation in ('close_tab','next_tab','back','forward','reload'))

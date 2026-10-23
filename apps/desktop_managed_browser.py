@@ -56,17 +56,17 @@ class ManagedDesktopBrowserSession:
                              'query': arguments['query']}
                 intent = 'search'
         if (intent not in ALLOWED or not isinstance(intent,str) or
-                (not self.advanced and intent in {'select_tab','close_named_tab','play','pause','mute','unmute','volume','open_managed'}) or
+                (not self.advanced and intent in {'select_tab','close_named_tab','play','pause','mute','unmute','volume','select_result','fullscreen','exit_fullscreen','open_managed'}) or
                 (self.bridge_mode and intent == 'open_managed') or
                 not isinstance(arguments.get('site'),str)):
             return ManagedBrowserOutcome('failed','I do not support that browser operation yet.','unknown_operation')
-        expected={'site','intent','query'} if intent=='search' else {'site','intent','value'} if intent=='volume' else {'site','intent'}
+        expected={'site','intent','query'} if intent=='search' else {'site','intent','value'} if intent in ('volume','select_result') else {'site','intent'}
         cleaned={k:v for k,v in arguments.items() if not (k=='query' and intent!='search' and v in ('',None))}
         if set(cleaned)!=expected:
             return ManagedBrowserOutcome('failed','Those browser parameters are not authorized.','invalid_arguments')
         args={'site':cleaned['site']}
         if intent=='search':args['query']=cleaned['query']
-        if intent=='volume':args['value']=cleaned['value']
+        if intent in ('volume','select_result'):args['value']=cleaned['value']
         trace=CorrelationContext.create()
         request=ToolRequest(trace,'desktop_browser',intent,args,idempotency_key=f'local-turn-{turn}')
         result=await self.gateway.execute(request,evidence=ConfirmedUserAction(

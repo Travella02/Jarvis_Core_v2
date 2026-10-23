@@ -121,7 +121,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 class SecurityContracts(unittest.IsolatedAsyncioTestCase):
     async def test_bridge_does_not_expose_generic_script_or_typing(self):
         bridge=BrowserBridge()
-        for op in ('click','type','select','scroll','tab_new','execute_script','eval','download','snapshot'):
+        for op in ('click','type','select','scroll','tab_new','execute_script','eval','download'):
             with self.assertRaises(ValueError):
                 await bridge.execute(op,{})
 
