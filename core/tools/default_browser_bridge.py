@@ -8,6 +8,7 @@ browser page merely because its title looks similar.
 """
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import urlsplit, parse_qs
 from typing import Callable
 
@@ -84,6 +85,29 @@ class DefaultBrowserBridgeAdapter:
         # Only a previously verified tab in the *current* bridge instance is
         # eligible. No arbitrary first-tab choice when duplicates exist.
         return next((tab for tab in matches if self._tab_id(tab) == remembered), None)
+
+    async def verify_active_site(self, host: str) -> bool:
+        """Independently ground a site-omitting video search in the active tab.
+
+        No arbitrary background tab or stale affinity counts as context. The
+        connected extension must report the same HTTPS tab as active and in
+        its current tabs list, with a guarded-navigation capability.
+        """
+        if host != 'youtube.com' or not self._refresh_instance():
+            return False
+        if 'navigate_target_guarded' not in self.bridge.status().get('capabilities', ()):
+            return False
+        try:
+            state = await self._snapshot()
+            active = state.get('active_tab') or {}
+            tab_id = self._tab_id(active)
+            if not tab_id or self._host(active.get('url')) != host or urlsplit(str(active.get('url') or '')).scheme != 'https':
+                return False
+            return any(self._tab_id(tab) == tab_id and
+                       str(tab.get('url') or '') == str(active.get('url') or '')
+                       for tab in state.get('tabs', ()) if isinstance(tab, dict))
+        except Exception:
+            return False
 
     async def navigate(self, url: str) -> bool:
         self.last_navigation_verified = False
@@ -211,18 +235,27 @@ class DefaultBrowserBridgeAdapter:
                 'url':target_url, 'tab_id':tab_id, 'expected_host':'youtube.com',
                 'wait_for_load':False,
             },timeout_seconds=4)
-            after = await self._snapshot()
-            target = next((tab for tab in after.get('tabs', []) if self._tab_id(tab) == tab_id), None)
-            observed = str(target.get('url') or '') if target else ''
-            watched = urlsplit(observed)
-            # YouTube may add playback/tracking query parameters while the
-            # requested video ID stays the same. Verify that ID, not byte-
-            # equality of the whole URL, and never accept another video.
-            same_video = (watched.scheme == 'https' and
-                          self._host(observed) == 'youtube.com' and
-                          watched.path == '/watch' and
-                          parse_qs(watched.query).get('v') == [target_url.rsplit('=', 1)[-1]])
-            if not (target and same_video):
+            # chrome.tabs.update may return before Chrome publishes the new URL
+            # to tabs_list. Verify the SAME tab with a bounded read-only poll;
+            # never navigate twice or accept a mere command acknowledgement.
+            # Slow YouTube navigation must not become a false reported failure.
+            same_video = False
+            for delay in (0, 0.15, 0.25, 0.4, 0.6, 0.9):
+                if delay:
+                    await asyncio.sleep(delay)
+                after = await self._snapshot()
+                target = next((tab for tab in after.get('tabs', []) if self._tab_id(tab) == tab_id), None)
+                observed = str(target.get('url') or '') if target else ''
+                watched = urlsplit(observed)
+                # YouTube can add tracking parameters; the actual video ID,
+                # HTTPS host, path and original tab identity must match.
+                same_video = bool(target and watched.scheme == 'https' and
+                                  self._host(observed) == 'youtube.com' and
+                                  watched.path == '/watch' and
+                                  parse_qs(watched.query).get('v') == [target_url.rsplit('=', 1)[-1]])
+                if same_video:
+                    break
+            if not same_video:
                 self.last_navigation_route = 'result_navigation_unverified'
                 return False
             self.last_navigation_verified = True

@@ -26,7 +26,10 @@ _SITE = re.compile(r'(?<![\w])(?:youtube(?:\.com)?|you[ -]?tube)(?![\w])', re.I)
 _ACTION = re.compile(r'\b(?:open|launch|visit|navigate|browse|pull\s+up|pulling\s+up|bring\s+up|bringing\s+up|go\s+to|take\s+me\s+to|show\s+me|head\s+(?:over\s+)?to|bring\s+me\s+to|load|hop\s+(?:on|over)\s+to|find|search|look\s+up)\b', re.I)
 _SEARCH = re.compile(r'\b(?:find|search|look\s+up|video|clip|tutorial)\b', re.I)
 _NEGATED = re.compile(r"\b(?:don['’]?t|do\s+not|never|not\s+to|no\s+need\s+to|stop|avoid|without|refrain\s+from|wouldn['’]?t|shouldn['’]?t|cancel)\b", re.I)
-_NON_REQUEST = re.compile(r'(?:^\s*(?:how\s+(?:do|to|would|can)|why\s+(?:do|would|did|should))\b|\b(?:explain|teach|describe)\s+(?:me\s+)?how\s+to\b|\b(?:what\s+if|hypothetic(?:al|ally)|pretend|imagine|someone\s+said|somebody\s+said|they\s+said|quoted?|example\s+of|definition\s+of|meaning\s+of|remind\s+me\s+to|later|tomorrow|next\s+week|if\s+(?:you|i|we|it)|unless|after\s+i|when\s+i)\b)', re.I)
+# Core-side safety veto, not a command router: a report of someone's contemplated
+# action isn't permission to execute the action, even if it quotes an imperative.
+# Mini remains responsible for natural-language interpretation in conversation.
+_NON_REQUEST = re.compile(r'(?:^\s*(?:how\s+(?:do|to|would|can)|why\s+(?:do|would|did|should))\b|\b(?:explain|teach|describe)\s+(?:me\s+)?how\s+to\b|\b(?:what\s+if|hypothetic(?:al|ally)|pretend|imagine|someone\s+said|somebody\s+said|they\s+said|quoted?|example\s+of|definition\s+of|meaning\s+of|remind\s+me\s+to|later|tomorrow|next\s+week|if\s+(?:you|i|we|it)|unless|after\s+i|when\s+i)\b|\b(?:i\s+(?:am|was|have\s+been)|i[\x27\u2019]?(?:m|ve))\s+(?:just\s+)?(?:thinking|considering|wondering|debating|contemplating|planning)\s+(?:about|of|whether|if|to)\b)', re.I)
 _SECOND_ACTION = re.compile(r'\b(?:send\s+(?:an?\s+)?(?:email|message)|delete\s+(?:my|the|a)\s+\w+|buy\s+\w+|run\s+(?:my|the)\s+(?:code|script)|download\s+\w+|post\s+(?:it|this)|log\s+in|sign\s+in)\b', re.I)
 _OTHER_SITE = re.compile(r'\b(?:google|gmail|facebook|reddit|netflix|tiktok|spotify|instagram|twitter)\b', re.I)
 _URL = re.compile(r'(?:https?://|www\.)', re.I)

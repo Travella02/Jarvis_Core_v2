@@ -103,10 +103,24 @@ def _phonetic_search_evidence(text: str, host: str | None, query: object) -> boo
     return False
 
 
-def trusted_intent(text: object, operation: str, host: str | None, value: object=None, query: object=None) -> bool:
+def _normalize_joined_browser_stt(text: str) -> str:
+    """Restore a missing STT word boundary only for a bounded browser verb + site.
+
+    This is transcription cleanup *after* Mini chose an operation, never a
+    keyword-driven router or authorization bypass. All independent Core intent,
+    domain, compound, negation and query guards still run after normalization.
+    """
+    return re.sub(
+        r'(?<![a-z0-9])(?:open|search|find|launch|visit|show)(?:youtube|google)(?![a-z0-9])',
+        lambda m: re.sub(r'(?i)(youtube|google)$', r' \1', m.group(0)),
+        text, flags=re.I,
+    )
+
+
+def trusted_intent(text: object, operation: str, host: str | None, value: object=None, query: object=None, *, active_site_verified: bool=False) -> bool:
     if not isinstance(text,str) or not (2 <= len(text) <= 2000) or operation not in ALLOWED:
         return False
-    text=' '.join(text.split())
+    text=_normalize_joined_browser_stt(' '.join(text.split()))
     safe=re.sub(r'\bappreciate\s+it\s+if\s+you\s+(?:could|would|can)\b',
                 'appreciate it please', text, flags=re.I)
     if operation=='pause':
@@ -182,6 +196,19 @@ def trusted_intent(text: object, operation: str, host: str | None, value: object
             return True
         if host=='youtube.com' and re.search(r'\b(?:youtube|you\s+tube)\b',text,re.I):
             return True
+        # Omitted-site follow-ups are allowed only with independently verified
+        # YouTube *active-tab* context, explicit video-search language, and a
+        # query composed of words actually spoken this turn. A model proposal,
+        # past conversation text, or a merely open background tab is not proof.
+        # Other site mentions and multi-action requests still fail closed.
+        if (host=='youtube.com' and active_site_verified and
+                re.search(r'\b(?:video|videos|clip|clips)\b',text,re.I) and
+                not re.search(r'\b(?:google|bing|vimeo|dailymotion|tiktok|reddit|instagram|facebook)\b',text,re.I) and
+                isinstance(query,str)):
+            topic_words=re.findall(r'[a-z0-9]+', query.casefold())
+            heard_words=set(re.findall(r'[a-z0-9]+', text.casefold()))
+            if topic_words and len(topic_words)<=12 and all(word in heard_words for word in topic_words):
+                return True
     # If a fully qualified host was spoken, require an EXACT host match.
     # Otherwise allow a model-proposed bare *registered* domain only if its
     # distinctive domain label was actually uttered by the user.
@@ -437,8 +464,23 @@ class ManagedBrowserGateway:
                                     or any(c in query for c in '\r\n\0') or host not in ('youtube.com','google.com')):
             return outcome(ToolResultStatus.DENIED,'unsupported_search','I can search YouTube or Google in this browser test.')
         if (evidence is None or not evidence.confirmed or not evidence.local_desktop or
-                request.trace.turn_id!=evidence.turn_id or not request.trace.turn_id or
-                not trusted_intent(evidence.transcript,operation,host,value,query)):
+                request.trace.turn_id!=evidence.turn_id or not request.trace.turn_id):
+            return outcome(ToolResultStatus.DENIED,'unverified_user_intent',
+                           'I could not verify that immediate browser request, so I did not act.')
+        authorized=trusted_intent(evidence.transcript,operation,host,value,query)
+        if not authorized and operation=='search' and host=='youtube.com' and self.bridge_mode:
+            # Only a *fresh* active-tab check may resolve an omitted website.
+            # No alternate routing, site guessing, or OS fallback is authorized.
+            check=getattr(self.browser,'verify_active_site',None)
+            if callable(check):
+                try:
+                    in_context=await check(host)
+                except Exception:
+                    in_context=False
+                if in_context is True:
+                    authorized=trusted_intent(evidence.transcript,operation,host,value,query,
+                                              active_site_verified=True)
+        if not authorized:
             return outcome(ToolResultStatus.DENIED,'unverified_user_intent',
                            'I could not verify that immediate browser request, so I did not act.')
         replay=(evidence.turn_id,request.idempotency_key or request.trace.request_id)
@@ -471,7 +513,7 @@ class ManagedBrowserGateway:
                     if operation in MEDIA:return await self.browser.media(operation,value)
                     return await getattr(self.browser,{'back':'go_back','forward':'go_forward',
                          'reload':'reload','close_tab':'close_tab','next_tab':'next_tab'}[operation])()
-                success=await asyncio.wait_for(act(),timeout=7.0)
+                success=await asyncio.wait_for(act(),timeout=12.0 if operation=='select_result' else 7.0)
                 if self.bridge_mode and operation in ('open', 'search', 'select_result'):
                     # No transcript, query text, URL or browser-history content
                     # in diagnostics: only the navigation route and connection.
@@ -485,6 +527,7 @@ class ManagedBrowserGateway:
                     'user_message':('I opened the selected video in your existing tab.' if operation=='select_result' else 'I completed that media control.' if operation in MEDIA else 'I opened that page in your browser.' if self.bridge_mode and getattr(self.browser,'last_navigation_verified',False) else 'I sent the website to your default browser.') if self.advanced and operation in ('open','search') else 'I completed the browser action.'})
                     if success else outcome(ToolResultStatus.FAILED,'not_available',
                                             ('The default browser did not accept that website request.' if self.advanced and operation in ('open','search')
+                                             else 'I sent the video selection to that tab, but could not confirm where it landed.' if operation == 'select_result' and getattr(self.browser,'last_navigation_route','') == 'result_navigation_unverified'
                                              else 'I could not find or verify that numbered video on the current YouTube search page.' if operation == 'select_result'
                                              else 'I need the Jarvis browser extension connected to control that video.' if self.bridge_mode and operation in MEDIA
                                              else 'I can only control video inside Jarvis managed browser right now.' if operation in MEDIA

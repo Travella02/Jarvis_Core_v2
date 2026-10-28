@@ -625,14 +625,15 @@ class DesktopRealtimeSession:
                             print(f"[Jarvis Action] turn={action_turn} | status=failed | code=unexpected_error | authority=core", flush=True)
                             if session is not None and session.active_turn == action_turn:
                                 await relay.notify_desktop({'kind':'core_tool_result','turn':action_turn,
-                                    'status':'failed','text':'I could not complete that browser action.'})
+                                    'status':'failed','code':'unexpected_error',
+                                    'text':'I could not complete that browser action.'})
                             return
                         if result is not None and (not self._managed_browser or
                                 (session is not None and session.active_turn == action_turn)):
                             print(f"[Jarvis Action] turn={action_turn} | tool=desktop_browser "
                                   f"| status={result.status} | code={result.code} | authority=core", flush=True)
                             await relay.notify_desktop({'kind':'core_tool_result', 'turn':action_turn,
-                                'status':result.status, 'text':result.text})
+                                'status':result.status, 'code':result.code, 'text':result.text})
 
                     if self._managed_browser:
                         self._browser_action_task = asyncio.create_task(
@@ -649,7 +650,7 @@ class DesktopRealtimeSession:
                             print(f"[Jarvis Action] turn={turn} | tool=desktop_browser "
                                   f"| status={result.status} | code={result.code} | authority=core", flush=True)
                             await relay.notify_desktop({'kind':'core_tool_result', 'turn':turn,
-                                'status':result.status, 'text':result.text})
+                                'status':result.status, 'code':result.code, 'text':result.text})
                     continue
                 if kind == "desktop_action_feedback":
                     # UI-only acknowledgment. Never execute/retry an action from

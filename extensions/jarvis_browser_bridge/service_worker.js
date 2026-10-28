@@ -6,7 +6,7 @@ const RECONNECT_MAX_MS = 5000;
 const KEEPALIVE_MS = 20000;
 const RECONNECT_ALARM = "jarvis-browser-bridge-reconnect";
 const BRIDGE_CAPABILITIES = Object.freeze([
-  "tabs_list", "navigate", "navigate_target_guarded", "search", "tab_new", "tab_switch", "tab_close", "back", "forward", "refresh", "wait",
+  "tabs_list", "snapshot", "navigate", "navigate_target_guarded", "search", "tab_new", "tab_switch", "tab_close", "back", "forward", "refresh", "wait",
   "click", "type", "select", "scroll",
   "media_control", "media_volume", "media_mute", "media_seek", "media_rate", "media_fullscreen",
   "media_fullscreen_prepare_native", "media_fullscreen_state_native"

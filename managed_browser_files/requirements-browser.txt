@@ -1,3 +1,0 @@
-# Optional 0.1.5.4 managed-browser A/B mode only.
-# Normal Mini/Luna/YouTube-open modes do NOT require this dependency.
-playwright>=1.50,<2
