@@ -256,7 +256,10 @@ async function executeMediaOnBestTab(operation, args = {}) {
   // a different user tab. If that tab is still open but no longer has usable
   // media, fail truthfully instead of restarting/altering media elsewhere.
   const preferredTab = preferredTabId > 0 ? tabs.find((tab) => Number(tab?.id || 0) === preferredTabId) : null;
-  const candidateTabs = preferredTab ? [preferredTab] : tabs;
+  // Scoped media requests must never fall back to another video or background tab.
+  const candidateTabs = preferredTabId > 0
+    ? (preferredTab && Number(active?.id || 0) === preferredTabId ? [preferredTab] : [])
+    : tabs;
   let lastError = null;
   for (const tab of candidateTabs) {
     // A freshly navigated SPA can expose its video a moment after the tab itself is
@@ -414,6 +417,9 @@ async function executeCommand(operation, args) {
   }
   if (["click", "type", "select", "scroll"].includes(operation)) {
     const tab = await activeTab();
+    if (operation === "scroll" && (Number(args.tab_id) !== tab.id || String(args.expected_url || "") !== String(tab.url || ""))) {
+      throw new Error("scroll_active_tab_changed");
+    }
     if (!tab.id) throw new Error("no_active_tab");
     if (!urlSupported(tab.url)) throw new Error("unsupported_page_scheme");
     const response = await sendContent(tab.id, operation, args);

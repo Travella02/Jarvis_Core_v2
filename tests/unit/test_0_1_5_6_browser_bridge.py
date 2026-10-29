@@ -121,8 +121,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 class SecurityContracts(unittest.IsolatedAsyncioTestCase):
     async def test_bridge_does_not_expose_generic_script_or_typing(self):
         bridge=BrowserBridge()
-        for op in ('click','type','select','scroll','tab_new','execute_script','eval','download'):
+        for op in ('click','type','select','tab_new','execute_script','eval','download'):
             with self.assertRaises(ValueError):
                 await bridge.execute(op,{})
+        # Scrolling is deliberately allowed at the low-level bridge now, but
+        # only the independent Core gateway authorizes actual user requests.
+        from core.tools.browser_bridge import BrowserBridgeDisconnected
+        with self.assertRaises(BrowserBridgeDisconnected):
+            await bridge.execute('scroll', {'direction':'down'})
 
 if __name__=='__main__':unittest.main()

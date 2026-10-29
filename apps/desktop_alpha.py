@@ -33,6 +33,7 @@ from core.tools.managed_browser import PlaywrightManagedBrowser
 from core.tools.browser_bridge import BrowserBridge
 from core.tools.default_browser_bridge import DefaultBrowserBridgeAdapter
 from core.runtime import IntelligenceProviderRouter, JarvisRuntime, RuntimeSettings
+from core.memory.history import ConversationHistoryStore
 from core.voice import LocalWakeListener, WakeSleepConfig
 from providers.stt.whisper_cpp import WhisperCppConfig, WhisperCppProvider
 from providers.vad import WhisperCppSileroVadDetector
@@ -345,6 +346,15 @@ class DesktopRealtimeSession:
         self._luna: DesktopLunaDelegator | None = None
         self._bench = RealtimeBenchmark(config.model)
         env = merged_environment(PROJECT_ROOT / '.env')
+        # 0.1.6.1: Core-owned archive; never let a history write grant tools or
+        # alter the Realtime audio gate. Each websocket connection is a session.
+        try:
+            self._history = ConversationHistoryStore.from_environment(PROJECT_ROOT, env)
+        except Exception as error:
+            # History is optional infrastructure, never a reason to break voice.
+            self._history = None
+            print(f'[Jarvis History] unavailable={type(error).__name__}', flush=True)
+        self._history_session_id: str | None = None
         self._actions_enabled = (config.overlap_probe and config.core_luna_probe and
             str(env.get('JARVIS_CORE_ACTIONS_PROBE','0')).lower() in {'1','true','yes','on'})
         self._semantic_actions = self._actions_enabled and str(env.get('JARVIS_SEMANTIC_ACTIONS_PROBE','0')).lower() in {'1','true','yes','on'}
@@ -368,6 +378,18 @@ class DesktopRealtimeSession:
     def call_id(self) -> str | None:
         return self._relay.call_id if self._relay is not None else None
 
+    async def _record_history(self, *, role: str, turn: int, source: str, text: str, status: str='reported') -> None:
+        store = self._history
+        session_id = self._history_session_id
+        if store is None or session_id is None or not isinstance(text, str) or not text.strip():
+            return
+        try:
+            await asyncio.to_thread(store.append, session_id, turn=turn, role=role,
+                                    source=source, text=text, status=status)
+        except Exception as error:
+            # Not a tool or routing failure: keep the active conversation alive.
+            print(f'[Jarvis History] write_failed={type(error).__name__}', flush=True)
+
     async def open_control(self, websocket: WebSocket) -> None:
         await websocket.accept()
         async with self._lock:
@@ -382,6 +404,15 @@ class DesktopRealtimeSession:
             )
             self._relay = relay
             self._bridge = bridge
+            if self._history is not None:
+                try:
+                    self._history_session_id = await asyncio.to_thread(
+                        self._history.start_session, device_id='desktop-alpha', model=self.config.model)
+                except Exception as error:
+                    # Fail OPEN for conversation, fail CLOSED for history writes;
+                    # an unavailable disk must never disable Jarvis's voice.
+                    self._history_session_id = None
+                    print(f'[Jarvis History] start_failed={type(error).__name__}', flush=True)
             if self._actions_enabled:
                 self._action_session = UnifiedDesktopActionSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=True, universal_apps=self._universal_apps) if self._app_actions else ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=self._browser_bridge_enabled) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
             if self.config.core_luna_probe:
@@ -500,10 +531,17 @@ class DesktopRealtimeSession:
                         'For a currently visible HTML5 video in the connected browser use site=current and intent=play,pause,mute,unmute,volume. '
                         'For volume include an integer percentage value explicitly spoken by the user. '
                         'For a visible YouTube search results page, a request such as play the first video, '
-                        'open second result, or watch the third one uses intent=select_result, site=current, '
+                        'open second result, watch the third one, or a contextual follow-up such as '
+                        'let us watch the first one uses intent=select_result, site=current, '
                         'value=the ordinal number explicitly said (1-10). This navigates the existing search tab '
                         'to a YouTube watch page; do not claim playback unless verified. '
-                        'For fullscreen or exit fullscreen video use site=current and intent=fullscreen/exit_fullscreen. ' +
+                        'For fullscreen or exit fullscreen video use site=current and intent=fullscreen/exit_fullscreen. '
+                        'To scroll an active webpage, use intent=scroll, site=current, and direction=up,down,top,bottom. '
+                        'Natural requests such as scroll down, go back up, jump to bottom, or show me more videos on an active YouTube results page are supported. '
+                        'For jump/scroll to the bottom use direction=bottom, NOT down; for top use direction=top. '
+                        '"Keep going" immediately after a completed scroll means continue in the same direction only if context is clear; otherwise ask. '
+                        '"Pause YouTube" or "pause the YouTube video" means intent=pause, site=current, not open YouTube. '
+                        'Choose one direction explicitly requested by the user, not guessed from context; never scroll for hypothetical or negated statements. ' +
                         ('The installed extension can reuse a matching tab in the user browser; otherwise open/search use the operating system default browser. ' if self._browser_bridge_enabled else
                          'Open and search use the system default browser, which you cannot control with tab/media tools. Only if the user explicitly asks to open a site in Jarvis managed browser, use open_managed. ') + 
                         'For a request to RETURN or SWITCH BACK to an earlier website AND SEARCH it, '
@@ -515,8 +553,9 @@ class DesktopRealtimeSession:
                 action_tool['parameters']={'type':'object','properties':{
                     'site':{'type':'string','description':'Public website domain without protocol, path or query, or current for tab operations'},
                     'intent':{'type':'string','enum':['open','search','back','forward','reload','close_tab','next_tab'] +
-                        (['select_tab','close_named_tab','play','pause','mute','unmute','volume','select_result','fullscreen','exit_fullscreen'] + ([] if self._browser_bridge_enabled else ['open_managed']) if self._advanced_browser else [])},
+                        (['select_tab','close_named_tab','play','pause','mute','unmute','volume','select_result','fullscreen','exit_fullscreen','scroll'] + ([] if self._browser_bridge_enabled else ['open_managed']) if self._advanced_browser else [])},
                     'query':{'type':'string','description':'Short search terms for search; omit for other intents'},
+                    **({'direction':{'type':'string','enum':['up','down','top','bottom'], 'description':'Required for scroll only; direction of the explicitly requested webpage movement.'}} if self._advanced_browser else {}),
                     **({'value':{'type':'integer','description':'Explicit volume percentage (0-100) or explicitly spoken search-result ordinal (1-10). Only for volume or select_result.'}} if self._advanced_browser else {}),
                 },'required':['site','intent'],'additionalProperties':False}
                 policy['instructions']=str(policy['instructions']).replace(
@@ -632,8 +671,11 @@ class DesktopRealtimeSession:
                                 (session is not None and session.active_turn == action_turn)):
                             print(f"[Jarvis Action] turn={action_turn} | tool=desktop_browser "
                                   f"| status={result.status} | code={result.code} | authority=core", flush=True)
+                            await self._record_history(role='action', turn=action_turn, source='desktop_browser',
+                                text=f'Browser action outcome: {result.code}', status=str(result.status))
                             await relay.notify_desktop({'kind':'core_tool_result', 'turn':action_turn,
-                                'status':result.status, 'code':result.code, 'text':result.text})
+                                'status':result.status, 'code':result.code, 'text':result.text,
+                                'action_context':result.action_context if result.status=='completed' else None})
 
                     if self._managed_browser:
                         self._browser_action_task = asyncio.create_task(
@@ -649,8 +691,11 @@ class DesktopRealtimeSession:
                         if result is not None:
                             print(f"[Jarvis Action] turn={turn} | tool=desktop_browser "
                                   f"| status={result.status} | code={result.code} | authority=core", flush=True)
+                            await self._record_history(role='action', turn=turn, source='desktop_browser',
+                                text=f'Browser action outcome: {result.code}', status=str(result.status))
                             await relay.notify_desktop({'kind':'core_tool_result', 'turn':turn,
-                                'status':result.status, 'code':result.code, 'text':result.text})
+                                'status':result.status, 'code':result.code, 'text':result.text,
+                                'action_context':result.action_context if result.status=='completed' else None})
                     continue
                 if kind == "desktop_action_feedback":
                     # UI-only acknowledgment. Never execute/retry an action from
@@ -667,6 +712,8 @@ class DesktopRealtimeSession:
                 if kind == "desktop_user":
                     turn = int(message.get("turn") or 0)
                     source = str(message.get("source") or "unknown")
+                    await self._record_history(role='user', turn=turn, source=source,
+                        text=str(message.get('text') or ''), status='transcribed' if source=='voice' else 'submitted')
                     print(
                         f"[USER SPEECH] turn={turn or 'n/a'} | realtime_model={self.config.model} | source={source} | text={_terminal_chat_text(message.get('text'))}",
                         flush=True,
@@ -698,6 +745,8 @@ class DesktopRealtimeSession:
                 if kind == "desktop_reply":
                     turn = int(message.get("turn") or 0)
                     source = str(message.get("source") or "unknown")
+                    await self._record_history(role='assistant', turn=turn, source=source,
+                        text=str(message.get('text') or ''), status='reported_output')
                     print(
                         f"[JARVIS REPLY] turn={turn or 'n/a'} | realtime_model={self.config.model} | source={source} | text={_terminal_chat_text(message.get('text'))}",
                         flush=True,
@@ -928,6 +977,13 @@ class DesktopRealtimeSession:
             self._relay = None
             self._bridge = None
             self._event_task = None
+            history_session_id = self._history_session_id
+            self._history_session_id = None
+            if self._history is not None and history_session_id:
+                try:
+                    await asyncio.to_thread(self._history.end_session, history_session_id)
+                except Exception as error:
+                    print(f'[Jarvis History] close_failed={type(error).__name__}', flush=True)
             action_session = self._action_session
             self._action_session = None
 
@@ -1035,6 +1091,7 @@ def create_desktop_app(
             "local_wake": wake_service is not None,
             "delegation_router": delegation_orchestrator is not None,
             "conversation_trace": realtime_config.desktop_conversation_trace,
+            "chat_history_enabled": session._history is not None,
             "backend_routes": [route.name for route in runtime.provider_router.routes()],
         }
 
@@ -1046,6 +1103,7 @@ def create_desktop_app(
             "voice": realtime_config.voice,
             "reasoning_effort": realtime_config.reasoning_effort,
             "conversation_trace": realtime_config.desktop_conversation_trace,
+            "chat_history_enabled": session._history is not None,
             "transport": "webrtc",
             "wake_phrases": list(wake_config.wake_phrases),
             "idle_sleep_seconds": wake_config.idle_timeout_seconds,

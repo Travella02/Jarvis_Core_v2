@@ -27,6 +27,7 @@ class DefaultBrowserBridgeAdapter:
         # instance*. Never trust it without a fresh tabs_list and host check.
         self._affinity: dict[str, int] = {}
         self._instance_id: str | None = None
+        self.last_scroll_identity: tuple[int,str] | None = None
 
     async def _snapshot(self) -> dict:
         if not self.bridge.status().get('connected'):
@@ -271,6 +272,110 @@ class DefaultBrowserBridgeAdapter:
             self.last_navigation_route = 'result_bridge_failed'
             return False
 
+    async def verify_active_youtube_results(self) -> bool:
+        if not self._refresh_instance():
+            return False
+        if not {'snapshot','scroll'}.issubset(set(self.bridge.status().get('capabilities', ()))):
+            return False
+        try:
+            state=await self.bridge.execute('snapshot', {}, timeout_seconds=4)
+            active=state.get('active_tab') or {}
+            page=state.get('page') or {}
+            url=str(active.get('url') or '')
+            parts=urlsplit(url)
+            return bool(self._tab_id(active) and parts.scheme=='https'
+                        and self._host(url)=='youtube.com' and parts.path=='/results'
+                        and parse_qs(parts.query).get('search_query')
+                        and page.get('supported') is True and page.get('url')==url)
+        except Exception:
+            return False
+
+    async def verify_scroll_identity(self, identity: tuple[int,str]) -> bool:
+        # Contextual continuations must remain on exactly the same active tab
+        # and URL as the last confirmed scroll (never a background tab).
+        if not self._refresh_instance() or 'snapshot' not in self.bridge.status().get('capabilities', ()): return False
+        try:
+            state=await self.bridge.execute('snapshot', {}, timeout_seconds=4)
+            active=state.get('active_tab') or {}
+            page=state.get('page') or {}
+            return (type(identity) is tuple and len(identity)==2 and
+                    self._tab_id(active)==identity[0] and active.get('url')==identity[1] and
+                    page.get('url')==identity[1] and page.get('supported') is True)
+        except Exception:
+            return False
+
+    async def verify_active_youtube_watch(self) -> int:
+        # Bound a media command to a freshly verified active watch tab. A
+        # background YouTube tab does not grant permission to pause it.
+        if not self._refresh_instance() or 'snapshot' not in self.bridge.status().get('capabilities', ()): return 0
+        try:
+            state=await self.bridge.execute('snapshot', {}, timeout_seconds=4)
+            active=state.get('active_tab') or {}
+            page=state.get('page') or {}
+            url=str(active.get('url') or '')
+            parts=urlsplit(url)
+            video_id=parse_qs(parts.query).get('v', [''])[0]
+            if (self._tab_id(active) and parts.scheme=='https' and self._host(url)=='youtube.com'
+                    and parts.path=='/watch' and len(video_id)==11 and
+                    page.get('supported') is True and page.get('url')==url):
+                return self._tab_id(active)
+        except Exception:
+            pass
+        return 0
+
+    async def scroll(self, direction: str) -> bool:
+        """Scroll only a freshly verified active public tab and check actual movement.
+
+        The extension independently checks both tab ID and original URL before
+        changing anything. A command ACK by itself does not prove movement.
+        """
+        self.last_scroll_route='not_verified'
+        self.last_scroll_identity=None
+        if direction not in ('up','down','top','bottom') or not self._refresh_instance():
+            return False
+        if not {'snapshot','scroll'}.issubset(set(self.bridge.status().get('capabilities', ()))):
+            self.last_scroll_route='extension_outdated'
+            return False
+        try:
+            before=await self.bridge.execute('snapshot', {}, timeout_seconds=4)
+            active=before.get('active_tab') or {}
+            page=before.get('page') or {}
+            tab_id=self._tab_id(active)
+            url=str(active.get('url') or '')
+            if not (tab_id and urlsplit(url).scheme in ('https','http')
+                    and page.get('supported') is True and page.get('url')==url
+                    and type(page.get('scroll_y')) is int):
+                self.last_scroll_route='unsupported_page'
+                return False
+            old=page['scroll_y']
+            max_scroll=max(0, int(page.get('scroll_height') or 0) - int(page.get('viewport_height') or 0))
+            if max_scroll==0 or ((direction in ('top','up') and old<=0) or
+                                 (direction in ('bottom','down') and old>=max_scroll)):
+                self.last_scroll_route='already_at_edge'
+                self.last_scroll_identity=(tab_id,url)
+                return True
+            await self.bridge.execute('scroll', {'direction':direction,'tab_id':tab_id,'expected_url':url}, timeout_seconds=4)
+            for delay in (0,0.10,0.18):
+                if delay: await asyncio.sleep(delay)
+                after=await self.bridge.execute('snapshot', {}, timeout_seconds=4)
+                current=after.get('active_tab') or {}
+                current_page=after.get('page') or {}
+                if (self._tab_id(current)!=tab_id or str(current.get('url') or '')!=url
+                    or current_page.get('url')!=url):
+                    self.last_scroll_route='tab_changed'
+                    return False
+                new=current_page.get('scroll_y')
+                if type(new) is int and ((direction in ('down','bottom') and new>old) or
+                                         (direction in ('up','top') and new<old)):
+                    self.last_scroll_route='verified_scroll'
+                    self.last_scroll_identity=(tab_id,url)
+                    return True
+            self.last_scroll_route='movement_unverified'
+            return False
+        except Exception:
+            self.last_scroll_route='bridge_scroll_failed'
+            return False
+
     async def _matching_tab(self, host: str) -> dict | None:
         self._refresh_instance()
         state = await self._snapshot()
@@ -320,7 +425,7 @@ class DefaultBrowserBridgeAdapter:
     async def go_forward(self) -> bool:return await self._simple('forward')
     async def reload(self) -> bool:return await self._simple('refresh')
 
-    async def media(self, operation: str, value: int | None = None) -> bool:
+    async def media(self, operation: str, value: int | None = None, *, preferred_tab_id: int = 0) -> bool:
         if not self.bridge.status().get('connected'):return False
         if operation in ('play','pause'):
             command = 'media_control'; args = {'action':'play' if operation == 'play' else 'pause'}
@@ -331,6 +436,10 @@ class DefaultBrowserBridgeAdapter:
         elif operation in ('fullscreen', 'exit_fullscreen'):
             command = 'media_fullscreen'; args = {'action': 'enter' if operation == 'fullscreen' else 'exit'}
         else:return False
+        if preferred_tab_id:
+            if type(preferred_tab_id) is not int or preferred_tab_id<1 or not await self.verify_active_youtube_watch()==preferred_tab_id:
+                return False
+            args['preferred_tab_id']=preferred_tab_id
         response = await self.bridge.execute(command,args,timeout_seconds=6)
         return response.get('verified') is True
 

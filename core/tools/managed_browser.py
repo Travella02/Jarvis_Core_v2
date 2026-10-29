@@ -23,7 +23,7 @@ from core.tools.semantic_browser import _NEGATED, _NON_REQUEST, _SECOND_ACTION
 CAPABILITY = 'desktop_browser'
 ALLOWED = frozenset(('open', 'open_managed', 'search', 'back', 'forward', 'reload', 'close_tab', 'next_tab',
                      'select_tab', 'close_named_tab', 'play', 'pause', 'mute', 'unmute', 'volume',
-                     'select_result', 'fullscreen', 'exit_fullscreen'))
+                     'select_result', 'fullscreen', 'exit_fullscreen', 'scroll'))
 NAMED_TABS = frozenset(('select_tab','close_named_tab'))
 MEDIA = frozenset(('play','pause','mute','unmute','volume','fullscreen','exit_fullscreen'))
 _DOMAIN = re.compile(r'^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$')
@@ -43,9 +43,10 @@ _ACTIONS = {
     'mute': re.compile(r'\bmute\b|\bturn\s+(?:the\s+)?sound\s+off\b', re.I),
     'unmute': re.compile(r'\bunmute\b|\bturn\s+(?:the\s+)?sound\s+on\b', re.I),
     'volume': re.compile(r'\b(?:volume|sound)\b', re.I),
-    'select_result': re.compile(r'\b(?:play|open|select|choose|click|watch|start|show)\b', re.I),
+    'select_result': re.compile(r'\b(?:play|open|select|choose|pick|click|watch|start|show)\b', re.I),
     'fullscreen': re.compile(r'\b(?:full\s?screen|maximize)\b', re.I),
     'exit_fullscreen': re.compile(r'\b(?:exit|leave|close|stop)\b.*\bfull\s?screen\b|\b(?:minimize|unfullscreen)\b', re.I),
+    'scroll': re.compile(r'\b(?:scroll|page|go|move|keep|show|load|back|return|take|jump)\b', re.I),
 }
 _BLOCKED_TLDS = {'local', 'internal', 'localhost', 'onion', 'test', 'invalid'}
 _COMPLEX_SUFFIXES = {'co.uk', 'org.uk', 'com.au', 'co.nz', 'com.br', 'co.jp'}
@@ -117,7 +118,7 @@ def _normalize_joined_browser_stt(text: str) -> str:
     )
 
 
-def trusted_intent(text: object, operation: str, host: str | None, value: object=None, query: object=None, *, active_site_verified: bool=False) -> bool:
+def trusted_intent(text: object, operation: str, host: str | None, value: object=None, query: object=None, *, active_site_verified: bool=False, active_media_verified: bool=False, scroll_continuation_verified: bool=False, direction: object=None) -> bool:
     if not isinstance(text,str) or not (2 <= len(text) <= 2000) or operation not in ALLOWED:
         return False
     text=_normalize_joined_browser_stt(' '.join(text.split()))
@@ -126,6 +127,9 @@ def trusted_intent(text: object, operation: str, host: str | None, value: object
     if operation=='pause':
         safe=re.sub(r'(?<!\w)stop(?=\s+(?:the\s+)?(?:video|playback|player)\b)', 'pause', safe, flags=re.I)
     if any(pattern.search(safe) for pattern in (_NEGATED, _NON_REQUEST, _SECOND_ACTION)):
+        return False
+    # Reject a partial website action from a multi-effect media/browser request.
+    if re.search(r'\b(?:pause|resume|play|mute|unmute|scroll|jump)\b.{0,120}\b(?:and|then)\b.{0,120}\b(?:open|search|find|pause|resume|play|scroll|jump)\b',safe,re.I):
         return False
     if not _ACTIONS[operation].search(text):
         if not (operation=='search' and _phonetic_search_evidence(text,host,query)):
@@ -161,12 +165,39 @@ def trusted_intent(text: object, operation: str, host: str | None, value: object
         if spoken != {value} or re.search(r'\b(?:and|then)\b',text,re.I): return False
         if not re.search(r'\b(?:video|result|one|it|that|this|clip|episode)\b',text,re.I): return False
         return True
+    if operation == 'scroll':
+        if host != 'current' or direction not in ('up','down','top','bottom'):
+            return False
+        # Scrolling is a single direct user-requested action, never a guess from
+        # page content or a model-proposed direction. Reject conflicting motions.
+        patterns = {
+            'up': r'\b(?:scroll|page|go|move|keep\s+(?:going|scrolling))\s+(?:back\s+)?up\b',
+            'down': r'\b(?:scroll|page|go|move|keep\s+(?:going|scrolling))\s+(?:all\s+the\s+way\s+|further\s+)?down\b',
+            'top': r'\b(?:scroll|go|jump|return|take\s+me)\s+(?:back\s+)?(?:to\s+)?(?:the\s+)?top\b|\bback\s+to\s+(?:the\s+)?top\b',
+            'bottom': r'\b(?:scroll|go|jump|take\s+me)\s+(?:all\s+the\s+way\s+)?(?:down\s+)?(?:to\s+)?(?:the\s+)?bottom\b',
+        }
+        detected={name for name,pattern in patterns.items() if re.search(pattern,text,re.I)}
+        # "scroll down to the bottom" is one destination, not conflicting
+        # directions; a second independent instruction remains rejected.
+        if 'bottom' in detected and 'down' in detected:
+            detected.discard('down')
+        if (scroll_continuation_verified and direction in ('up','down') and
+                re.fullmatch(r'\s*(?:jarvis[, ]+)?(?:please\s+)?keep\s+going(?:\s+please)?[.!?]*\s*',text,re.I)):
+            detected={direction}
+        # A request to see more results is context-dependent; Core separately
+        # verifies the ACTIVE HTTPS YouTube results tab, never a background tab.
+        if (re.search(r'\b(?:show\s+me|load)\s+more\s+(?:videos?|results?)\b',text,re.I)
+                and active_site_verified and not detected):
+            detected={'down'}
+        return detected=={direction} and not re.search(r'\b(?:and|then)\b',text,re.I)
     if operation in MEDIA:
         if host != 'current' or re.search(r'\b(?:and|then)\b',text,re.I): return False
         if operation in ('fullscreen','exit_fullscreen'):
             return bool(re.search(r'\bfull\s?screen\b|\bunfullscreen\b',text,re.I))
         # A media intent must be about playback, not a request to operate a named site.
         if not (re.search(r'\b(?:video|player|audio|sound|volume|music|playback|it|this|that)\b',text,re.I)
+                or (operation=='pause' and active_media_verified and
+                    re.search(r'\byou\s?tube\b',text,re.I))
                 or text.strip().lower().rstrip(' .!?') in {'play','pause','mute','unmute'}):
             return False
         if operation == 'volume':
@@ -226,6 +257,36 @@ def trusted_intent(text: object, operation: str, host: str | None, value: object
     return bool(re.search(r'(?<!\w)'+re.escape(label)+r'(?!\w)', text, re.I))
 
 
+def confirmed_youtube_pause_request(transcript: object) -> bool:
+    """Narrow correction of a wrong model-selected browser operation.
+
+    Never initiates an action by itself. Actual playback is gated by a fresh
+    active YouTube watch-page snapshot and an extension-confirmed media result.
+    """
+    if not isinstance(transcript,str):return False
+    text=' '.join(transcript.split())
+    if not 2<=len(text)<=2000 or any(p.search(text) for p in (_NEGATED,_NON_REQUEST,_SECOND_ACTION)):
+        return False
+    if re.search(r'\b(?:and|then|after|before)\b',text,re.I):return False
+    return bool(re.search(r'\bpause\b',text,re.I) and re.search(r'\byou\s?tube\b',text,re.I)
+                and not re.search(r'\b(?:open|launch|visit|new\s+tab|search|find|look\s+up)\b',text,re.I))
+
+
+def confirmed_result_selection_index(transcript: object) -> int | None:
+    """Derive a single bounded ordinal from the *confirmed* current utterance.
+
+    Used solely to correct a model-proposed browser operation that was already
+    selected for this turn. This is not a speech-command router. The unchanged
+    select_result gateway AND live search-page snapshot still authorize and
+    verify navigation, including active tab identity, host, and video URL.
+    """
+    if not isinstance(transcript, str):
+        return None
+    selected = [number for number in range(1, 11)
+                if trusted_intent(transcript, 'select_result', 'current', value=number)]
+    return selected[0] if len(selected) == 1 else None
+
+
 def confirmed_site_search_query(transcript: object, site: object, query: object) -> bool:
     """Verify a model-supplied query for a current-turn, same-site search.
 
@@ -268,6 +329,7 @@ class BrowserOperations(Protocol):
     async def close_named_tab(self, host: str) -> bool: ...
     async def media(self, operation: str, value: int | None=None) -> bool: ...
     async def select_result(self, index: int) -> bool: ...
+    async def scroll(self, direction: str) -> bool: ...
     async def close(self) -> None: ...
 
 
@@ -440,21 +502,24 @@ class ManagedBrowserGateway:
         self._lock=asyncio.Lock()
         self._replays:dict[tuple[str,str],tuple[str,ToolResult]]={}
 
-    async def execute(self, request:ToolRequest, *, evidence:ConfirmedUserAction|None) -> ToolResult:
+    async def execute(self, request:ToolRequest, *, evidence:ConfirmedUserAction|None, scroll_continuation:bool=False) -> ToolResult:
         def outcome(status,code=None,message=None,output=None):
             return ToolResult(request.trace,request.tool_name,request.operation,status,output or {},
                               provider_call_id=request.provider_call_id,error_code=code,error_message=message)
-        if request.tool_name!=CAPABILITY or request.operation not in ALLOWED or (self.bridge_mode and request.operation=='open_managed') or (not self.advanced and request.operation in (MEDIA|NAMED_TABS|{'open_managed','select_result'})):
+        if request.tool_name!=CAPABILITY or request.operation not in ALLOWED or (self.bridge_mode and request.operation=='open_managed') or (not self.advanced and request.operation in (MEDIA|NAMED_TABS|{'open_managed','select_result','scroll'})) or (request.operation=='scroll' and not self.bridge_mode):
             return outcome(ToolResultStatus.DENIED,'unknown_capability','That browser operation is not supported yet.')
         operation=request.operation
         arguments=dict(request.arguments)
-        expected={'site','query'} if operation=='search' else {'site','value'} if operation in ('volume','select_result') else {'site'}
+        expected={'site','query'} if operation=='search' else {'site','value'} if operation in ('volume','select_result') else {'site','direction'} if operation=='scroll' else {'site'}
         if set(arguments)!=expected:return outcome(ToolResultStatus.DENIED,'invalid_arguments','Those browser parameters are not supported.')
         site=arguments['site']
         host=normalize_host(site) if operation in ({'open','open_managed','search'}|NAMED_TABS) else ('current' if site=='current' else None)
         if not host:return outcome(ToolResultStatus.DENIED,'unsafe_destination','I need a valid public website name to open.')
         query=arguments.get('query')
         value=arguments.get('value')
+        direction=arguments.get('direction')
+        if operation=='scroll' and direction not in ('up','down','top','bottom'):
+            return outcome(ToolResultStatus.DENIED,'invalid_scroll_direction','Please specify a direction to scroll.')
         if operation=='select_result' and (type(value) is not int or not 1<=value<=10 or not self.bridge_mode):
             return outcome(ToolResultStatus.DENIED,'invalid_result_selection',
                            'I need a numbered result in a connected browser to select.')
@@ -467,7 +532,27 @@ class ManagedBrowserGateway:
                 request.trace.turn_id!=evidence.turn_id or not request.trace.turn_id):
             return outcome(ToolResultStatus.DENIED,'unverified_user_intent',
                            'I could not verify that immediate browser request, so I did not act.')
-        authorized=trusted_intent(evidence.transcript,operation,host,value,query)
+        # A spoken site label ("pause YouTube") only refers to media when a
+        # fresh snapshot confirms an ACTIVE YouTube watch page. Never allow an
+        # unrelated tab or a stale media affinity to authorize that shortcut.
+        active_media_tab_id=0
+        if operation=='pause' and host=='current' and self.bridge_mode and re.search(r'\byou\s?tube\b',evidence.transcript,re.I):
+            verifier=getattr(self.browser,'verify_active_youtube_watch',None)
+            if callable(verifier):
+                try: active_media_tab_id=await verifier() or 0
+                except Exception: active_media_tab_id=0
+        authorized=trusted_intent(evidence.transcript,operation,host,value,query,direction=direction,
+                                  active_media_verified=bool(active_media_tab_id),
+                                  scroll_continuation_verified=scroll_continuation)
+        if not authorized and operation=='scroll' and direction=='down' and self.bridge_mode:
+            # Natural 'show me more videos' is allowed only with live results-page context.
+            verify=getattr(self.browser,'verify_active_youtube_results',None)
+            if callable(verify):
+                try: verified=await verify() is True
+                except Exception: verified=False
+                if verified:
+                    authorized=trusted_intent(evidence.transcript,operation,host,value,query,
+                                              active_site_verified=True,direction=direction)
         if not authorized and operation=='search' and host=='youtube.com' and self.bridge_mode:
             # Only a *fresh* active-tab check may resolve an omitted website.
             # No alternate routing, site guessing, or OS fallback is authorized.
@@ -484,7 +569,7 @@ class ManagedBrowserGateway:
             return outcome(ToolResultStatus.DENIED,'unverified_user_intent',
                            'I could not verify that immediate browser request, so I did not act.')
         replay=(evidence.turn_id,request.idempotency_key or request.trace.request_id)
-        fingerprint=repr((operation,host,query,value))
+        fingerprint=repr((operation,host,query,value,direction))
         async with self._lock:
             previous=self._replays.get(replay)
             if previous:
@@ -508,9 +593,13 @@ class ManagedBrowserGateway:
                         return await asyncio.to_thread(self._launch_default, uri)
                     if operation in ('open','open_managed','search'):return await self.browser.navigate(uri)
                     if operation=='select_result':return await self.browser.select_result(value)
+                    if operation=='scroll':return await self.browser.scroll(direction)
                     if operation=='select_tab':return await self.browser.select_tab(host)
                     if operation=='close_named_tab':return await self.browser.close_named_tab(host)
-                    if operation in MEDIA:return await self.browser.media(operation,value)
+                    if operation in MEDIA:
+                        if operation=='pause' and active_media_tab_id:
+                            return await self.browser.media(operation,value,preferred_tab_id=active_media_tab_id)
+                        return await self.browser.media(operation,value)
                     return await getattr(self.browser,{'back':'go_back','forward':'go_forward',
                          'reload':'reload','close_tab':'close_tab','next_tab':'next_tab'}[operation])()
                 success=await asyncio.wait_for(act(),timeout=12.0 if operation=='select_result' else 7.0)
@@ -521,14 +610,16 @@ class ManagedBrowserGateway:
                     print(f'[Jarvis Browser Route] operation={operation} | route={route} | accepted={bool(success)}', flush=True)
                 result=(outcome(ToolResultStatus.SUCCEEDED,output={
                     'navigation_route':getattr(self.browser,'last_navigation_route','unknown') if self.bridge_mode else 'not_applicable',
+                    'scroll_route':getattr(self.browser,'last_scroll_route','not_applicable') if operation=='scroll' else 'not_applicable',
                     'operation':operation,'browser_navigation_committed':success if (operation in ('open','search') and not self.advanced) or operation == 'open_managed' else False,
                     'system_browser_handoff_accepted':bool(success and self.advanced and operation in ('open','search') and (not self.bridge_mode or getattr(self.browser,'last_system_handoff',False))),
                     'page_loaded_verified':bool(success and self.bridge_mode and getattr(self.browser,'last_navigation_verified',False)),'url':uri if uri else None,
-                    'user_message':('I opened the selected video in your existing tab.' if operation=='select_result' else 'I completed that media control.' if operation in MEDIA else 'I opened that page in your browser.' if self.bridge_mode and getattr(self.browser,'last_navigation_verified',False) else 'I sent the website to your default browser.') if self.advanced and operation in ('open','search') else 'I completed the browser action.'})
+                    'user_message':('The page is already at that edge.' if operation=='scroll' and getattr(self.browser,'last_scroll_route','')=='already_at_edge' else 'I scrolled the active page.' if operation=='scroll' else ('I opened that page in your browser.' if self.bridge_mode and getattr(self.browser,'last_navigation_verified',False) else 'I sent the website to your default browser.') if self.advanced and operation in ('open','search') else 'I opened the selected video in your existing tab.' if operation=='select_result' else 'I completed that media control.' if operation in MEDIA else 'I completed the browser action.')})
                     if success else outcome(ToolResultStatus.FAILED,'not_available',
                                             ('The default browser did not accept that website request.' if self.advanced and operation in ('open','search')
                                              else 'I sent the video selection to that tab, but could not confirm where it landed.' if operation == 'select_result' and getattr(self.browser,'last_navigation_route','') == 'result_navigation_unverified'
                                              else 'I could not find or verify that numbered video on the current YouTube search page.' if operation == 'select_result'
+                                             else 'I could not confirm scrolling the active webpage.' if operation == 'scroll'
                                              else 'I need the Jarvis browser extension connected to control that video.' if self.bridge_mode and operation in MEDIA
                                              else 'I can only control video inside Jarvis managed browser right now.' if operation in MEDIA
                                              else 'I need the Jarvis browser extension connected to control that tab.' if self.bridge_mode and (operation in NAMED_TABS or operation in ('close_tab','next_tab','back','forward','reload'))
