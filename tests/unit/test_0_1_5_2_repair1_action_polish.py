@@ -73,7 +73,9 @@ class UserExperienceContracts(unittest.TestCase):
         self.assertIn("setCaption('');",action)
         self.assertIn('announceActionProblem(turn,status,message)',action)
         self.assertIn("setStateSafely('idle', 'Ready')",action)
-        self.assertNotIn('speakCoreLunaResult',action)
+        self.assertIn('if (completed && payload.spoken_result === true)',action)
+        self.assertIn('if (completed) {',action)
+        self.assertIn('visible_confirmation:false,spoken:answered',action)
         self.assertIn("spoken:false",action)
 
     def test_legacy_cue_timing_suite_mocks_real_playback(self):

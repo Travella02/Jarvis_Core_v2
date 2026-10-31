@@ -23,7 +23,7 @@ from core.tools.semantic_browser import _NEGATED, _NON_REQUEST, _SECOND_ACTION
 CAPABILITY = 'desktop_browser'
 ALLOWED = frozenset(('open', 'open_managed', 'search', 'back', 'forward', 'reload', 'close_tab', 'next_tab',
                      'select_tab', 'close_named_tab', 'play', 'pause', 'mute', 'unmute', 'volume',
-                     'select_result', 'fullscreen', 'exit_fullscreen', 'scroll'))
+                     'select_result', 'select_match', 'inspect_page', 'fullscreen', 'exit_fullscreen', 'scroll'))
 NAMED_TABS = frozenset(('select_tab','close_named_tab'))
 MEDIA = frozenset(('play','pause','mute','unmute','volume','fullscreen','exit_fullscreen'))
 _DOMAIN = re.compile(r'^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$')
@@ -44,6 +44,8 @@ _ACTIONS = {
     'unmute': re.compile(r'\bunmute\b|\bturn\s+(?:the\s+)?sound\s+on\b', re.I),
     'volume': re.compile(r'\b(?:volume|sound)\b', re.I),
     'select_result': re.compile(r'\b(?:play|open|select|choose|pick|click|watch|start|show)\b', re.I),
+    'select_match': re.compile(r'\b(?:play|open|select|choose|pick|click|watch|start|show)\b', re.I),
+    'inspect_page': re.compile(r'\b(?:what|which|where|how|describe|tell|explain|see)\b', re.I),
     'fullscreen': re.compile(r'\b(?:full\s?screen|maximize)\b', re.I),
     'exit_fullscreen': re.compile(r'\b(?:exit|leave|close|stop)\b.*\bfull\s?screen\b|\b(?:minimize|unfullscreen)\b', re.I),
     'scroll': re.compile(r'\b(?:scroll|page|go|move|keep|show|load|back|return|take|jump)\b', re.I),
@@ -118,6 +120,51 @@ def _normalize_joined_browser_stt(text: str) -> str:
     )
 
 
+
+def confirmed_video_title_request(text: object) -> str | None:
+    """Extract a directly requested *textual video title* from confirmed speech.
+
+    This is an evidence parser for an existing model browser proposal, never a
+    keyword action router. Reject hypotheticals, negation, compound commands,
+    ordinals without a title, and appearance/thumbnail-only descriptions.
+    A later gateway check must authorize the same title and select a strong
+    match from the live verified browser page; this function cannot navigate.
+    """
+    if not isinstance(text, str) or not 5 <= len(text) <= 500:
+        return None
+    said = ' '.join(text.split()).strip(' .!?')
+    if any(p.search(said) for p in (_NEGATED, _NON_REQUEST, _SECOND_ACTION)):
+        return None
+    if re.search(r'\b(?:and|then)\b', said, re.I):
+        return None
+    # Only extract the direct object's title after a current-turn imperative.
+    # The prefix allows polite natural speech, but not future or hypothetical
+    # navigation requests, and never imports labels from a prior search.
+    request = re.fullmatch(
+        r'(?:jarvis[, ]+)?(?:(?:please|hey|alright|okay|could\s+you|can\s+you|would\s+you)\s+)*'
+        r'(?:play|watch|open|select|choose|pick|click|start|show)\s+(?P<object>.+)',
+        said, re.I)
+    if not request:
+        return None
+    obj = request.group('object')
+    if not re.search(r'\b(?:video|clip|result)\b', obj, re.I):
+        return None
+    # "the one with a guy in red" is a visual referent; no thumbnail vision.
+    if re.search(r'^\s*(?:the\s+)?one\s+with\b', obj, re.I):
+        return None
+    obj = re.sub(r'^\s*(?:the\s+)?(?:video|clip|result)\s+(?:titled|called|named)\s+', '', obj, flags=re.I)
+    obj = re.sub(r'^\s*(?:the\s+)?(?:titled|called|named)\s+', '', obj, flags=re.I)
+    obj = re.sub(r'^\s*(?:the\s+)?(?:titled\s+)?(?:video|clip|result)\s+', '', obj, flags=re.I)
+    obj = re.sub(r'^\s*the\s+', '', obj, flags=re.I)
+    obj = re.sub(r'\s+(?:video|clip|result)\s*$', '', obj, flags=re.I)
+    obj = obj.strip(" \t.?!\"'")
+    if len(obj) < 4 or len(obj) > 140:
+        return None
+    from core.tools.default_browser_bridge import DefaultBrowserBridgeAdapter
+    meaningful = DefaultBrowserBridgeAdapter._video_match_tokens(obj)
+    return obj if 2 <= len(meaningful) <= 14 else None
+
+
 def trusted_intent(text: object, operation: str, host: str | None, value: object=None, query: object=None, *, active_site_verified: bool=False, active_media_verified: bool=False, scroll_continuation_verified: bool=False, direction: object=None) -> bool:
     if not isinstance(text,str) or not (2 <= len(text) <= 2000) or operation not in ALLOWED:
         return False
@@ -126,6 +173,13 @@ def trusted_intent(text: object, operation: str, host: str | None, value: object
                 'appreciate it please', text, flags=re.I)
     if operation=='pause':
         safe=re.sub(r'(?<!\w)stop(?=\s+(?:the\s+)?(?:video|playback|player)\b)', 'pause', safe, flags=re.I)
+    if operation == 'inspect_page':
+        # Asking about a page is a read-only operation, NOT authorization to
+        # scroll or click. Hypotheticals are allowed only for this observation.
+        return (host == 'current' and bool(re.search(r'\b(?:what|which|where|how|describe|tell|explain|see)\b',safe,re.I))
+                and (bool(re.search(r'\b(?:page|website|browser|screen|scroll(?:ed|ing)?|below|down|tab)\b',safe,re.I))
+                     or bool(re.search(r'\b(?:this|current|active)\s+(?:video|result)\b',safe,re.I)))
+                and not any(p.search(safe) for p in (_NEGATED, _SECOND_ACTION)))
     if any(pattern.search(safe) for pattern in (_NEGATED, _NON_REQUEST, _SECOND_ACTION)):
         return False
     # Reject a partial website action from a multi-effect media/browser request.
@@ -148,6 +202,21 @@ def trusted_intent(text: object, operation: str, host: str | None, value: object
         # tab is only allowed when the user explicitly asks for that surface.
         if not re.search(r"\b(?:in|using|with|through)\s+(?:(?:the|a)\s+)?(?:(?:your|jarvis(?:'s)?)\s+)?(?:managed|controlled|jarvis)\s+browser\b|\b(?:in|using|with|through)\s+(?:your|jarvis(?:'s)?)\s+browser\b", text, re.I):
             return False
+    if operation == 'select_match':
+        if host != 'current' or not isinstance(query, str) or not 2 <= len(query) <= 140:
+            return False
+        if re.search(r'\b(?:and|then)\b', text, re.I):
+            return False
+        if not re.search(r'\b(?:video|one|clip|result)\b', text, re.I):
+            return False
+        # The proposed phrase must be composed from confirmed speech, not
+        # selected from unseen page text by the model or invented after the fact.
+        spoken = set(re.findall(r'[a-z0-9]+',text.casefold()))
+        terms = re.findall(r'[a-z0-9]+',query.casefold())
+        if not terms or len(terms)>24 or not all(t in spoken for t in terms):
+            return False
+        from core.tools.default_browser_bridge import DefaultBrowserBridgeAdapter
+        return len(DefaultBrowserBridgeAdapter._video_match_tokens(query)) >= 2
     if operation == 'select_result':
         if host != 'current' or type(value) is not int or not 1 <= value <= 10: return False
         # Reject conflicting/multiple ordinals and model-invented indices.
@@ -329,6 +398,8 @@ class BrowserOperations(Protocol):
     async def close_named_tab(self, host: str) -> bool: ...
     async def media(self, operation: str, value: int | None=None) -> bool: ...
     async def select_result(self, index: int) -> bool: ...
+    async def select_matching_result(self, phrase: str) -> bool: ...
+    async def describe_active_page(self, question: str) -> str | None: ...
     async def scroll(self, direction: str) -> bool: ...
     async def close(self) -> None: ...
 
@@ -506,11 +577,11 @@ class ManagedBrowserGateway:
         def outcome(status,code=None,message=None,output=None):
             return ToolResult(request.trace,request.tool_name,request.operation,status,output or {},
                               provider_call_id=request.provider_call_id,error_code=code,error_message=message)
-        if request.tool_name!=CAPABILITY or request.operation not in ALLOWED or (self.bridge_mode and request.operation=='open_managed') or (not self.advanced and request.operation in (MEDIA|NAMED_TABS|{'open_managed','select_result','scroll'})) or (request.operation=='scroll' and not self.bridge_mode):
+        if request.tool_name!=CAPABILITY or request.operation not in ALLOWED or (self.bridge_mode and request.operation=='open_managed') or (not self.advanced and request.operation in (MEDIA|NAMED_TABS|{'open_managed','select_result','select_match','inspect_page','scroll'})) or (request.operation in ('scroll','select_match','inspect_page') and not self.bridge_mode):
             return outcome(ToolResultStatus.DENIED,'unknown_capability','That browser operation is not supported yet.')
         operation=request.operation
         arguments=dict(request.arguments)
-        expected={'site','query'} if operation=='search' else {'site','value'} if operation in ('volume','select_result') else {'site','direction'} if operation=='scroll' else {'site'}
+        expected={'site','query'} if operation in ('search','select_match') else {'site','value'} if operation in ('volume','select_result') else {'site','direction'} if operation=='scroll' else {'site'}
         if set(arguments)!=expected:return outcome(ToolResultStatus.DENIED,'invalid_arguments','Those browser parameters are not supported.')
         site=arguments['site']
         host=normalize_host(site) if operation in ({'open','open_managed','search'}|NAMED_TABS) else ('current' if site=='current' else None)
@@ -520,6 +591,8 @@ class ManagedBrowserGateway:
         direction=arguments.get('direction')
         if operation=='scroll' and direction not in ('up','down','top','bottom'):
             return outcome(ToolResultStatus.DENIED,'invalid_scroll_direction','Please specify a direction to scroll.')
+        if operation=='select_match' and (not self.bridge_mode or not isinstance(query,str) or not 2<=len(query)<=140):
+            return outcome(ToolResultStatus.DENIED,'invalid_match_query','A short title description is required.')
         if operation=='select_result' and (type(value) is not int or not 1<=value<=10 or not self.bridge_mode):
             return outcome(ToolResultStatus.DENIED,'invalid_result_selection',
                            'I need a numbered result in a connected browser to select.')
@@ -593,6 +666,8 @@ class ManagedBrowserGateway:
                         return await asyncio.to_thread(self._launch_default, uri)
                     if operation in ('open','open_managed','search'):return await self.browser.navigate(uri)
                     if operation=='select_result':return await self.browser.select_result(value)
+                    if operation=='select_match':return await self.browser.select_matching_result(query)
+                    if operation=='inspect_page':return await self.browser.describe_active_page(evidence.transcript)
                     if operation=='scroll':return await self.browser.scroll(direction)
                     if operation=='select_tab':return await self.browser.select_tab(host)
                     if operation=='close_named_tab':return await self.browser.close_named_tab(host)
@@ -602,8 +677,9 @@ class ManagedBrowserGateway:
                         return await self.browser.media(operation,value)
                     return await getattr(self.browser,{'back':'go_back','forward':'go_forward',
                          'reload':'reload','close_tab':'close_tab','next_tab':'next_tab'}[operation])()
-                success=await asyncio.wait_for(act(),timeout=12.0 if operation=='select_result' else 7.0)
-                if self.bridge_mode and operation in ('open', 'search', 'select_result'):
+                observed=await asyncio.wait_for(act(),timeout=12.0 if operation in ('select_result','select_match') else 7.0)
+                success=bool(observed)
+                if self.bridge_mode and operation in ('open', 'search', 'select_result', 'select_match'):
                     # No transcript, query text, URL or browser-history content
                     # in diagnostics: only the navigation route and connection.
                     route=getattr(self.browser,'last_navigation_route','unknown')
@@ -611,13 +687,16 @@ class ManagedBrowserGateway:
                 result=(outcome(ToolResultStatus.SUCCEEDED,output={
                     'navigation_route':getattr(self.browser,'last_navigation_route','unknown') if self.bridge_mode else 'not_applicable',
                     'scroll_route':getattr(self.browser,'last_scroll_route','not_applicable') if operation=='scroll' else 'not_applicable',
+                    'spoken_result':operation=='inspect_page',
                     'operation':operation,'browser_navigation_committed':success if (operation in ('open','search') and not self.advanced) or operation == 'open_managed' else False,
                     'system_browser_handoff_accepted':bool(success and self.advanced and operation in ('open','search') and (not self.bridge_mode or getattr(self.browser,'last_system_handoff',False))),
                     'page_loaded_verified':bool(success and self.bridge_mode and getattr(self.browser,'last_navigation_verified',False)),'url':uri if uri else None,
-                    'user_message':('The page is already at that edge.' if operation=='scroll' and getattr(self.browser,'last_scroll_route','')=='already_at_edge' else 'I scrolled the active page.' if operation=='scroll' else ('I opened that page in your browser.' if self.bridge_mode and getattr(self.browser,'last_navigation_verified',False) else 'I sent the website to your default browser.') if self.advanced and operation in ('open','search') else 'I opened the selected video in your existing tab.' if operation=='select_result' else 'I completed that media control.' if operation in MEDIA else 'I completed the browser action.')})
+                    'user_message':(str(observed) if operation=='inspect_page' else 'The page is already at that edge.' if operation=='scroll' and getattr(self.browser,'last_scroll_route','')=='already_at_edge' else 'I scrolled the active page.' if operation=='scroll' else ('I opened that page in your browser.' if self.bridge_mode and getattr(self.browser,'last_navigation_verified',False) else 'I sent the website to your default browser.') if self.advanced and operation in ('open','search') else 'I opened the selected video in your existing tab.' if operation in ('select_result','select_match') else 'I completed that media control.' if operation in MEDIA else 'I completed the browser action.')})
                     if success else outcome(ToolResultStatus.FAILED,'not_available',
                                             ('The default browser did not accept that website request.' if self.advanced and operation in ('open','search')
                                              else 'I sent the video selection to that tab, but could not confirm where it landed.' if operation == 'select_result' and getattr(self.browser,'last_navigation_route','') == 'result_navigation_unverified'
+                                             else 'I could not find or verify that video title on the current YouTube search page.' if operation == 'select_match'
+                                             else 'I could not read the current browser page.' if operation == 'inspect_page'
                                              else 'I could not find or verify that numbered video on the current YouTube search page.' if operation == 'select_result'
                                              else 'I could not confirm scrolling the active webpage.' if operation == 'scroll'
                                              else 'I need the Jarvis browser extension connected to control that video.' if self.bridge_mode and operation in MEDIA

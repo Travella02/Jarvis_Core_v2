@@ -18,6 +18,7 @@ class ManagedBrowserOutcome:
     code: str
     # Core-verified operation metadata; advisory context, NEVER authority.
     action_context: dict[str, str] | None = None
+    spoken_result: bool = False
 
 class ManagedDesktopBrowserSession:
     def __init__(self, *, browser: BrowserOperations|None=None, advanced:bool=False, launch_default=None, bridge_mode:bool=False):
@@ -66,6 +67,44 @@ class ManagedDesktopBrowserSession:
             if ordinal is not None:
                 arguments = {'site': 'current', 'intent': 'select_result', 'value': ordinal}
                 intent = 'select_result'
+        # A user-described video title is an entity reference, not a new URL.
+        # Mini sometimes proposes PLAY or generic OPEN for "play the X video",
+        # or appends stale search terms to select_match.query. Repair only an
+        # ALREADY PROPOSED browser action using the independently committed
+        # current-turn transcript. Core later rechecks the intent, live active
+        # search tab, grounded result labels, and destination before navigation.
+        # This is not a phrase-to-tool fast path: if Mini chose conversation or
+        # an unrelated action, nothing is executed.
+        if self.advanced and self.bridge_mode and intent in ('open', 'play', 'select_match'):
+            from core.tools.managed_browser import confirmed_video_title_request
+            spoken_title = confirmed_video_title_request(transcript)
+            allowed_site = (isinstance(arguments.get('site'), str) and (
+                arguments['site'] in ('current', 'youtube.com') or
+                (intent in ('open', 'play') and len(arguments['site']) <= 140 and
+                 not any(c in arguments['site'] for c in '/:?#@') and
+                 normalize_host(arguments['site']) is None)))
+            shape_ok = (set(arguments) == {'site','intent'} if intent in ('open', 'play')
+                        else set(arguments) == {'site','intent','query'})
+            model_query_ok = True
+            if intent == 'select_match':
+                proposed = arguments.get('query')
+                if not isinstance(proposed, str):
+                    model_query_ok = False
+                else:
+                    # A model's extra search-context terms are never sent to the
+                    # matcher. Require independent overlap with spoken content,
+                    # or refuse a wholly invented/mismatched title.
+                    from core.tools.default_browser_bridge import DefaultBrowserBridgeAdapter
+                    spoken_terms = set(DefaultBrowserBridgeAdapter._video_match_tokens(spoken_title or ''))
+                    proposed_terms = set(DefaultBrowserBridgeAdapter._video_match_tokens(proposed))
+                    model_query_ok = (bool(proposed_terms) and
+                                      len(spoken_terms & proposed_terms) >= min(2, len(spoken_terms)))
+            if spoken_title and allowed_site and shape_ok and model_query_ok:
+                original_intent = intent
+                arguments = {'site':'current', 'intent':'select_match', 'query':spoken_title}
+                intent = 'select_match'
+                print(f'[Jarvis Browser Title Route] proposed={original_intent} | resolved=select_match | evidence=current_turn | query_source=confirmed_speech',flush=True)
+
         # Reconcile a mistaken "open YouTube" proposal to PAUSE only when the
         # current user utterance directly and unambiguously requests that media
         # action. Core then independently checks a fresh active watch-page
@@ -124,16 +163,16 @@ class ManagedDesktopBrowserSession:
                              'query': arguments['query']}
                 intent = 'search'
         if (intent not in ALLOWED or not isinstance(intent,str) or
-                (not self.advanced and intent in {'select_tab','close_named_tab','play','pause','mute','unmute','volume','select_result','fullscreen','exit_fullscreen','scroll','open_managed'}) or
+                (not self.advanced and intent in {'select_tab','close_named_tab','play','pause','mute','unmute','volume','select_result','select_match','inspect_page','fullscreen','exit_fullscreen','scroll','open_managed'}) or
                 (self.bridge_mode and intent == 'open_managed') or
                 not isinstance(arguments.get('site'),str)):
             return ManagedBrowserOutcome('failed','I do not support that browser operation yet.','unknown_operation')
-        expected={'site','intent','query'} if intent=='search' else {'site','intent','value'} if intent in ('volume','select_result') else {'site','intent','direction'} if intent=='scroll' else {'site','intent'}
+        expected={'site','intent','query'} if intent in ('search','select_match') else {'site','intent','value'} if intent in ('volume','select_result') else {'site','intent','direction'} if intent=='scroll' else {'site','intent'}
         cleaned={k:v for k,v in arguments.items() if not (k=='query' and intent!='search' and v in ('',None))}
         if set(cleaned)!=expected:
             return ManagedBrowserOutcome('failed','Those browser parameters are not authorized.','invalid_arguments')
         args={'site':cleaned['site']}
-        if intent=='search':args['query']=cleaned['query']
+        if intent in ('search','select_match'):args['query']=cleaned['query']
         if intent in ('volume','select_result'):args['value']=cleaned['value']
         if intent=='scroll':args['direction']=cleaned['direction']
         trace=CorrelationContext.create()
@@ -150,7 +189,7 @@ class ManagedDesktopBrowserSession:
             if intent == 'scroll':
                 verified['direction'] = str(args['direction'])
             return ManagedBrowserOutcome('completed',result.output.get('user_message','Browser action completed.'),
-                                         'none', verified)
+                                         'none', verified, bool(result.output.get('spoken_result')))
         return ManagedBrowserOutcome('failed',result.error_message or 'I could not complete that browser action.',
                                      result.error_code or 'unknown_failure')
 

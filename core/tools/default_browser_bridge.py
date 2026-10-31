@@ -9,6 +9,9 @@ browser page merely because its title looks similar.
 from __future__ import annotations
 
 import asyncio
+import re
+import unicodedata
+from difflib import SequenceMatcher
 from urllib.parse import urlsplit, parse_qs
 from typing import Callable
 
@@ -174,7 +177,52 @@ class DefaultBrowserBridgeAdapter:
         except Exception:
             return False
 
+    @staticmethod
+    def _video_match_tokens(label: str) -> list[str]:
+        text = unicodedata.normalize('NFKD', label).casefold()
+        words = re.findall(r'[a-z0-9]+', text)
+        ignore = {'the','a','an','one','video','videos','clip','please','sidemen',
+                  'play','watch','open','find','me','for','to','in','of','is','with',
+                  'how','you','can','would','could','we','it','that'}
+        return [word for word in words if word not in ignore]
+
+    @classmethod
+    def _best_video_match(cls, phrase: str, entries: list[tuple[str, str]]) -> int | None:
+        """Conservative text-only matching over labels supplied by the live DOM.
+
+        Require a dominant candidate; never guess from thumbnail images,
+        a video ID, popularity, or a missing title.
+        """
+        query = cls._video_match_tokens(phrase)
+        if not (2 <= len(query) <= 14):
+            return None
+        query_set = set(query)
+        ranked = []
+        for n, (label, _url) in enumerate(entries):
+            title = cls._video_match_tokens(label)
+            if not title:
+                continue
+            overlap = len(query_set.intersection(title)) / len(query_set)
+            ratio = SequenceMatcher(None, ' '.join(query), ' '.join(title[:35])).ratio()
+            ranked.append((0.78 * overlap + 0.22 * ratio, overlap, n))
+        ranked.sort(reverse=True)
+        if not ranked:
+            return None
+        best, coverage, idx = ranked[0]
+        runner_up = ranked[1][0] if len(ranked) > 1 else 0
+        if coverage < 0.67 or best < 0.66 or best - runner_up < 0.13:
+            return None
+        return idx
+
     async def select_result(self, index: int) -> bool:
+        return await self._select_video_result(index=index)
+
+    async def select_matching_result(self, phrase: str) -> bool:
+        if not isinstance(phrase, str) or not 2 <= len(phrase) <= 140:
+            return False
+        return await self._select_video_result(phrase=phrase)
+
+    async def _select_video_result(self, *, index: int | None=None, phrase: str | None=None) -> bool:
         """Open a grounded YouTube search result in its existing tab.
 
         No model-provided URL or selector crosses this boundary. The connected
@@ -184,7 +232,8 @@ class DefaultBrowserBridgeAdapter:
         self.last_navigation_verified = False
         self.last_navigation_route = 'result_not_verified'
         self.last_media_verified = False
-        if type(index) is not int or not 1 <= index <= 10 or not self._refresh_instance():
+        if ((phrase is None and (type(index) is not int or not 1 <= index <= 10))
+                or (phrase is not None and index is not None) or not self._refresh_instance()):
             return False
         if not {'snapshot', 'navigate_target_guarded'}.issubset(
                 set(self.bridge.status().get('capabilities', ()))):
@@ -211,8 +260,8 @@ class DefaultBrowserBridgeAdapter:
                     not page.get('supported')):
                 self.last_navigation_route = 'result_tab_changed'
                 return False
-            videos = []
-            seen = set()
+            videos: list[tuple[str, str]] = []
+            seen = {}
             for element in page.get('elements', [])[:160]:
                 if not isinstance(element, dict) or element.get('disabled') or element.get('risk') != 'normal':
                     continue
@@ -225,13 +274,26 @@ class DefaultBrowserBridgeAdapter:
                 if not (len(video_id) == 11 and video_id.isascii() and
                         all(ch.isalnum() or ch in '-_' for ch in video_id)):
                     continue
-                if video_id not in seen:
-                    seen.add(video_id)
-                    videos.append('https://www.youtube.com/watch?v=' + video_id)
-            if not 1 <= index <= len(videos):
+                label = str(element.get('label') or '')[:360]
+                if video_id in seen:
+                    # Thumbnail anchors may precede the same video's titled link.
+                    prior = seen[video_id]
+                    if label and (not videos[prior][0] or len(label) > len(videos[prior][0]) + 10):
+                        videos[prior] = (label, videos[prior][1])
+                else:
+                    seen[video_id] = len(videos)
+                    videos.append((label, 'https://www.youtube.com/watch?v=' + video_id))
+            if phrase is not None:
+                match = self._best_video_match(phrase, videos)
+                if match is None:
+                    self.last_navigation_route = 'result_title_ambiguous_or_unavailable'
+                    return False
+                target_url = videos[match][1]
+            elif index is not None and 1 <= index <= len(videos):
+                target_url = videos[index - 1][1]
+            else:
                 self.last_navigation_route = 'result_index_unavailable'
                 return False
-            target_url = videos[index - 1]
             await self.bridge.execute('navigate', {
                 'url':target_url, 'tab_id':tab_id, 'expected_host':'youtube.com',
                 'wait_for_load':False,
@@ -271,6 +333,47 @@ class DefaultBrowserBridgeAdapter:
         except Exception:
             self.last_navigation_route = 'result_bridge_failed'
             return False
+
+    async def describe_active_page(self, question: str) -> str | None:
+        """Fresh, read-only active-tab observation for questions about the page.
+
+        Do not execute scroll, quote arbitrary website instructions, claim to
+        see offscreen elements or infer facts not supported by page identity.
+        """
+        if not self._refresh_instance() or 'snapshot' not in self.bridge.status().get('capabilities', ()):
+            return None
+        try:
+            state = await self.bridge.execute('snapshot', {}, timeout_seconds=4)
+            tab = state.get('active_tab') or {}
+            page = state.get('page') or {}
+            url = str(tab.get('url') or '')
+            part = urlsplit(url)
+            if (not self._tab_id(tab) or part.scheme not in ('http', 'https')
+                    or page.get('supported') is not True or page.get('url') != url):
+                return None
+            host = self._host(url)
+            title = re.sub(r'[^\w .,&:!?()\-]', '', str(page.get('title') or ''))[:90].strip()
+            scrollable = max(0,int(page.get('scroll_height') or 0)-int(page.get('viewport_height') or 0))
+            position = max(0,int(page.get('scroll_y') or 0))
+            if re.search(r'\b(?:scroll(?:ed|ing)?|below|further down|bottom|more of this page)\b', question, re.I):
+                if scrollable <= 0 or position >= scrollable:
+                    return 'This active page is already at the bottom, or has no additional scrollable content.'
+                if host == 'youtube.com' and part.path == '/results':
+                    topic = (parse_qs(part.query).get('search_query') or [''])[0]
+                    topic = re.sub(r'[^\w .-]','',topic)[:65].strip()
+                    return (f'You are on YouTube search results for {topic}. Scrolling down would likely show more videos '
+                            f'related to that search, and potentially other suggestions. I cannot identify exact unseen videos until they load.'
+                            if topic else 'You are on YouTube search results. Scrolling down would likely reveal additional results, but I cannot know which unseen videos until they appear.')
+                if host == 'youtube.com' and part.path == '/watch':
+                    return ('You are on a YouTube video page. Scrolling down may show more of the description, '
+                            'comments, and recommended content, depending on the current layout.')
+                return (f'You are viewing {title or host}. Scrolling down would show more of this page, '
+                        'but the exact content below is not visible in the current observation.')
+            return f'The active browser page is {title or host}, on {host}. I can describe what is visible, but not unseen content.'
+        except (BrowserBridgeError, TypeError, ValueError):
+            return None
+        except Exception:
+            return None
 
     async def verify_active_youtube_results(self) -> bool:
         if not self._refresh_instance():

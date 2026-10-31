@@ -549,12 +549,13 @@ class DesktopRealtimeSession:
                         'and query=the search terms. Do not use select_tab, back, or open for that combined '
                         'search request: Core finds and reuses an authorized matching tab when connected. '
                         'Do not call multiple browser tools for the same request. '
+                        'To select a video from active YouTube search results by an approximate TITLE, use intent=select_match, site=current, query=only the words describing the title in the current user turn. For example "play the how far you can get video" refers to a video TITLE; do not propose play (media resume) or open (website navigation) for it. Do not prepend a prior search topic or an unspoken full title. Textual titles only; do not claim thumbnail vision. For questions about what is visible on the active webpage, or hypothetical questions about what scrolling would show, choose read-only intent=inspect_page, site=current. Do NOT actually scroll for such questions. Core obtains a fresh page observation and returns a grounded spoken answer. '
                         'Never invent search terms, tab targets, videos, or volume. Do not claim execution.')
                 action_tool['parameters']={'type':'object','properties':{
                     'site':{'type':'string','description':'Public website domain without protocol, path or query, or current for tab operations'},
                     'intent':{'type':'string','enum':['open','search','back','forward','reload','close_tab','next_tab'] +
-                        (['select_tab','close_named_tab','play','pause','mute','unmute','volume','select_result','fullscreen','exit_fullscreen','scroll'] + ([] if self._browser_bridge_enabled else ['open_managed']) if self._advanced_browser else [])},
-                    'query':{'type':'string','description':'Short search terms for search; omit for other intents'},
+                        (['select_tab','close_named_tab','play','pause','mute','unmute','volume','select_result','select_match','inspect_page','fullscreen','exit_fullscreen','scroll'] + ([] if self._browser_bridge_enabled else ['open_managed']) if self._advanced_browser else [])},
+                    'query':{'type':'string','description':'Short search terms for search, or the user-spoken approximate title for select_match; omit otherwise'},
                     **({'direction':{'type':'string','enum':['up','down','top','bottom'], 'description':'Required for scroll only; direction of the explicitly requested webpage movement.'}} if self._advanced_browser else {}),
                     **({'value':{'type':'integer','description':'Explicit volume percentage (0-100) or explicitly spoken search-result ordinal (1-10). Only for volume or select_result.'}} if self._advanced_browser else {}),
                 },'required':['site','intent'],'additionalProperties':False}
@@ -675,7 +676,8 @@ class DesktopRealtimeSession:
                                 text=f'Browser action outcome: {result.code}', status=str(result.status))
                             await relay.notify_desktop({'kind':'core_tool_result', 'turn':action_turn,
                                 'status':result.status, 'code':result.code, 'text':result.text,
-                                'action_context':result.action_context if result.status=='completed' else None})
+                                'action_context':result.action_context if result.status=='completed' else None,
+                                'spoken_result':result.spoken_result if result.status=='completed' else False})
 
                     if self._managed_browser:
                         self._browser_action_task = asyncio.create_task(
@@ -695,7 +697,8 @@ class DesktopRealtimeSession:
                                 text=f'Browser action outcome: {result.code}', status=str(result.status))
                             await relay.notify_desktop({'kind':'core_tool_result', 'turn':turn,
                                 'status':result.status, 'code':result.code, 'text':result.text,
-                                'action_context':result.action_context if result.status=='completed' else None})
+                                'action_context':result.action_context if result.status=='completed' else None,
+                                'spoken_result':result.spoken_result if result.status=='completed' else False})
                     continue
                 if kind == "desktop_action_feedback":
                     # UI-only acknowledgment. Never execute/retry an action from

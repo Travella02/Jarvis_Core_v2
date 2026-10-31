@@ -77,7 +77,9 @@ class ActionUIContractTests(unittest.TestCase):
                          'overlapAwaitingActionResultRef.current = null',
                          "setStateSafely('idle', 'Ready')",'spoken:false'):
             self.assertIn(fragment,part)
-        self.assertNotIn('speakCoreLunaResult',part)
+        self.assertIn('if (completed && payload.spoken_result === true)',part)
+        self.assertIn('if (completed) {',part)
+        self.assertIn('visible_confirmation:false,spoken:answered',part)
 
     def test_cancelling_turn_disarms_watchdog(self):
         start=self.ui.index('  const cancelOverlap =')
