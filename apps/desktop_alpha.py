@@ -32,6 +32,7 @@ from apps.desktop_unified_actions import UnifiedDesktopActionSession
 from core.tools.managed_browser import PlaywrightManagedBrowser
 from core.tools.browser_bridge import BrowserBridge
 from core.tools.default_browser_bridge import DefaultBrowserBridgeAdapter
+from core.tools.terra_navigation import TerraNavigator, _is_enabled
 from core.runtime import IntelligenceProviderRouter, JarvisRuntime, RuntimeSettings
 from core.memory.history import ConversationHistoryStore
 from core.voice import LocalWakeListener, WakeSleepConfig
@@ -362,12 +363,13 @@ class DesktopRealtimeSession:
         self._app_actions = self._browser_bridge_enabled and str(env.get('JARVIS_DESKTOP_APP_PROBE', '0')).lower() in {'1','true','yes','on'}
         self._universal_apps = self._app_actions and str(env.get('JARVIS_UNIVERSAL_APP_PROBE', '0')).lower() in {'1','true','yes','on'}
         self._extension_id = str(env.get('JARVIS_BROWSER_BRIDGE_EXTENSION_ID','')).strip().lower()
+        self._terra_navigator = TerraNavigator(env) if (self._actions_enabled and _is_enabled(env,'JARVIS_TERRA_NAV_ENABLED')) else None
         self._extension_bridge = BrowserBridge()
         self._managed_browser = self._browser_bridge_enabled or (self._semantic_actions and str(env.get('JARVIS_MANAGED_BROWSER_PROBE','0')).lower() in {'1','true','yes','on'})
         # One external browser across wake/sleep cycles, separate from voice session.
         self._advanced_browser = self._managed_browser and (self._browser_bridge_enabled or str(env.get('JARVIS_BROWSER_MEDIA_PROBE','0')).lower() in {'1','true','yes','on'})
         self._managed_browser_engine = (DefaultBrowserBridgeAdapter(self._extension_bridge) if self._browser_bridge_enabled else PlaywrightManagedBrowser() if self._managed_browser else None)
-        self._action_session = (UnifiedDesktopActionSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=True, universal_apps=self._universal_apps) if self._app_actions else ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=self._browser_bridge_enabled) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()) if self._actions_enabled else None
+        self._action_session = (UnifiedDesktopActionSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=True, universal_apps=self._universal_apps, terra_navigator=self._terra_navigator) if self._app_actions else ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=self._browser_bridge_enabled, terra_navigator=self._terra_navigator) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()) if self._actions_enabled else None
         self._browser_action_task: asyncio.Task | None = None
 
     @property
@@ -414,7 +416,7 @@ class DesktopRealtimeSession:
                     self._history_session_id = None
                     print(f'[Jarvis History] start_failed={type(error).__name__}', flush=True)
             if self._actions_enabled:
-                self._action_session = UnifiedDesktopActionSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=True, universal_apps=self._universal_apps) if self._app_actions else ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=self._browser_bridge_enabled) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
+                self._action_session = UnifiedDesktopActionSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=True, universal_apps=self._universal_apps, terra_navigator=self._terra_navigator) if self._app_actions else ManagedDesktopBrowserSession(browser=self._managed_browser_engine,advanced=self._advanced_browser,bridge_mode=self._browser_bridge_enabled, terra_navigator=self._terra_navigator) if self._managed_browser else SemanticDesktopActionSession() if self._semantic_actions else DesktopActionSession()
             if self.config.core_luna_probe:
                 if not self.config.overlap_probe or self.delegation_orchestrator is None:
                     raise RuntimeError("Core Luna mode requires overlap and Core delegation orchestration")
@@ -598,6 +600,27 @@ class DesktopRealtimeSession:
                 + 'For explicitly requested websites and browser operations use browser_action. '
                 'No app or website launch is successful until Core reports the result.'
             )
+
+        if self._terra_navigator is not None:
+            # Navigation is distinct from application launching. This tool
+            # never takes a model-asserted app target or a file/URL path.
+            policy['tools'].append({
+                'type':'function','name':'navigate_app',
+                'description':('For a direct instruction to INTERACT WITH AN ALREADY OPEN FOCUSED APP or an explicitly configured isolated background browser: '
+                               'look at its UI, find a visual item or thumbnail, choose a menu, scroll, or do bounded navigation. '
+                               'Prefer this for multi-step or visual app control over browser_action, including YouTube thumbnail descriptions. '
+                               'Do NOT call to open or launch apps; use launch_app for that. Do NOT call for hypothetical, '
+                               'quoted, negated, speculative, destructive or sensitive tasks. Core uses the CURRENT user words '
+                               'and approves every physical action, not the model description.'),
+                'parameters':{'type':'object','properties':{'task':{'type':'string',
+                    'description':'Brief description of the current user navigation goal. Core independently checks current-turn speech.'}},
+                    'required':['task'],'additionalProperties':False}
+            })
+            policy['instructions'] += (' For a request to manipulate an ALREADY OPEN, FOCUSED app, an explicitly designated background browser, or identify a visible '
+                'thumbnail/visual element, select navigate_app, not launch_app. For opening or launching an app select '
+                'launch_app; it stays independent. Prefer Terra for visual navigation and multistep in-app tasks; '
+                'prefer existing browser actions for simple opening/searching. Do not select a different app than the requested target. Do not route hypothetical '
+                'questions or negated instructions to navigation. An explicit request to inspect the ISOLATED BACKGROUND BROWSER is ALWAYS navigate_app, never browser_action: browser_action controls the user browser and cannot inspect the private headless session. The background browser is configured by Core; do not supply a new URL, website search, or app launch. Never claim completion before Core reports it.')
 
         print(f"[Jarvis A/B Start] model={self.config.model} | reasoning={self.config.reasoning_effort} | "
               f"mode={'overlap_probe' if overlap_probe else ('buffered_tool_probe' if buffered_probe else ('tool_probe_text_only' if tool_probe else ('direct_no_gate_tools_disabled' if direct_only else 'safe_routed')))} | "

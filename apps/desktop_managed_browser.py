@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import time
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,13 +22,14 @@ class ManagedBrowserOutcome:
     spoken_result: bool = False
 
 class ManagedDesktopBrowserSession:
-    def __init__(self, *, browser: BrowserOperations|None=None, advanced:bool=False, launch_default=None, bridge_mode:bool=False):
+    def __init__(self, *, browser: BrowserOperations|None=None, advanced:bool=False, launch_default=None, bridge_mode:bool=False, terra_navigator=None):
         self.gateway=ManagedBrowserGateway(browser, advanced=advanced, launch_default=launch_default, bridge_mode=bridge_mode)
         self.advanced=advanced
         self.bridge_mode=bridge_mode
         self.active_turn=0
         self.handled:set[int]=set()
         self._scroll_context: tuple[int,str,float,tuple[int,str]] | None = None
+        self._terra_navigator = terra_navigator
 
     def on_turn_started(self, turn:int)->None:
         if type(turn) is int and turn>self.active_turn:self.active_turn=turn
@@ -39,6 +41,42 @@ class ManagedDesktopBrowserSession:
         if type(turn) is not int or turn<1 or turn!=self.active_turn or turn in self.handled:
             return None
         self.handled.add(turn)  # fail closed on duplicate calls even when malformed
+        # The Mini router may wrongly choose browser_action for an explicit
+        # READ-ONLY request about the separately configured background browser.
+        # Recover only from authenticated same-turn evidence, never model args.
+        # This does not execute a model-selected browser command or click/type;
+        # even if normal Terra execution is on, this recovery is preview-only.
+        bound_nav = ((source == 'typed' and binding == f'typed:{turn}') or
+                     (source == 'voice' and isinstance(binding,str) and
+                      re.fullmatch(r'item_[A-Za-z0-9_-]{1,120}',binding) is not None))
+        if selected_tool == 'browser_action' and bound_nav and isinstance(transcript,str) and self._terra_navigator is not None:
+            from urllib.parse import urlsplit
+            from core.tools.terra_navigation import confirmed_isolated_browser_inspection
+            nav_env = self._terra_navigator.env
+            mode = nav_env.get('JARVIS_TERRA_NAV_MODE','foreground').strip().lower()
+            domain = (urlsplit(nav_env.get('JARVIS_TERRA_BACKGROUND_URL','')).hostname or '').lower()
+            if mode == 'isolated_browser' and confirmed_isolated_browser_inspection(transcript,domain):
+                print(f'[Jarvis Terra Route] turn={turn} | proposed=browser_action | resolved=navigate_app | read_only=True | evidence=current_turn',flush=True)
+                output = await asyncio.to_thread(self._terra_navigator.run,transcript,
+                    cancelled=lambda: self.active_turn != turn, read_only=True)
+                print(f'[Jarvis Terra] turn={turn} | status={output.status} | code={output.code} | actions={output.actions} | authority=core',flush=True)
+                return ManagedBrowserOutcome(output.status,output.message,output.code,None,output.spoken)
+        if selected_tool == 'navigate_app':
+            # An independent current-turn transcript authorizes the TASK, never
+            # the model-supplied argument. Existing application only; no launch.
+            bound_nav = ((source == 'typed' and binding == f'typed:{turn}') or
+                         (source == 'voice' and isinstance(binding,str) and
+                          re.fullmatch(r'item_[A-Za-z0-9_-]{1,120}',binding) is not None))
+            if not bound_nav or not isinstance(transcript,str) or not isinstance(arguments,dict) or set(arguments) != {'task'}:
+                return ManagedBrowserOutcome('failed','I could not verify that computer navigation request.','missing_independent_user_evidence')
+            if self._terra_navigator is None:
+                return ManagedBrowserOutcome('failed','Computer navigation is not enabled.','terra_disabled')
+            output = await asyncio.to_thread(self._terra_navigator.run, transcript,
+                cancelled=lambda: self.active_turn != turn)
+            print(f'[Jarvis Terra] turn={turn} | status={output.status} | code={output.code} | actions={output.actions} | authority=core',flush=True)
+            return ManagedBrowserOutcome(output.status, output.message, output.code,
+                {'category':'desktop','intent':'navigate'} if output.status=='completed' and output.actions else None,
+                output.spoken)
         bound=(source=='typed' and binding==f'typed:{turn}') or (
               source=='voice' and isinstance(binding,str) and
               re.fullmatch(r'item_[A-Za-z0-9_-]{1,120}',binding) is not None)
@@ -167,6 +205,17 @@ class ManagedDesktopBrowserSession:
                 (self.bridge_mode and intent == 'open_managed') or
                 not isinstance(arguments.get('site'),str)):
             return ManagedBrowserOutcome('failed','I do not support that browser operation yet.','unknown_operation')
+        # Navigation potentially opens/focuses a browser window. Protect a
+        # foreground game even when Mini selected the legacy browser tool.
+        # Read-only inspection and passive media toggles do not require focus.
+        if intent in {'open','search','open_managed','select_result','select_match',
+                      'close_tab','next_tab','select_tab','close_named_tab'}:
+            from core.tools.foreground_safety import protect_existing_desktop_action
+            focus_reason=protect_existing_desktop_action()
+            if focus_reason:
+                return ManagedBrowserOutcome('failed',
+                    'The current foreground activity is protected; I did not switch browser windows.',
+                    focus_reason)
         expected={'site','intent','query'} if intent in ('search','select_match') else {'site','intent','value'} if intent in ('volume','select_result') else {'site','intent','direction'} if intent=='scroll' else {'site','intent'}
         cleaned={k:v for k,v in arguments.items() if not (k=='query' and intent!='search' and v in ('',None))}
         if set(cleaned)!=expected:

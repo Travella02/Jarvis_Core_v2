@@ -37,6 +37,14 @@ class UnifiedDesktopActionSession(ManagedDesktopBrowserSession):
         if set(arguments) != {'app'} or not isinstance(arguments.get('app'), str):
             return ManagedBrowserOutcome('failed', 'That application request is invalid.',
                                          'unapproved_application')
+        # Launching an app may activate a window. Never do that over a protected
+        # or immersive foreground session (including a fullscreen game).
+        from core.tools.foreground_safety import protect_existing_desktop_action
+        focus_reason = protect_existing_desktop_action()
+        if focus_reason:
+            return ManagedBrowserOutcome('failed',
+                'The current foreground activity is protected; I will not switch applications.',
+                focus_reason)
         trace = CorrelationContext.create()
         request = ToolRequest(trace, 'desktop_app', 'launch',
                               {'app': arguments['app']}, idempotency_key=f'local-turn-{turn}')
