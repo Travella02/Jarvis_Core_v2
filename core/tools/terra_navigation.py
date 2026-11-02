@@ -68,6 +68,23 @@ def _explicit_live_request(text: str) -> bool:
     return True
 
 
+def _isolated_inspection_intent(text: str) -> bool:
+    """Conservative no-input boundary, not a tool router.
+
+    Even a malformed or checklist-prefixed request to inspect must never
+    fall through to the model's execution-enabled computer control path.
+    """
+    return bool(isinstance(text, str) and re.search(
+        r'\b(?:inspect|inspection|describe|examine|observe|look\s+at|take\s+a\s+look|show\s+me|tell\s+me\s+about)\b',
+        text.casefold()))
+
+
+def _strip_inspection_list_marker(text: str) -> str:
+    # Accept common UI checklist copy/paste formatting for a READ-ONLY
+    # description only, never for link selection or other execution requests.
+    return re.sub(r'^\s*(?:[-*]\s*)?(?:\[\s*[xX]?\s*\]\s*)', '', text).strip()
+
+
 def confirmed_isolated_browser_inspection(text: str, domain: str) -> bool:
     """Authorize read-only recovery from a misrouted browser tool.
 
@@ -77,7 +94,7 @@ def confirmed_isolated_browser_inspection(text: str, domain: str) -> bool:
     """
     if not _explicit_live_request(text) or not isinstance(domain, str) or not domain:
         return False
-    words = ' '.join(text.casefold().split())
+    words = ' '.join(_strip_inspection_list_marker(text).casefold().split())
     words = re.sub(r'^(?:(?:hey|okay|ok)\s+)?jarvis[,:! ]*', '', words).strip()
     if not re.match(r'^(?:please\s+)?(?:inspect|examine|describe|look\s+at|take\s+a\s+look\s+at|show\s+me|tell\s+me\s+(?:about|what(?:\'s|\s+is)\s+(?:on|in)))\b', words):
         return False
@@ -377,7 +394,8 @@ class TerraNavigator:
             self._close_background_driver()
         if self._background_driver is None:
             driver=IsolatedBrowserDriver(self.env.get('JARVIS_TERRA_BACKGROUND_URL',''),
-                self.env.get('JARVIS_TERRA_BACKGROUND_HOSTS',''))
+                self.env.get('JARVIS_TERRA_BACKGROUND_HOSTS',''),
+                playground=_is_enabled(self.env,'JARVIS_TERRA_BACKGROUND_TEST_PLAYGROUND'))
             driver.__enter__()
             self._background_driver=driver
             self._background_thread=threading.get_ident()
@@ -436,6 +454,16 @@ class TerraNavigator:
             if not domain or not ('background browser' in spoken or domain in spoken):
                 return finish('failed','background_target_unverified',
                     'Jarvis is in isolated browser mode, so I cannot control your foreground app. Ask about the configured background browser instead.')
+        # Any inspection/description request in the isolated browser is a
+        # non-mutating task by construction. When the request is malformed or
+        # combines observation with action, fail closed BEFORE creating a
+        # browser, screenshot, or model tool call. This handles stray UI
+        # checklist markers ("[ ] Inspect...") independently of Mini routing.
+        if mode=='isolated_browser' and _isolated_inspection_intent(transcript):
+            if not confirmed_isolated_browser_inspection(transcript,domain):
+                return finish('failed','inspection_request_unverified',
+                    'I could not verify a read-only inspection request. I did not interact with the browser.',spoken=True)
+            read_only=True
         # Read-only recovery cannot inherit the user's execution/typing opt-ins.
         execute=_is_enabled(self.env,'JARVIS_TERRA_NAV_EXECUTE') and not read_only
         allow_typing=_is_enabled(self.env,'JARVIS_TERRA_NAV_ALLOW_TYPING') and not read_only
@@ -475,14 +503,30 @@ class TerraNavigator:
                         metrics['verify_ms']+=(time.perf_counter()-t)*1000
                         if cancelled():return finish('failed','cancelled_or_timeout','Navigation stopped.')
                         t=time.perf_counter()
-                        try:driver.open_verified_link(destination)
-                        except Exception as exc:
+                        try:
+                            receipt=driver.open_verified_link(destination,label=label)
+                        except Exception:
+                            # The destination may have changed, partially loaded,
+                            # or closed. Never claim completion on uncertainty.
                             return finish('failed','background_navigation_unverified',
-                                'The isolated browser could not verify that navigation completed.',spoken=True)
+                                'I could not verify that the background link reached its intended page.',spoken=True)
                         finally:metrics['action_ms']+=(time.perf_counter()-t)*1000
                         count+=1
+                        from urllib.parse import urlsplit
+                        dest_path=urlsplit(receipt['url']).path
+                        page_title=receipt['title']
+                        print('[Jarvis Background Navigation] status=verified | same_host=True '
+                              f'| destination_verified=True | session=persistent',flush=True)
                         return finish('completed','background_link_navigated',
-                            'Opened the verified link inside the isolated browser.',spoken=False)
+                            f'Opened the verified background page: {page_title or dest_path}.',spoken=True)
+                # A named background link cannot fall through to Terra's
+                # more permissive screen-click path if its independent request
+                # evidence or execution gate fails. This prevents an ambiguous
+                # or malicious page element from circumventing native checks.
+                if (mode=='isolated_browser' and self.driver is None and
+                        re.search(r'\b(?:click|follow|open)\b',transcript,re.I)):
+                    return finish('failed','background_link_unverified',
+                        'For safe background link navigation, specify a unique quoted link label on the configured browser.',spoken=True)
                 # A plain read-only page description does not require Terra's
                 # screenshot/model round-trip. The configured host and current
                 # session remain verified by the driver on both sides of read.

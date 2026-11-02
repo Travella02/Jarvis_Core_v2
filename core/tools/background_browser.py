@@ -7,6 +7,7 @@ Playwright is an OPTIONAL dependency, downloaded browser installed separately.
 """
 from __future__ import annotations
 from urllib.parse import urlsplit, urljoin
+from html import escape
 import re
 from .terra_navigation import WindowIdentity
 
@@ -52,11 +53,34 @@ def compact_page_observation_for_speech(observation: str, *, limit: int = 235) -
     return result[:limit].strip()
 
 
+# An entirely synthetic, offline playground. Requests never leave Chromium.
+# It is enabled only by an explicit configuration switch with this exact host.
+PLAYGROUND_HOST = 'jarvis.invalid'
+PLAYGROUND_PAGES = {
+    '/start': ('Jarvis Test Start', 'Chapter One', '/chapter-one'),
+    '/chapter-one': ('Jarvis Chapter One', 'Chapter Two', '/chapter-two'),
+    '/chapter-two': ('Jarvis Chapter Two', 'Back to Start', '/start'),
+}
+
+
+def _playground_html(path: str) -> str:
+    title, label, target = PLAYGROUND_PAGES[path]
+    return ("<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+            f"<title>{escape(title)}</title></head><body>"
+            f"<h1>{escape(title)}</h1><p>Offline, disposable Jarvis navigation test page.</p>"
+            f'<a href="{escape(target)}">{escape(label)}</a></body></html>')
+
+
 class IsolatedBrowserDriver:
     """All operations are Playwright page-local; no OS-level input injection."""
-    def __init__(self,url:str,hosts:str,*,factory=None):
+    def __init__(self,url:str,hosts:str,*,factory=None,playground:bool=False):
         if not approved_background_url(url,hosts):raise ValueError('background_url_not_approved')
         self.url=url;self.hosts=hosts;self.factory=factory
+        self.playground=playground
+        if playground and not (urlsplit(url).hostname==PLAYGROUND_HOST and
+                urlsplit(url).path=='/start' and
+                {h.strip().lower() for h in hosts.split(',') if h.strip()}=={PLAYGROUND_HOST}):
+            raise ValueError('playground_requires_exact_isolated_test_origin')
         self.pw=None;self.browser=None;self.context=None;self.page=None
         self.window=WindowIdentity(-1,'isolated-browser.exe','Isolated browser task',(0,0,1280,800))
 
@@ -68,6 +92,12 @@ class IsolatedBrowserDriver:
         try:
             self.browser=self.factory.launch(headless=True)
             self.context=self.browser.new_context(viewport={'width':1280,'height':800},accept_downloads=False)
+            # Enforce destination boundaries BEFORE navigation or redirects: no
+            # off-host resources, non-GET requests, or cross-site requests.
+            if hasattr(self.context,'route'):
+                self.context.route('**/*',self._route_request)
+            elif self.playground:
+                raise RuntimeError('playground_requires_request_interception')
             self.page=self.context.new_page()
             self.page.on('dialog',lambda dialog:dialog.dismiss())
             self.page.goto(self.url,wait_until='domcontentloaded',timeout=15000)
@@ -85,6 +115,23 @@ class IsolatedBrowserDriver:
                 except Exception:pass
                 setattr(self,thing,None)
         self.page=None
+
+    def _route_request(self, route):
+        request=route.request
+        url=request.url
+        parsed=urlsplit(url)
+        if request.method.upper() not in ('GET','HEAD') or not approved_background_url(url,self.hosts):
+            route.abort()
+            return
+        if self.playground:
+            if (parsed.hostname!=PLAYGROUND_HOST or parsed.path not in PLAYGROUND_PAGES
+                    or parsed.query or parsed.fragment or request.method.upper()!='GET'):
+                route.abort()
+                return
+            route.fulfill(status=200,content_type='text/html; charset=utf-8',
+                          body=_playground_html(parsed.path))
+            return
+        route.continue_()
 
     def resolve_safe_link(self, label: str) -> str:
         """Read-only link check: exact accessible text + safe same-host HTTPS.
@@ -108,13 +155,27 @@ class IsolatedBrowserDriver:
         self._check_origin()
         return url
 
-    def open_verified_link(self,url:str) -> None:
+    def open_verified_link(self,url:str, *, label: str | None = None) -> dict[str,str]:
+        """Navigate an independently resolved unique link; verify final URL.
+
+        A redirect, popup, changed label or unexpected destination is NOT
+        reported as success. The route guard blocks off-host network requests
+        before they leave the isolated browser.
+        """
         self._check_origin()
-        # Recheck the candidate destination immediately before navigation.
-        if urlsplit(url).hostname!=urlsplit(self.page.url).hostname or not approved_background_url(url,self.hosts):
+        previous=self.page.url
+        parsed=urlsplit(url)
+        if (parsed.hostname!=urlsplit(previous).hostname or
+                parsed.query or parsed.fragment or not approved_background_url(url,self.hosts)):
             raise ValueError('unsafe_link')
+        if label is not None and self.resolve_safe_link(label)!=url:
+            raise ValueError('link_changed')
         self.page.goto(url,wait_until='domcontentloaded',timeout=10000)
         self._check_origin()
+        if self.page.url!=url or self.page.url==previous:
+            raise RuntimeError('navigation_destination_unverified')
+        title=re.sub(r'\s+',' ',str(self.page.title() or '')).strip()[:100]
+        return {'from_url':previous,'url':self.page.url,'title':title}
 
     def read_page_summary(self, *, max_chars: int = 650) -> str:
         """Bounded read-only DOM observation; no model call or physical input."""

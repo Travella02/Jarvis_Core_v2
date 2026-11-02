@@ -1223,7 +1223,7 @@ export default function App() {
       output_modalities:['audio'],max_output_tokens:1024,tools:[],tool_choice:'none',
       instructions:wakeOnly
         ? 'The user just called you by name to wake you. Reply naturally in 1 to 5 spoken words, as a brief acknowledgment. Vary your wording. No explanations, tools, actions, preambles, or claims of external work.'
-        : 'Generate one natural conversational answer without tools. Do not claim external actions or research were performed. No action is executable in this response.'}}));
+        : 'Generate one natural conversational answer without tools. Do not claim external actions or research were performed. No action is executable in this response. For hypothetical questions about an isolated background browser, explain that a verified background link can change that isolated browser page WITHOUT focusing the users real browser or foreground window; do not assert a specific link exists or where it leads without a fresh verified Core observation, and do not take any action.'}}));
     sendControlMessage({kind:'desktop_overlap_audio',turn:latencyRef.current.turn,phase:'started',
       input_binding:committedItemId ? 'committed_audio_item' : 'typed_text',
       commit_wait_ms:latencyRef.current.speechStopped === undefined ? null : Math.round(performance.now()-latencyRef.current.speechStopped)});
@@ -1825,7 +1825,10 @@ export default function App() {
             // including if the model decision beat its STT transcription.
             overlapGateRef.current?.abort();
             overlapGateRef.current = null;
-            if (overlapCandidateIdRef.current && dcRef.current?.readyState === 'open') {
+            // A completed speculative candidate is no longer cancellable.
+            // Cancelling it races the new Core-result voice response and can
+            // report response_cancel_not_active after voice synthesis starts.
+            if (overlapCandidateIdRef.current && !overlapCandidateDoneRef.current && dcRef.current?.readyState === 'open') {
               dcRef.current.send(JSON.stringify({type:'response.cancel',response_id:overlapCandidateIdRef.current}));
               dcRef.current.send(JSON.stringify({type:'output_audio_buffer.clear'}));
             }
@@ -1861,7 +1864,10 @@ export default function App() {
           } else {
             overlapGateRef.current?.abort();
             overlapGateRef.current = null;
-            if (overlapCandidateIdRef.current && dcRef.current?.readyState === 'open') {
+            // A completed speculative candidate is no longer cancellable.
+            // Cancelling it races the new Core-result voice response and can
+            // report response_cancel_not_active after voice synthesis starts.
+            if (overlapCandidateIdRef.current && !overlapCandidateDoneRef.current && dcRef.current?.readyState === 'open') {
               dcRef.current.send(JSON.stringify({type:'response.cancel',response_id:overlapCandidateIdRef.current}));
               dcRef.current.send(JSON.stringify({type:'output_audio_buffer.clear'}));
             }
@@ -1942,6 +1948,13 @@ export default function App() {
           return;
         }
         const reason = String(event.error?.code || event.error?.message || 'provider_error');
+        // response.cancel of an already-finished speculative response can
+        // arrive AFTER Core's new speech has started. It is a harmless stale
+        // cancellation acknowledgment, not an audio synthesis failure.
+        if (reason === 'response_cancel_not_active') {
+          sendControlMessage({kind:'desktop_overlap_audio',turn,phase:'cancellation_error_ignored',reason});
+          return;
+        }
         if (!fallbackCoreLunaVoice(turn,reason) && !recoverIncompleteDirectResponse(turn,reason)) {
           // A decision-stage or transport error is distinct from an incomplete
           // authorized direct reply and still requires explicit investigation.
