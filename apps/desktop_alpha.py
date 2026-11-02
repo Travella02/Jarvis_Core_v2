@@ -594,6 +594,7 @@ class DesktopRealtimeSession:
                  'with its natural display name, even if not explicitly listed. Examples: Discord, Spotify, '
                  'File Explorer, Notepad. Do not assume an app means its website. '
                  'Core discovers installed apps locally and may report not found. '
+                 'Never launch an app merely because the user refers to an already-open window or its controls: "click File in the open Notepad" is app NAVIGATION, not a request to open Notepad. '
                  if self._universal_apps else
                  ' For an immediate user request to launch a supported desktop application '
                  '(Notepad, Calculator, File Explorer), use launch_app. Other apps are unsupported. ')
@@ -620,7 +621,7 @@ class DesktopRealtimeSession:
                 'thumbnail/visual element, select navigate_app, not launch_app. For opening or launching an app select '
                 'launch_app; it stays independent. Prefer Terra for visual navigation and multistep in-app tasks; '
                 'prefer existing browser actions for simple opening/searching. Do not select a different app than the requested target. Do not route hypothetical '
-                'questions or negated instructions to navigation. An explicit request to inspect the ISOLATED BACKGROUND BROWSER is ALWAYS navigate_app, never browser_action: browser_action controls the user browser and cannot inspect the private headless session. The background browser is configured by Core; do not supply a new URL, website search, or app launch. Never claim completion before Core reports it.')
+                'questions or negated instructions to navigation. An explicit request to inspect the ISOLATED BACKGROUND BROWSER is ALWAYS navigate_app, never browser_action: browser_action controls the user browser and cannot inspect the private headless session. For a specifically requested named link inside that isolated browser, choose navigate_app (Core may use a verified browser-native navigation route when enabled). The background browser is configured by Core; do not supply a new URL, website search, or app launch. Never claim completion before Core reports it.')
 
         print(f"[Jarvis A/B Start] model={self.config.model} | reasoning={self.config.reasoning_effort} | "
               f"mode={'overlap_probe' if overlap_probe else ('buffered_tool_probe' if buffered_probe else ('tool_probe_text_only' if tool_probe else ('direct_no_gate_tools_disabled' if direct_only else 'safe_routed')))} | "
@@ -1046,6 +1047,9 @@ class DesktopRealtimeSession:
 
     async def shutdown(self) -> None:
         await self.stop()
+        if self._terra_navigator is not None:
+            with suppress(Exception):
+                await asyncio.to_thread(self._terra_navigator.close)
         if self._managed_browser_engine is not None:
             with suppress(Exception):
                 await self._managed_browser_engine.close()

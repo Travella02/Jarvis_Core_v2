@@ -31,6 +31,16 @@ APP_CATALOG = {
     'file_explorer': ('File Explorer', 'explorer.exe', (r'\bfile\s+explorer\b', r'\bwindows\s+explorer\b')),
 }
 _ACTION = re.compile(r'\b(?:open|launch|start|bring\s+up|pull\s+up|fire\s+up|show\s+me|run)\b', re.I)
+# The model sometimes mistakes an adjective describing an ALREADY OPEN app
+# for a request to launch it. Deny the model-selected launch if another
+# interaction verb precedes its first alleged launch verb. This is a Core veto,
+# never a word-based action router. Ordinary polite launch requests still work.
+_IN_APP_BEFORE_LAUNCH = re.compile(
+    r'\b(?:click|tap|press|select|scroll|pause|resume|play|type|write|edit|close|'
+    r'navigate|inspect|interact|control|move|drag|hover|choose|hit)\b', re.I)
+_ALREADY_OPEN_CONTEXT = re.compile(
+    r'\b(?:already|currently)\s+open\b|\b(?:open|existing)\s+(?:window|instance)\b|'
+    r'\b(?:in|inside|within|on|of)\s+(?:the\s+|an?\s+|my\s+)?(?:already\s+)?open\s+', re.I)
 _MULTI = re.compile(r'\b(?:and\s+then|then\s+(?:open|launch|start|close)|and\s+(?:open|launch|start|close|delete|send|email|search|download))\b', re.I)
 _QUOTED = re.compile(r'["“”]|\b(?:quote|quoted|hypothetical|imagine|pretend|example|if\s+you|if\s+i)\b', re.I)
 _EXPLICIT_WEB = re.compile(r'\b(?:web\s*site|website|web\s*page|url|link|in\s+(?:the\s+)?browser|in\s+(?:chrome|edge|firefox)|online)\b', re.I)
@@ -43,6 +53,11 @@ def _authorized_app(text: object, app: InstalledApp, candidates: list[InstalledA
         return False
     clean = ' '.join(text.split())
     verb = _ACTION.search(clean)
+    # Do not launch an app because the user described an existing window:
+    # "click File in the open Notepad" has an adjective 'open', not a command.
+    if (verb and (_IN_APP_BEFORE_LAUNCH.search(clean[:verb.start()]) or
+                  _ALREADY_OPEN_CONTEXT.search(clean))):
+        return False
     if (not verb or _NEGATED.search(clean) or _NON_REQUEST.search(clean)
             or _SECOND_ACTION.search(clean) or _MULTI.search(clean)
             or _QUOTED.search(clean) or _EXPLICIT_WEB.search(clean)

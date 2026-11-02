@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+import threading
 import io
 import os
 import re
@@ -91,6 +94,27 @@ def confirmed_isolated_browser_inspection(text: str, domain: str) -> bool:
     if 'http://' in words or 'https://' in words or ';' in words:
         return False
     return True
+
+
+def confirmed_isolated_link_selection(text: str, domain: str) -> str | None:
+    """Strict independent authorization for a quoted *link label*.
+
+    Deliberately requires quotes, unambiguous scope and no compound commands.
+    This is NOT a natural-language shortcut for arbitrary visual clicks.
+    """
+    if not _explicit_live_request(text) or not isinstance(domain,str) or not domain:
+        return None
+    words=' '.join(text.casefold().split())
+    words=re.sub(r'^(?:(?:hey|okay|ok)\s+)?jarvis[,:! ]*','',words).strip()
+    match=re.fullmatch(
+        r'(?:please\s+)?(?:click|open|follow)\s+(?:the\s+)?(?:link\s+)?["\']([^"\']{2,65})["\']\s+(?:link\s+)?(?:in|on)\s+(?:the\s+)?(?:isolated\s+)?background\s+browser(?:\s+at\s+([a-z0-9.-]+))?\.?',
+        words)
+    if not match or (match.group(2) and match.group(2).rstrip('.')!=domain.lower()):
+        return None
+    label=match.group(1).strip()
+    if not label or any(c in label for c in '/:?#@;'):
+        return None
+    return label
 
 
 def _allowed_processes(env: dict[str, str]) -> set[str]:
@@ -296,6 +320,82 @@ class TerraNavigator:
         self.driver = driver
         self.client = client
         self.clock = clock
+        # Playwright sync objects MUST stay on their creating thread. All
+        # isolated-browser requests are serialized on this one private worker.
+        self._background_worker = None
+        self._background_driver = None
+        self._background_thread = None
+        self._background_last_use = 0.0
+        self._background_uses = 0
+        self._background_lock = threading.Lock()
+
+    async def run_async(self, transcript: str, *, cancelled: Callable[[], bool] = lambda: False,
+                        read_only: bool = False) -> NavigationResult:
+        """Run isolated tasks on a dedicated worker; preserve thread ownership."""
+        if self.env.get('JARVIS_TERRA_NAV_MODE', 'foreground').strip().lower() != 'isolated_browser' or self.driver is not None:
+            return await asyncio.to_thread(self.run, transcript, cancelled=cancelled, read_only=read_only)
+        with self._background_lock:
+            if self._background_worker is None:
+                self._background_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='jarvis-isolated-browser')
+            executor = self._background_worker
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(executor,
+            lambda: self.run(transcript, cancelled=cancelled, read_only=read_only))
+
+    def close(self) -> None:
+        """Close the in-memory browser on its owning worker thread."""
+        with self._background_lock:
+            executor=self._background_worker
+            self._background_worker=None
+        if executor is not None:
+            try:executor.submit(self._close_background_driver).result(timeout=8)
+            finally:executor.shutdown(wait=False, cancel_futures=True)
+        elif self._background_driver is not None:
+            if self._background_thread != threading.get_ident():
+                raise RuntimeError('background browser must be closed on its owning thread')
+            self._close_background_driver()
+
+    def _close_background_driver(self):
+        driver=self._background_driver
+        self._background_driver=None
+        self._background_thread=None
+        self._background_uses=0
+        if driver is not None:
+            driver.__exit__(None,None,None)
+
+    @contextmanager
+    def _background_context(self):
+        # Does NOT persist browser state to disk or share a real browser profile.
+        from core.tools.background_browser import IsolatedBrowserDriver
+        if self._background_driver is not None and self._background_thread != threading.get_ident():
+            raise RuntimeError('background_thread_mismatch')
+        now=self.clock()
+        max_idle=min(300.,max(1.,float(self.env.get('JARVIS_TERRA_BACKGROUND_IDLE_TTL','120'))))
+        max_tasks=20
+        if (self._background_driver is not None and
+                (now-self._background_last_use>max_idle or self._background_uses>=max_tasks)):
+            self._close_background_driver()
+        if self._background_driver is None:
+            driver=IsolatedBrowserDriver(self.env.get('JARVIS_TERRA_BACKGROUND_URL',''),
+                self.env.get('JARVIS_TERRA_BACKGROUND_HOSTS',''))
+            driver.__enter__()
+            self._background_driver=driver
+            self._background_thread=threading.get_ident()
+            self._background_uses=0
+            print('[Jarvis Background Session] state=created | storage=in_memory',flush=True)
+        else:
+            # Detect unexpected redirects/popups; do not silently reset after an
+            # origin violation (which could hide a dangerous browser transition).
+            self._background_driver.identity()
+            print('[Jarvis Background Session] state=reused | storage=in_memory',flush=True)
+        try:
+            yield self._background_driver
+        except Exception:
+            self._close_background_driver()
+            raise
+        finally:
+            self._background_uses+=1
+            self._background_last_use=self.clock()
 
     def _client(self):
         if self.client is not None:
@@ -335,7 +435,7 @@ class TerraNavigator:
             # Explicit scope boundary, NOT an action-phrase shortcut.
             if not domain or not ('background browser' in spoken or domain in spoken):
                 return finish('failed','background_target_unverified',
-                    'Please explicitly refer to the background browser or its configured domain.')
+                    'Jarvis is in isolated browser mode, so I cannot control your foreground app. Ask about the configured background browser instead.')
         # Read-only recovery cannot inherit the user's execution/typing opt-ins.
         execute=_is_enabled(self.env,'JARVIS_TERRA_NAV_EXECUTE') and not read_only
         allow_typing=_is_enabled(self.env,'JARVIS_TERRA_NAV_ALLOW_TYPING') and not read_only
@@ -344,13 +444,10 @@ class TerraNavigator:
                 'Foreground mouse and keyboard control requires a separate explicit opt-in.')
         try:
             if self.driver is not None: context=nullcontext(self.driver)
-            elif mode=='isolated_browser':
-                from core.tools.background_browser import IsolatedBrowserDriver
-                context=IsolatedBrowserDriver(self.env.get('JARVIS_TERRA_BACKGROUND_URL',''),
-                                              self.env.get('JARVIS_TERRA_BACKGROUND_HOSTS',''))
+            elif mode=='isolated_browser':context=self._background_context()
             else:context=nullcontext(WindowsForegroundDriver())
+            t=time.perf_counter()
             with context as driver:
-                t=time.perf_counter()
                 original=driver.identity()
                 metrics['setup_ms']+=(time.perf_counter()-t)*1000
                 if mode=='foreground':
@@ -360,6 +457,44 @@ class TerraNavigator:
                         'Foreground computer control is blocked to protect the active activity.')
                     if original.process not in _allowed_processes(self.env) or not original.title.strip():
                         return finish('failed','app_not_allowed','That app is not approved for Terra navigation.')
+                # Explicitly quoted, uniquely resolved SAME-ORIGIN links can
+                # use browser-native navigation only with a separate opt-in.
+                # Never use this for buttons, unlabeled elements, or arbitrary
+                # websites, and never override read-only mode.
+                if mode=='isolated_browser' and self.driver is None:
+                    label=confirmed_isolated_link_selection(transcript,domain)
+                    if label is not None and _is_enabled(self.env,'JARVIS_TERRA_BACKGROUND_DIRECT_LINKS'):
+                        if not execute:
+                            return finish('failed','preview_only',
+                                'The background link can be checked, but execution is disabled.',spoken=True)
+                        t=time.perf_counter()
+                        try: destination=driver.resolve_safe_link(label)
+                        except ValueError:
+                            return finish('failed','background_link_unverified',
+                                'I could not identify one safe, matching link on that background page.',spoken=True)
+                        metrics['verify_ms']+=(time.perf_counter()-t)*1000
+                        if cancelled():return finish('failed','cancelled_or_timeout','Navigation stopped.')
+                        t=time.perf_counter()
+                        try:driver.open_verified_link(destination)
+                        except Exception as exc:
+                            return finish('failed','background_navigation_unverified',
+                                'The isolated browser could not verify that navigation completed.',spoken=True)
+                        finally:metrics['action_ms']+=(time.perf_counter()-t)*1000
+                        count+=1
+                        return finish('completed','background_link_navigated',
+                            'Opened the verified link inside the isolated browser.',spoken=False)
+                # A plain read-only page description does not require Terra's
+                # screenshot/model round-trip. The configured host and current
+                # session remain verified by the driver on both sides of read.
+                if (mode=='isolated_browser' and self.driver is None and
+                        _is_enabled({'JARVIS_TERRA_BACKGROUND_NATIVE_INSPECT':self.env.get('JARVIS_TERRA_BACKGROUND_NATIVE_INSPECT','1')},'JARVIS_TERRA_BACKGROUND_NATIVE_INSPECT') and
+                        confirmed_isolated_browser_inspection(transcript,domain)):
+                    t=time.perf_counter()
+                    description=driver.read_page_summary()
+                    metrics['snapshot_ms']+=(time.perf_counter()-t)*1000
+                    from .background_browser import compact_page_observation_for_speech
+                    spoken_summary=compact_page_observation_for_speech(description)
+                    return finish('completed','observed_only',spoken_summary,spoken=True)
                 t=time.perf_counter(); screenshot=driver.screenshot(original)
                 metrics['snapshot_ms']+=(time.perf_counter()-t)*1000
                 if len(screenshot)>12_000_000:

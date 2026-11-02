@@ -57,8 +57,12 @@ class ManagedDesktopBrowserSession:
             domain = (urlsplit(nav_env.get('JARVIS_TERRA_BACKGROUND_URL','')).hostname or '').lower()
             if mode == 'isolated_browser' and confirmed_isolated_browser_inspection(transcript,domain):
                 print(f'[Jarvis Terra Route] turn={turn} | proposed=browser_action | resolved=navigate_app | read_only=True | evidence=current_turn',flush=True)
-                output = await asyncio.to_thread(self._terra_navigator.run,transcript,
-                    cancelled=lambda: self.active_turn != turn, read_only=True)
+                if callable(getattr(self._terra_navigator, 'run_async', None)):
+                    output = await self._terra_navigator.run_async(transcript,
+                        cancelled=lambda: self.active_turn != turn, read_only=True)
+                else:
+                    output = await asyncio.to_thread(self._terra_navigator.run,transcript,
+                        cancelled=lambda: self.active_turn != turn, read_only=True)
                 print(f'[Jarvis Terra] turn={turn} | status={output.status} | code={output.code} | actions={output.actions} | authority=core',flush=True)
                 return ManagedBrowserOutcome(output.status,output.message,output.code,None,output.spoken)
         if selected_tool == 'navigate_app':
@@ -71,8 +75,12 @@ class ManagedDesktopBrowserSession:
                 return ManagedBrowserOutcome('failed','I could not verify that computer navigation request.','missing_independent_user_evidence')
             if self._terra_navigator is None:
                 return ManagedBrowserOutcome('failed','Computer navigation is not enabled.','terra_disabled')
-            output = await asyncio.to_thread(self._terra_navigator.run, transcript,
-                cancelled=lambda: self.active_turn != turn)
+            if callable(getattr(self._terra_navigator, 'run_async', None)):
+                output = await self._terra_navigator.run_async(transcript,
+                    cancelled=lambda: self.active_turn != turn)
+            else:
+                output = await asyncio.to_thread(self._terra_navigator.run, transcript,
+                    cancelled=lambda: self.active_turn != turn)
             print(f'[Jarvis Terra] turn={turn} | status={output.status} | code={output.code} | actions={output.actions} | authority=core',flush=True)
             return ManagedBrowserOutcome(output.status, output.message, output.code,
                 {'category':'desktop','intent':'navigate'} if output.status=='completed' and output.actions else None,
